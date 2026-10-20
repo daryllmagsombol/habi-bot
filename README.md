@@ -29,7 +29,7 @@ The foundation is a tooling-only exception to the P0 sequence. **H-009 remains o
 - Shared `@habi/contracts` and `@habi/config` packages. The contract is type-only; the compiled runtime module is intentionally empty.
 - A local-only PostgreSQL 18 Compose service with loopback binding, a healthcheck, resource caps, and a named volume.
 - Smoke tests for the API health response, invalid API configuration, worker lifecycle and inertness, and the honest web page.
-- GitHub Actions foundation verification, read-only OpenCode review automation, and focused SonarQube workflow checks. The SonarQube scan is optional and configuration-gated.
+- GitHub Actions foundation verification, OpenCode review helper/security checks, and focused SonarQube workflow checks. The hardened OpenCode review lane is in progress; no live model comment or pass is claimed. The SonarQube scan is optional and configuration-gated.
 
 ### Not implemented
 
@@ -112,7 +112,9 @@ pnpm test:verification
 ## Automation and agent guidance
 
 - [CI workflow](.github/workflows/ci.yml) runs `pnpm verify:foundation`, `node --test .github/scripts/review.test.mjs`, and `node --test scripts/ci/sonarqube.test.mjs`.
-- [OpenCode pull-request review](docs/ci/opencode-review.md) is read-only and informational. It loads only its three trusted base prompts; it does not load `AGENTS.md`, native skills, or the Sonar guidelines automatically. Editing guidance does not change review policy; trusted prompt changes require a separately reviewed manual update.
+- [OpenCode pull-request review](docs/ci/opencode-review.md) is informational and cannot edit the repository or review policy. Hardening is in progress; no live model comment or pass is claimed. The approved mode is keyless only: no `OPENCODE_API_KEY` or provider token is required.
+- The review runtime receives public diff input only, has no GitHub/provider token, host mounts, or PR checkout, and permits read/bash only inside its contained runtime while denying all other tool permissions; "read-only" is a repository/output boundary, not a strict no-tools environment. Tool-use output is not accepted as review evidence. A separate publisher owns limited GitHub comment access; share is off, one free model is fixed, and there is no paid fallback. Details and current pins live in the operations doc.
+- It loads only its three trusted base prompts; it does not load `AGENTS.md`, native skills, or the Sonar guidelines automatically. Editing guidance does not change review policy; trusted prompt changes require a separately reviewed manual update. The CI review container is not product Bot capability; the POC no-shell/no-browser boundary is unchanged.
 - [SonarQube operations](docs/ci/sonarqube.md) cover the optional self-hosted scan, variables, TLS/certificate handling, and configuration-gated behavior. The workflow uses the standalone analyzer config `tsconfig.sonar.json`. Missing configuration skips; configured results may pass or fail. No live SonarQube result, LCOV coverage, or numeric server-gate mandate is claimed.
 - [SonarQube engineering guidelines](docs/SONAR_GUIDELINES.md) are pragmatic repository guidance, not a server quality profile.
 - [AGENTS.md](AGENTS.md) contains the project-specific agent instructions.

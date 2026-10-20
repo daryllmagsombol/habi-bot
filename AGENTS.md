@@ -30,7 +30,9 @@ This is a project-specific supplement to the global agent contract. Read it befo
 ## CI, review, and Sonar boundaries
 
 - Current CI runs `pnpm verify:foundation` and both focused files: `.github/scripts/review.test.mjs` and `scripts/ci/sonarqube.test.mjs`.
-- OpenCode loads only its three trusted base prompts (`.github/review/system.md`, `security.md`, `bugs.md`). It does not load `AGENTS.md`, native skills, or `docs/SONAR_GUIDELINES.md` automatically. Changing guidance does not change review policy; propagate rules with a separately reviewed manual prompt update. The review job remains read-only.
+- OpenCode review output is informational and cannot edit the repository or review policy. The hardened review lane is in progress; do not claim a live model comment or pass. The approved mode is keyless only and does not reference `OPENCODE_API_KEY` or require a provider token. A separate publisher owns limited GitHub comment access outside the review container.
+- The contained review runtime receives no GitHub or provider token and permits read/bash only inside the container; all other tool permissions are denied. "Read-only" is an output/repository boundary, not a strict no-tools environment; tool-use output is not review evidence. The CI review runtime is not product Bot capability; the POC no-shell/no-browser boundary is unchanged. Implementation, bootstrap pins, and runtime controls live in [the operations doc](docs/ci/opencode-review.md).
+- OpenCode loads only its three trusted base prompts (`.github/review/system.md`, `security.md`, `bugs.md`). It does not load `AGENTS.md`, native skills, or `docs/SONAR_GUIDELINES.md` automatically. Changing guidance does not change review policy; propagate rules with a separately reviewed manual prompt update.
 - SonarQube is an optional, self-hosted, configuration-gated lane. No live pass is known. Missing configuration skips; configured scans can pass or fail. No LCOV, arbitrary numeric server-gate thresholds, fake coverage, or blanket exclusions.
 - Operational Sonar details live in `docs/ci/sonarqube.md`, `sonar-project.properties`, `tsconfig.sonar.json`, and `.github/workflows/sonarqube.yml`. Use [the guidelines](docs/SONAR_GUIDELINES.md) for engineering rules, not as a server quality profile.
 
@@ -39,4 +41,4 @@ This is a project-specific supplement to the global agent contract. Read it befo
 - Backend-enforced ownership and cross-user/conversation isolation are mandatory. Bot Markdown and uploads are untrusted and never grant capability. Effective capability is the intersection of user identity, Bot allow-list, and selected conversation context.
 - Keep secrets server-side. Do not add silent paid-provider fallback or POC shell/browser/unrelated-tool capability.
 - Fix findings by reproducing the issue, reading evidence, making the smallest safe change, and verifying. Do not suppress findings or exclude code just to pass.
-- Only validated, reproducible findings can become Sonar guidance. AI review findings are not authority; a read-only reviewer cannot edit policy. A human validates rule changes.
+- Only validated, reproducible findings can become Sonar guidance. AI review findings are not authority; reviewer output cannot edit policy. A human validates rule changes.

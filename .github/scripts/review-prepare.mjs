@@ -26,6 +26,9 @@ const TRUSTED_HELPERS = [
   "review-prepare.mjs",
   "review-model.mjs",
   "review-publish.mjs",
+  "review-container.mjs",
+  "review-container-entry.mjs",
+  "review-network.mjs",
 ]
 const MAX_FILE_PAGES = 30
 const PROMPT_RESERVE_BYTES = 800

@@ -4,7 +4,6 @@ import { fileURLToPath } from "node:url"
 import path from "node:path"
 
 export const MODEL = "opencode/deepseek-v4.1-flash-free"
-export const PROVIDER = "opencode"
 export const REVIEW_MARKER = "<!-- habi-opencode-review:v1 -->"
 export const INPUT_LIMIT_BYTES = 120_000
 export const OUTPUT_LIMIT_BYTES = 24_000
@@ -69,82 +68,6 @@ export function validateIdentity(expected, actual, label = "artifact") {
   if (Number(actual.pr) !== Number(expected.pr)) fail("identity-mismatch")
   if (String(actual.baseSha).toLowerCase() !== String(expected.baseSha).toLowerCase()) fail("identity-mismatch")
   if (String(actual.headSha).toLowerCase() !== String(expected.headSha).toLowerCase()) fail("identity-mismatch")
-}
-
-export function buildOpenCodeConfig() {
-  const model = MODEL
-  return {
-    $schema: "https://opencode.ai/config.json",
-    model,
-    small_model: model,
-    default_agent: "review",
-    enabled_providers: [PROVIDER],
-    share: "disabled",
-    autoupdate: false,
-    snapshot: false,
-    formatter: false,
-    lsp: false,
-    plugin: [],
-    instructions: [],
-    skills: { paths: [], urls: [] },
-    permission: "deny",
-    compaction: { auto: false, prune: false },
-    agent: {
-      review: {
-        mode: "primary",
-        model,
-        permission: "deny",
-        steps: 1,
-        description: "Read-only pull request review",
-      },
-      title: { disable: true },
-      summary: { disable: true },
-      compaction: { disable: true },
-    },
-  }
-}
-
-export function buildCliEnv({ home, workDir, apiKey } = {}) {
-  if (typeof home !== "string" || home.length === 0) fail("temp-missing")
-  if (typeof workDir !== "string" || workDir.length === 0) fail("temp-missing")
-
-  const env = {
-    PATH: "/usr/local/bin:/usr/bin:/bin",
-    HOME: home,
-    XDG_CONFIG_HOME: path.join(home, ".config"),
-    XDG_DATA_HOME: path.join(home, ".local", "share"),
-    XDG_CACHE_HOME: path.join(home, ".cache"),
-    XDG_STATE_HOME: path.join(home, ".local", "state"),
-    TMPDIR: path.join(home, "tmp"),
-    CI: "1",
-    NO_COLOR: "1",
-    LANG: "C.UTF-8",
-    OPENCODE_DISABLE_PROJECT_CONFIG: "1",
-    OPENCODE_PURE: "1",
-    OPENCODE_DISABLE_DEFAULT_PLUGINS: "1",
-    OPENCODE_DISABLE_EXTERNAL_SKILLS: "1",
-    OPENCODE_DISABLE_CLAUDE_CODE: "1",
-    OPENCODE_DISABLE_AUTOUPDATE: "1",
-    OPENCODE_DISABLE_AUTOCOMPACT: "1",
-    OPENCODE_DISABLE_PRUNE: "1",
-    OPENCODE_DISABLE_LSP_DOWNLOAD: "1",
-    OPENCODE_PERMISSION: JSON.stringify({ "*": "deny" }),
-    OPENCODE_CONFIG_CONTENT: JSON.stringify(buildOpenCodeConfig()),
-  }
-
-  if (typeof apiKey === "string" && apiKey.length > 0) {
-    env.OPENCODE_API_KEY = apiKey
-  }
-
-  for (const key of Object.keys(env)) {
-    if (/^(GITHUB|ACTIONS)_/.test(key) || key === "ACTIONS_RUNTIME_TOKEN") fail("env-invalid")
-  }
-
-  return env
-}
-
-export function buildCliArgs(workDir) {
-  return ["run", "--dir", workDir, "--agent", "review", "--model", MODEL, "--title", "PR review", "--format", "json"]
 }
 
 export function truncateUtf8(value, limitBytes) {
@@ -214,19 +137,6 @@ export function classifyProviderError(error) {
   if (statuses.includes(429) || /too many requests|rate limit/.test(text)) return "provider-rate-limited"
   if (
     statuses.some((status) => [502, 503, 504, 529].includes(status)) ||
-    /quota|usage limit|model .*unavailable|provider .*unavailable|no available model|overloaded|temporarily unavailable|service unavailable/.test(
-      text,
-    )
-  ) {
-    return "provider-unavailable"
-  }
-  return null
-}
-
-export function classifyProviderText(value) {
-  const text = String(value ?? "").slice(0, 8_000).toLowerCase()
-  if (/(^|[^0-9])429([^0-9]|$)|too many requests|rate limit/.test(text)) return "provider-rate-limited"
-  if (
     /quota|usage limit|model .*unavailable|provider .*unavailable|no available model|overloaded|temporarily unavailable|service unavailable/.test(
       text,
     )

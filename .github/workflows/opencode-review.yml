@@ -93,6 +93,9 @@ jobs:
             '.github/scripts/review-prepare.mjs',
             '.github/scripts/review-model.mjs',
             '.github/scripts/review-publish.mjs',
+            '.github/scripts/review-container.mjs',
+            '.github/scripts/review-container-entry.mjs',
+            '.github/scripts/review-network.mjs',
           ];
           const workspace = process.env.WORKSPACE ?? '';
           const baseSha = process.env.BASE_SHA ?? '';
@@ -173,6 +176,9 @@ jobs:
             .github/scripts/review-prepare.mjs \
             .github/scripts/review-model.mjs \
             .github/scripts/review-publish.mjs \
+            .github/scripts/review-container.mjs \
+            .github/scripts/review-container-entry.mjs \
+            .github/scripts/review-network.mjs \
             .github/review/system.md \
             .github/review/security.md \
             .github/review/bugs.md; do
@@ -262,6 +268,29 @@ jobs:
           name: review-input
           path: ${{ runner.temp }}/review-input
 
+      - name: Verify container isolation prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$(uname -s)" != "Linux" ]; then
+            echo "::error::The contained review runtime requires Linux."
+            exit 1
+          fi
+          for tool in docker iptables sudo; do
+            if ! command -v "$tool" > /dev/null 2>&1; then
+              echo "::error::Missing required isolation tool: $tool"
+              exit 1
+            fi
+          done
+          if ! docker info > /dev/null 2>&1; then
+            echo "::error::The Docker daemon is unavailable to the review job."
+            exit 1
+          fi
+          if ! sudo -n true > /dev/null 2>&1; then
+            echo "::error::Passwordless sudo is required for the iptables isolation policy."
+            exit 1
+          fi
+
       - name: Download and verify OpenCode CLI
         env:
           OPENCODE_URL: https://github.com/anomalyco/opencode/releases/download/v1.19.3/opencode-linux-x64.tar.gz
@@ -283,7 +312,6 @@ jobs:
 
       - name: Run OpenCode review
         env:
-          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
           REVIEW_REPO: ${{ github.repository }}
           REVIEW_PR: ${{ github.event.pull_request.number }}
           REVIEW_BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -293,7 +321,6 @@ jobs:
           node "$RUNNER_TEMP/review-input/trusted/review-model.mjs" \
             --input "$RUNNER_TEMP/review-input/input.json" \
             --prompt "$RUNNER_TEMP/review-input/prompt.txt" \
-            --work "$RUNNER_TEMP/opencode-work" \
             --cli "$RUNNER_TEMP/opencode-bin/opencode" \
             --outcome "$RUNNER_TEMP/review-outcome/outcome.json"
 

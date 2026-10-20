@@ -30,7 +30,7 @@ Inspiration: [TransformLit AGENTS.md](https://github.com/daryllmagsombol/transfo
 4. Record a guideline only after a human validates that the finding is real, reproducible, and generalizable.
 5. Keep any justified exclusion narrow and documented with its reason. No blanket quality-gate exclusions.
 
-AI review findings are not authority. The OpenCode reviewer is read-only and cannot edit prompts, guidelines, workflow policy, or repository settings. A human decides whether a finding changes policy.
+AI review findings are not authority. The OpenCode review output cannot edit prompts, guidelines, workflow policy, or repository settings. Its contained runtime permits read/bash inside the container with all other tool permissions denied, so "read-only" is an output/repository boundary, not a strict no-tools environment; tool-use output is not review evidence. A human decides whether a finding changes policy.
 
 ## TypeScript and JavaScript
 
@@ -129,7 +129,7 @@ try {
 
 - The Sonar workflow is configuration-gated and uses a standalone analyzer TypeScript config. It does not install dependencies or run package lifecycle scripts with `SONAR_TOKEN`.
 - Current CI runs `pnpm verify:foundation` and both focused suites: `.github/scripts/review.test.mjs` and `scripts/ci/sonarqube.test.mjs`.
-- OpenCode review loads only its three trusted base prompts from `.github/review/`. It does not load this file, `AGENTS.md`, or native skills automatically. Future rule propagation requires a separately reviewed manual prompt update; the review workflow remains read-only.
+- OpenCode review loads only its three trusted base prompts from `.github/review/`. It does not load this file, `AGENTS.md`, or native skills automatically. Future rule propagation requires a separately reviewed manual prompt update. The approved mode is keyless and requires no provider secret. Hardening is in progress; no live model comment or pass is claimed. The contained runtime is not a strict no-tools environment, but its output cannot edit repository policy. The CI review container is not product capability; the POC no-shell/no-browser boundary is unchanged. Operational details and current pins live in `docs/ci/opencode-review.md`.
 - `pnpm typecheck` uses the application workspace configs. `tsconfig.sonar.json` is analysis-only and may have less type precision when third-party packages are not installed.
 
 ## Review checklist

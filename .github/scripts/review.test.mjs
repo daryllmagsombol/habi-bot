@@ -4,7 +4,7 @@ import fs from "node:fs"
 import { spawnSync } from "node:child_process"
 import os from "node:os"
 import path from "node:path"
-import { fileURLToPath } from "node:url"
+import { fileURLToPath, pathToFileURL } from "node:url"
 import {
   GITHUB_ACTIONS_BOT_ID,
   GITHUB_ACTIONS_BOT_LOGIN,
@@ -12,11 +12,7 @@ import {
   MODEL,
   OUTPUT_TRUNCATION_NOTICE,
   REVIEW_MARKER,
-  buildCliArgs,
-  buildCliEnv,
-  buildOpenCodeConfig,
   classifyProviderError,
-  classifyProviderText,
   escapeMentions,
   findBotComment,
   parseOpenCodeJsonl,
@@ -29,21 +25,28 @@ import {
 import { buildPrompt, fetchFiles, loadTrustedPrompts, prepareReview } from "./review-prepare.mjs"
 import { runReview } from "./review-model.mjs"
 import { publishOutcome } from "./review-publish.mjs"
+import { ContainerFailure, buildContainedConfig } from "./review-container.mjs"
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..")
 const REPO = "daryllmagsombol/habi-bot"
 const BASE = "a".repeat(40)
 const HEAD = "b".repeat(40)
-const APPROVED_BOOTSTRAP = "17b90acd17bc70c212043e9c3cc4e09ab29b8a6b"
+const PINNED_SOURCE = "0123456789abcdef0123456789abcdef01234567"
 const ABSENT_HEAD = "c".repeat(40)
+const TRUSTED_HELPERS = [
+  "review-lib.mjs",
+  "review-prepare.mjs",
+  "review-model.mjs",
+  "review-publish.mjs",
+  "review-container.mjs",
+  "review-container-entry.mjs",
+  "review-network.mjs",
+]
 const TRUSTED_ASSET_PATHS = [
   ".github/review/system.md",
   ".github/review/security.md",
   ".github/review/bugs.md",
-  ".github/scripts/review-lib.mjs",
-  ".github/scripts/review-prepare.mjs",
-  ".github/scripts/review-model.mjs",
-  ".github/scripts/review-publish.mjs",
+  ...TRUSTED_HELPERS.map((helper) => `.github/scripts/${helper}`),
 ]
 const OPENCODE_WORKFLOW = fs.readFileSync(
   path.join(REPO_ROOT, ".github/workflows/opencode-review.yml"),
@@ -84,7 +87,7 @@ function baseFixture(prompts = REAL_PROMPTS) {
   for (const [name, content] of Object.entries(prompts)) {
     writeFile(path.join(root, ".github", "review", `${name}.md`), content)
   }
-  for (const helper of ["review-lib.mjs", "review-prepare.mjs", "review-model.mjs", "review-publish.mjs"]) {
+  for (const helper of TRUSTED_HELPERS) {
     writeFile(path.join(root, ".github", "scripts", helper), `// fixture ${helper}\n`)
   }
   return root
@@ -174,7 +177,6 @@ function modelFixture({ input = inputFixture(), prompt = PROMPT } = {}) {
     inputPath,
     promptPath,
     outcomePath: path.join(root, "outcome.json"),
-    workPath: path.join(root, "work"),
   }
 }
 
@@ -199,10 +201,17 @@ function bootstrapSelectorScript() {
   return workflowStepScript("Select trusted review source")
 }
 
-function runBootstrapSelector({ baseAssets = false, bootstrapSha = "", baseSha = BASE, headSha = HEAD } = {}) {
+function runBootstrapSelector({
+  baseAssets = false,
+  bootstrapSha = "",
+  baseSha = BASE,
+  headSha = HEAD,
+  omitAsset,
+} = {}) {
   const root = tempDir("habi-review-bootstrap-")
   if (baseAssets) {
     for (const relative of TRUSTED_ASSET_PATHS) {
+      if (relative === omitAsset) continue
       writeFile(path.join(root, "base", relative), `// fixture ${relative}\n`)
     }
   }
@@ -246,8 +255,9 @@ function spawnResult({ status = 0, stdout = "", stderr = "", error } = {}) {
   return { status, stdout, stderr, error }
 }
 
-test("pinned config is read-only, single-model, and fully denied", () => {
-  const config = buildOpenCodeConfig()
+test("contained config is keyless, single-model, and limits tools to the container", () => {
+  const config = buildContainedConfig()
+  const permission = { "*": "deny", read: "allow", bash: "allow" }
   assert.equal(config.model, MODEL)
   assert.equal(config.small_model, MODEL)
   assert.equal(config.default_agent, "review")
@@ -260,54 +270,20 @@ test("pinned config is read-only, single-model, and fully denied", () => {
   assert.deepEqual(config.plugin, [])
   assert.deepEqual(config.instructions, [])
   assert.deepEqual(config.skills, { paths: [], urls: [] })
-  assert.equal(config.permission, "deny")
+  assert.deepEqual(config.permission, permission)
   assert.deepEqual(config.compaction, { auto: false, prune: false })
   assert.deepEqual(config.agent.review, {
     mode: "primary",
     model: MODEL,
-    permission: "deny",
+    permission,
     steps: 1,
     description: "Read-only pull request review",
   })
   assert.deepEqual(config.agent.title, { disable: true })
   assert.deepEqual(config.agent.summary, { disable: true })
   assert.deepEqual(config.agent.compaction, { disable: true })
-})
-
-test("CLI environment is allowlisted with and without a provider key", () => {
-  const home = tempDir("habi-review-home-")
-  const workDir = tempDir("habi-review-work-")
-  const prior = {
-    GITHUB_TOKEN: process.env.GITHUB_TOKEN,
-    GITHUB_ACTIONS: process.env.GITHUB_ACTIONS,
-    ACTIONS_RUNTIME_TOKEN: process.env.ACTIONS_RUNTIME_TOKEN,
-  }
-  process.env.GITHUB_TOKEN = "ghs_test"
-  process.env.GITHUB_ACTIONS = "true"
-  process.env.ACTIONS_RUNTIME_TOKEN = "runtime"
-
-  try {
-    const env = buildCliEnv({ home, workDir })
-    assert.equal(env.PATH, "/usr/local/bin:/usr/bin:/bin")
-    assert.equal(env.HOME, home)
-    assert.equal(env.OPENCODE_API_KEY, undefined)
-    for (const key of ["XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "TMPDIR"]) {
-      assert.ok(env[key].startsWith(home))
-    }
-    assert.equal(Object.keys(env).some((key) => /^(GITHUB|ACTIONS)_/.test(key)), false)
-    const config = JSON.parse(env.OPENCODE_CONFIG_CONTENT)
-    assert.equal(config.model, MODEL)
-    assert.equal(config.permission, "deny")
-    assert.equal(JSON.parse(env.OPENCODE_PERMISSION)["*"], "deny")
-
-    const withKey = buildCliEnv({ home, workDir, apiKey: "provider-key" })
-    assert.equal(withKey.OPENCODE_API_KEY, "provider-key")
-  } finally {
-    for (const [key, value] of Object.entries(prior)) {
-      if (value === undefined) delete process.env[key]
-      else process.env[key] = value
-    }
-  }
+  assert.equal(JSON.stringify(config).includes("apiKey"), false)
+  assert.equal(JSON.stringify(config).includes("OPENCODE_API_KEY"), false)
 })
 
 test("trusted prompts are loaded from the base root, not a changed PR copy", async () => {
@@ -434,6 +410,33 @@ test("prepare records missing patches and bounds API file reads", async () => {
   }
 })
 
+test("prepare copies the container runtime modules into the trusted asset set", async () => {
+  const base = baseFixture()
+  const outputDir = tempDir("habi-review-output-")
+  const { fetchImpl } = prepareFetch({ files: [] })
+  await prepareReview({
+    repo: REPO,
+    pr: 7,
+    baseSha: BASE,
+    headSha: HEAD,
+    baseRoot: base,
+    outputDir,
+    token: "token",
+    fetchImpl,
+  })
+
+  const manifest = JSON.parse(fs.readFileSync(path.join(outputDir, "manifest.json"), "utf8"))
+  for (const helper of ["review-container.mjs", "review-container-entry.mjs", "review-network.mjs"]) {
+    const relative = `trusted/${helper}`
+    assert.ok(fs.existsSync(path.join(outputDir, relative)), relative)
+    assert.equal(manifest.files[relative], sha256(fs.readFileSync(path.join(outputDir, relative))))
+  }
+  assert.deepEqual(
+    Object.keys(manifest.files).filter((file) => file.startsWith("trusted/")).sort(),
+    [...TRUSTED_HELPERS].sort().map((helper) => `trusted/${helper}`),
+  )
+})
+
 test("prepare rejects stale PR identity before writing input", async () => {
   const base = baseFixture()
   const outputDir = tempDir("habi-review-output-")
@@ -485,23 +488,23 @@ test("bootstrap trusted source is metadata only and leaves event identity unchan
     baseRoot: base,
     outputDir,
     token: "token",
-    trustedSourceSha: APPROVED_BOOTSTRAP,
+    trustedSourceSha: PINNED_SOURCE,
     bootstrap: true,
     fetchImpl,
   })
 
   assert.equal(result.input.baseSha, BASE)
   assert.equal(result.input.headSha, HEAD)
-  assert.deepEqual(result.input.trustedSource, { sha: APPROVED_BOOTSTRAP, bootstrap: true })
-  assert.deepEqual(result.manifest.trustedSource, { sha: APPROVED_BOOTSTRAP, bootstrap: true })
+  assert.deepEqual(result.input.trustedSource, { sha: PINNED_SOURCE, bootstrap: true })
+  assert.deepEqual(result.manifest.trustedSource, { sha: PINNED_SOURCE, bootstrap: true })
   assert.match(result.prompt, /approved immutable bootstrap commit/)
   assert.match(
     result.prompt,
-    new RegExp(`Trusted instructions source: approved bootstrap commit ${APPROVED_BOOTSTRAP}`),
+    new RegExp(`Trusted instructions source: approved bootstrap commit ${PINNED_SOURCE}`),
   )
   assert.match(result.prompt, new RegExp(`Base SHA: ${BASE}`))
   assert.match(result.prompt, new RegExp(`Head SHA: ${HEAD}`))
-  assert.doesNotMatch(result.prompt, new RegExp(`Base SHA: ${APPROVED_BOOTSTRAP}`))
+  assert.doesNotMatch(result.prompt, new RegExp(`Base SHA: ${PINNED_SOURCE}`))
 })
 
 test("trusted bootstrap source must be exact and cannot masquerade as base", async () => {
@@ -514,8 +517,8 @@ test("trusted bootstrap source must be exact and cannot masquerade as base", asy
     ["main", true],
     ["17b90ac", true],
     ["refs/heads/main", true],
-    [APPROVED_BOOTSTRAP.toUpperCase(), true],
-    [APPROVED_BOOTSTRAP, false],
+    [PINNED_SOURCE.toUpperCase(), true],
+    [PINNED_SOURCE, false],
     ["", true],
   ]) {
     await assert.rejects(
@@ -593,8 +596,6 @@ test("JSONL parser separates provider limits from parser failures", () => {
   const fatal = jsonl([{ type: "error", error: { data: { message: "tool schema invalid" } } }])
   assert.throws(() => parseOpenCodeJsonl(fatal, 1), (error) => error.code === "cli-error")
   assert.equal(classifyProviderError({ data: { message: "tool schema invalid" } }), null)
-  assert.equal(classifyProviderText("unexpected parser failure"), null)
-  assert.equal(classifyProviderText("HTTP 429 Too Many Requests"), "provider-rate-limited")
 })
 
 test("review output is bounded and control characters are removed", () => {
@@ -609,74 +610,62 @@ test("review output is bounded and control characters are removed", () => {
   assert.equal(truncateUtf8("éé", 3).text, "é")
 })
 
-test("CLI invocation passes the prompt on stdin and strips host credentials", async () => {
+test("runReview delegates to the contained runtime with the fixed keyless config", async () => {
   const fixture = modelFixture()
   let captured
-  const spawn = (cli, args, options) => {
-    captured = { cli, args, options }
+  const execute = async (request) => {
+    captured = request
     return spawnResult({ stdout: VALID_JSONL })
   }
   const result = await runReview({
     ...fixture,
     cliPath: "/fake/opencode",
-    apiKey: "",
+    // A caller-supplied key is ignored: the contained runtime is keyless only.
+    apiKey: "provider-key",
     expected: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
-    spawn,
+    execute,
   })
 
   assert.equal(result.exitCode, 0)
-  assert.equal(captured.cli, "/fake/opencode")
-  assert.deepEqual(captured.args, buildCliArgs(fixture.workPath))
-  assert.equal(captured.options.input, PROMPT)
-  assert.equal(captured.options.env.OPENCODE_API_KEY, undefined)
-  assert.equal(Object.keys(captured.options.env).some((key) => /^(GITHUB|ACTIONS)_/.test(key)), false)
-  assert.equal(captured.options.cwd, fixture.workPath)
+  assert.equal(captured.cliPath, "/fake/opencode")
+  assert.equal(captured.prompt, PROMPT)
+  assert.deepEqual(captured.config, buildContainedConfig())
+  assert.equal(Object.hasOwn(captured, "apiKey"), false)
+  assert.equal(Object.hasOwn(captured, "spawn"), false)
+  assert.equal(Object.hasOwn(captured, "spawnSync"), false)
+  assert.equal(JSON.stringify(captured).includes("provider-key"), false)
+  assert.equal(JSON.stringify(captured).includes("OPENCODE_API_KEY"), false)
+  assert.equal(Object.keys(captured).some((key) => /^(GITHUB|ACTIONS)_/.test(key)), false)
+  assert.ok(Number.isInteger(captured.timeoutMs) && captured.timeoutMs > 0)
+  assert.ok(Number.isInteger(captured.maxBuffer) && captured.maxBuffer > 0)
   assert.equal(JSON.parse(fs.readFileSync(fixture.outcomePath, "utf8")).status, "reviewed")
 })
 
-test("provider key is passed directly when present", async () => {
-  const fixture = modelFixture()
-  let captured
-  const spawn = (_cli, _args, options) => {
-    captured = options
-    return spawnResult({ stdout: VALID_JSONL })
+test("structured provider 429 and 503 events are informational while parser defects fail", async () => {
+  for (const [event, code] of [
+    [{ data: { statusCode: 429, message: "too many requests" } }, "provider-rate-limited"],
+    [{ data: { status: 503, message: "service unavailable" } }, "provider-unavailable"],
+  ]) {
+    const limited = modelFixture()
+    const limitedResult = await runReview({
+      ...limited,
+      cliPath: "/fake/opencode",
+      expected: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
+      execute: async () => spawnResult({ status: 1, stdout: jsonl([{ type: "error", error: event }]) }),
+    })
+    assert.equal(limitedResult.exitCode, 0, code)
+    assert.equal(limitedResult.status, "unavailable", code)
+    assert.equal(limitedResult.code, code, code)
+    const limitedOutcome = JSON.parse(fs.readFileSync(limited.outcomePath, "utf8"))
+    assert.equal(limitedOutcome.status, "unavailable", code)
   }
-  await runReview({
-    ...fixture,
-    cliPath: "/fake/opencode",
-    apiKey: "provider-key",
-    expected: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
-    spawn,
-  })
-  assert.equal(captured.env.OPENCODE_API_KEY, "provider-key")
-})
-
-test("provider 429 is informational while parser defects fail", async () => {
-  const limited = modelFixture()
-  const limitedResult = await runReview({
-    ...limited,
-    cliPath: "/fake/opencode",
-    expected: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
-    spawn: () =>
-      spawnResult({
-        status: 1,
-        stdout: jsonl([
-          { type: "error", error: { data: { statusCode: 429, message: "too many requests" } } },
-        ]),
-      }),
-  })
-  assert.equal(limitedResult.exitCode, 0)
-  assert.equal(limitedResult.status, "unavailable")
-  assert.equal(limitedResult.code, "provider-rate-limited")
-  const limitedOutcome = JSON.parse(fs.readFileSync(limited.outcomePath, "utf8"))
-  assert.equal(limitedOutcome.status, "unavailable")
 
   const broken = modelFixture()
   const brokenResult = await runReview({
     ...broken,
     cliPath: "/fake/opencode",
     expected: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
-    spawn: () => spawnResult({ status: 0, stdout: "not-json\n" }),
+    execute: async () => spawnResult({ status: 0, stdout: "not-json\n" }),
   })
   assert.equal(brokenResult.exitCode, 1)
   assert.equal(brokenResult.status, "error")
@@ -689,36 +678,152 @@ test("provider 429 is informational while parser defects fail", async () => {
   assert.equal(Object.hasOwn(brokenOutcome, "stderr"), false)
 })
 
-test("CLI timeout and stderr rate limits are informational", async () => {
+test("accepted tool-use output is fatal, not review evidence", async () => {
+  const fixture = modelFixture()
+  const result = await runReview({
+    ...fixture,
+    cliPath: "/fake/opencode",
+    expected: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
+    execute: async () =>
+      spawnResult({
+        stdout: jsonl([
+          { type: "tool_use", part: { tool: "bash", state: { status: "completed" } } },
+          { type: "step_finish", part: { reason: "stop" } },
+        ]),
+      }),
+  })
+  assert.equal(result.exitCode, 1)
+  assert.equal(result.status, "error")
+  assert.equal(result.code, "tool-use")
+})
+
+test("contained runtime timeouts are informational while overflow and malformed results fail", async () => {
   const timedOut = modelFixture()
   const timeoutResult = await runReview({
     ...timedOut,
     cliPath: "/fake/opencode",
     expected: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
-    spawn: () => spawnResult({ status: null, error: { code: "ETIMEDOUT" } }),
+    execute: async () => spawnResult({ status: null, error: { code: "ETIMEDOUT" } }),
   })
   assert.equal(timeoutResult.exitCode, 0)
   assert.equal(timeoutResult.code, "cli-timeout")
 
-  const limited = modelFixture()
-  const limitedResult = await runReview({
-    ...limited,
+  const overflow = modelFixture()
+  const overflowResult = await runReview({
+    ...overflow,
     cliPath: "/fake/opencode",
     expected: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
-    spawn: () => spawnResult({ status: 1, stdout: "", stderr: "HTTP 429 Too Many Requests" }),
+    execute: async () => spawnResult({ status: null, error: { code: "ENOBUFS" } }),
   })
-  assert.equal(limitedResult.exitCode, 0)
-  assert.equal(limitedResult.code, "provider-rate-limited")
+  assert.equal(overflowResult.exitCode, 1)
+  assert.equal(overflowResult.code, "raw-limit")
+
+  const malformed = modelFixture()
+  const malformedResult = await runReview({
+    ...malformed,
+    cliPath: "/fake/opencode",
+    expected: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
+    execute: async () => spawnResult({ status: "0" }),
+  })
+  assert.equal(malformedResult.exitCode, 1)
+  assert.equal(malformedResult.code, "cli-signal")
+})
+
+test("unstructured stderr is never trusted as a provider signal", async () => {
+  for (const stderr of [
+    "docker: Error response from daemon: disk quota exceeded",
+    "HTTP 429 Too Many Requests",
+    "unexpected parser failure",
+  ]) {
+    const fixture = modelFixture()
+    const result = await runReview({
+      ...fixture,
+      cliPath: "/fake/opencode",
+      expected: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
+      execute: async () => spawnResult({ status: 1, stdout: "", stderr }),
+    })
+    assert.equal(result.exitCode, 1, stderr)
+    assert.equal(result.status, "error", stderr)
+    assert.equal(result.code, "cli-exit", stderr)
+    const outcome = JSON.parse(fs.readFileSync(fixture.outcomePath, "utf8"))
+    assert.equal(outcome.status, "error", stderr)
+    assert.equal(outcome.diagnostic.code, "cli-exit", stderr)
+    assert.equal(outcome.diagnostic.code === "provider-rate-limited", false, stderr)
+  }
+})
+
+test("every ContainerFailure is fatal and never classified unavailable", async () => {
+  for (const code of ["isolation-failed", "iptables-command-failed", "container-invalid", "provider-rate-limited"]) {
+    const fixture = modelFixture()
+    const result = await runReview({
+      ...fixture,
+      cliPath: "/fake/opencode",
+      expected: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
+      execute: async () => {
+        throw new ContainerFailure(code)
+      },
+    })
+    assert.equal(result.exitCode, 1, code)
+    assert.equal(result.status, "error", code)
+    assert.equal(result.code, code, code)
+    const outcome = JSON.parse(fs.readFileSync(fixture.outcomePath, "utf8"))
+    assert.equal(outcome.status, "error", code)
+    assert.equal(outcome.diagnostic.code, code, code)
+  }
 
   const broken = modelFixture()
   const brokenResult = await runReview({
     ...broken,
     cliPath: "/fake/opencode",
     expected: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
-    spawn: () => spawnResult({ status: 1, stdout: "", stderr: "unexpected parser failure" }),
+    execute: async () => {
+      throw new Error("unexpected runtime failure")
+    },
   })
   assert.equal(brokenResult.exitCode, 1)
-  assert.equal(brokenResult.code, "cli-exit")
+  assert.equal(brokenResult.status, "error")
+  assert.equal(brokenResult.code, "container-failure")
+})
+
+test("model entrypoint preserves SIGINT/SIGTERM cleanup after a valid review result", () => {
+  const root = tempDir("habi-review-exit-handoff-")
+  const modelUrl = pathToFileURL(path.join(REPO_ROOT, ".github", "scripts", "review-model.mjs")).href
+  const scriptPath = path.join(root, "handoff.mjs")
+  writeFile(
+    scriptPath,
+    [
+      `import { preserveSignalExitCode } from ${JSON.stringify(modelUrl)}`,
+      "const initial = process.env.INITIAL_EXIT",
+      "if (initial !== undefined) process.exitCode = Number(initial)",
+      "preserveSignalExitCode(Number(process.env.RESULT_EXIT))",
+      "",
+    ].join("\n"),
+  )
+
+  for (const [initial, result, expected] of [
+    [130, 0, 130],
+    [143, 0, 143],
+    [130, 1, 130],
+    [143, 1, 143],
+    [undefined, 0, 0],
+    [undefined, 1, 1],
+  ]) {
+    const child = spawnSync(process.execPath, [scriptPath], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        ...(initial === undefined ? {} : { INITIAL_EXIT: String(initial) }),
+        RESULT_EXIT: String(result),
+      },
+    })
+    assert.equal(child.status, expected, `initial=${initial} result=${result}`)
+  }
+})
+
+test("model entrypoint uses the shared signal-preserving exit handoff", () => {
+  const source = fs.readFileSync(path.join(REPO_ROOT, ".github", "scripts", "review-model.mjs"), "utf8")
+  assert.match(source, /preserveSignalExitCode\(await main\(\)\)/)
+  assert.doesNotMatch(source, /process\.exitCode = await main\(\)/)
 })
 
 test("artifact identity must match the event and outcome must be valid", async () => {
@@ -890,10 +995,10 @@ test("parser and renderer truncation add a notice outside the fence", () => {
 
 test("comment records the approved bootstrap source without altering event identity", () => {
   const bootstrapBody = renderComment(
-    outcomeFixture({ trustedSource: { sha: APPROVED_BOOTSTRAP, bootstrap: true } }),
+    outcomeFixture({ trustedSource: { sha: PINNED_SOURCE, bootstrap: true } }),
   )
   assert.match(bootstrapBody, /Trusted review source: approved bootstrap commit/)
-  assert.match(bootstrapBody, new RegExp(APPROVED_BOOTSTRAP))
+  assert.match(bootstrapBody, new RegExp(PINNED_SOURCE))
 
   const baseBody = renderComment(
     outcomeFixture({ trustedSource: { sha: BASE, bootstrap: false } }),
@@ -966,7 +1071,7 @@ test("end-to-end prepare, model, and publish are stubbed and never contact provi
     ...fixture,
     cliPath: "/fake/opencode",
     expected: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
-    spawn: () => spawnResult({ stdout: VALID_JSONL }),
+    execute: async () => spawnResult({ stdout: VALID_JSONL }),
   })
   assert.equal(modelResult.status, "reviewed")
   const outcome = JSON.parse(fs.readFileSync(fixture.outcomePath, "utf8"))
@@ -1106,12 +1211,12 @@ test("bootstrap selector skips when base assets and pin are absent", () => {
 })
 
 test("bootstrap selector uses only an exact approved full SHA", () => {
-  const { result, outputs } = runBootstrapSelector({ bootstrapSha: APPROVED_BOOTSTRAP })
+  const { result, outputs } = runBootstrapSelector({ bootstrapSha: PINNED_SOURCE })
   assert.equal(result.status, 0)
   assert.equal(outputs.ready, "true")
   assert.equal(outputs.bootstrap, "true")
   assert.equal(outputs.source, "trusted")
-  assert.equal(outputs.source_sha, APPROVED_BOOTSTRAP)
+  assert.equal(outputs.source_sha, PINNED_SOURCE)
 })
 
 test("bootstrap selector rejects malformed and unpinned refs", () => {
@@ -1119,8 +1224,8 @@ test("bootstrap selector rejects malformed and unpinned refs", () => {
     "main",
     "17b90ac",
     "refs/heads/main",
-    APPROVED_BOOTSTRAP.toUpperCase(),
-    `${APPROVED_BOOTSTRAP} `,
+    PINNED_SOURCE.toUpperCase(),
+    `${PINNED_SOURCE} `,
     "0".repeat(39),
     "0".repeat(41),
   ]) {
@@ -1133,16 +1238,16 @@ test("bootstrap selector rejects malformed and unpinned refs", () => {
 
 test("bootstrap selector never substitutes the PR head", () => {
   const { result, outputs } = runBootstrapSelector({
-    bootstrapSha: APPROVED_BOOTSTRAP,
+    bootstrapSha: PINNED_SOURCE,
     headSha: ABSENT_HEAD,
   })
   assert.equal(result.status, 0)
-  assert.equal(outputs.source_sha, APPROVED_BOOTSTRAP)
+  assert.equal(outputs.source_sha, PINNED_SOURCE)
   assert.notEqual(outputs.source_sha, ABSENT_HEAD)
 })
 
 test("base assets always win over any configured bootstrap pin", () => {
-  for (const pin of ["", "main", APPROVED_BOOTSTRAP]) {
+  for (const pin of ["", "main", PINNED_SOURCE]) {
     const { result, outputs } = runBootstrapSelector({ baseAssets: true, bootstrapSha: pin })
     assert.equal(result.status, 0, pin)
     assert.equal(outputs.ready, "true", pin)
@@ -1150,6 +1255,35 @@ test("base assets always win over any configured bootstrap pin", () => {
     assert.equal(outputs.source, "base", pin)
     assert.equal(outputs.source_sha, BASE, pin)
   }
+})
+
+test("missing container modules do not fall back to the PR head", () => {
+  const selector = bootstrapSelectorScript()
+  for (const helper of ["review-container.mjs", "review-container-entry.mjs", "review-network.mjs"]) {
+    assert.ok(selector.includes(helper), helper)
+    // The selector probe and the post-checkout verification must both list the module.
+    const path = `.github/scripts/${helper}`
+    assert.ok(OPENCODE_WORKFLOW.split(path).length - 1 >= 2, path)
+  }
+
+  const missing = ".github/scripts/review-container.mjs"
+  const withoutPin = runBootstrapSelector({ baseAssets: true, omitAsset: missing })
+  assert.equal(withoutPin.result.status, 0)
+  assert.equal(withoutPin.outputs.ready, "false")
+  assert.equal(withoutPin.outputs.source, "missing")
+  assert.notEqual(withoutPin.outputs.source_sha, HEAD)
+
+  const withPin = runBootstrapSelector({
+    baseAssets: true,
+    omitAsset: missing,
+    bootstrapSha: PINNED_SOURCE,
+    headSha: ABSENT_HEAD,
+  })
+  assert.equal(withPin.result.status, 0)
+  assert.equal(withPin.outputs.ready, "true")
+  assert.equal(withPin.outputs.bootstrap, "true")
+  assert.equal(withPin.outputs.source_sha, PINNED_SOURCE)
+  assert.notEqual(withPin.outputs.source_sha, ABSENT_HEAD)
 })
 
 test("workflow prepends the reviewed head SHA to a reviewed outcome", () => {
@@ -1208,7 +1342,7 @@ test("workflow records trusted source metadata without replacing event identity"
     env: {
       ...process.env,
       OUTPUT_DIR: outputDir,
-      SOURCE_SHA: APPROVED_BOOTSTRAP,
+      SOURCE_SHA: PINNED_SOURCE,
       BOOTSTRAP: "true",
       EVENT_BASE_SHA: BASE,
       EVENT_HEAD_SHA: HEAD,
@@ -1216,7 +1350,7 @@ test("workflow records trusted source metadata without replacing event identity"
   })
   assert.equal(result.status, 0)
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(outputDir, "trusted-source.json"), "utf8")), {
-    sha: APPROVED_BOOTSTRAP,
+    sha: PINNED_SOURCE,
     bootstrap: true,
     eventBaseSha: BASE,
     eventHeadSha: HEAD,

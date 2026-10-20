@@ -1,7 +1,5 @@
 import fs from "node:fs"
-import os from "node:os"
 import path from "node:path"
-import { spawnSync } from "node:child_process"
 import {
   CLI_TIMEOUT_MS,
   INPUT_LIMIT_BYTES,
@@ -9,9 +7,6 @@ import {
   OUTPUT_LIMIT_BYTES,
   RAW_LIMIT_BYTES,
   ReviewFailure,
-  buildCliArgs,
-  buildCliEnv,
-  classifyProviderText,
   fail,
   isMain,
   isPr,
@@ -24,6 +19,7 @@ import {
   truncateUtf8,
   validateIdentity,
 } from "./review-lib.mjs"
+import { buildContainedConfig, runContainedCli } from "./review-container.mjs"
 
 const TRUSTED_PROMPT_MARKERS = [
   "# Habi review — trusted system context",
@@ -77,16 +73,6 @@ function validatePrompt(prompt) {
   }
 }
 
-function ensureEmptyDirectory(directory) {
-  if (fs.existsSync(directory)) {
-    if (!fs.statSync(directory).isDirectory()) fail("workdir-invalid")
-    if (fs.readdirSync(directory).length > 0) fail("workdir-not-empty")
-  } else {
-    fs.mkdirSync(directory, { recursive: true })
-  }
-  return directory
-}
-
 function baseOutcome(input, status) {
   return {
     version: 1,
@@ -118,20 +104,27 @@ function unavailableOutcome(input, code) {
   }
 }
 
+/**
+ * Run one review through the hardened container runtime.
+ *
+ * `execute` is the only production execution seam. It defaults to the
+ * container runner, which is keyless and reads the fixed config built here.
+ * There is deliberately no host-process fallback: if the container runtime
+ * cannot be trusted or started, the review fails closed.
+ */
 export async function runReview({
   inputPath,
   promptPath,
   outcomePath,
-  workPath,
   cliPath,
-  apiKey,
   expected,
-  spawn = spawnSync,
+  execute = runContainedCli,
   timeoutMs = CLI_TIMEOUT_MS,
+  maxBuffer = RAW_LIMIT_BYTES,
+  signal,
 } = {}) {
   let input
-  let workDir
-  let home
+  let result
   try {
     input = readJson(inputPath)
     validateInput(input, expected)
@@ -139,26 +132,21 @@ export async function runReview({
     validatePrompt(prompt)
 
     if (typeof cliPath !== "string" || cliPath.length === 0) fail("missing-cli")
-    workDir = ensureEmptyDirectory(workPath ?? fs.mkdtempSync(path.join(os.tmpdir(), "habi-review-work-")))
-    home = fs.mkdtempSync(path.join(os.tmpdir(), "habi-review-home-"))
-    const env = buildCliEnv({ home, workDir, apiKey })
-    for (const key of ["XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "TMPDIR"]) {
-      fs.mkdirSync(env[key], { recursive: true })
-    }
 
-    let result
     try {
-      result = spawn(cliPath, buildCliArgs(workDir), {
-        cwd: workDir,
-        env,
-        input: prompt,
-        encoding: "utf8",
-        timeout: timeoutMs,
-        killSignal: "SIGKILL",
-        maxBuffer: RAW_LIMIT_BYTES,
+      result = await execute({
+        cliPath,
+        prompt,
+        config: buildContainedConfig(),
+        timeoutMs,
+        maxBuffer,
+        signal,
       })
-    } catch {
-      fail("cli-spawn")
+    } catch (error) {
+      if (error instanceof ReviewFailure) throw error
+      // A container/network/isolation failure is always fatal. It must never be
+      // downgraded to a provider-unavailable outcome.
+      fail(typeof error?.code === "string" ? safeCode(error.code) : "container-failure")
     }
 
     let outcome
@@ -171,21 +159,14 @@ export async function runReview({
     } else if (typeof result?.status !== "number") {
       fail("cli-signal")
     } else {
-      try {
-        const parsed = parseOpenCodeJsonl(result.stdout, result.status)
-        outcome =
-          parsed.status === "unavailable"
-            ? unavailableOutcome(input, parsed.code)
-            : reviewedOutcome(input, parsed)
-      } catch (error) {
-        if (error instanceof ReviewFailure && error.code === "cli-exit") {
-          const provider = classifyProviderText(result.stderr)
-          if (provider) outcome = unavailableOutcome(input, provider)
-          else throw error
-        } else {
-          throw error
-        }
-      }
+      // Provider availability is derived only from structured JSONL events.
+      // Unstructured stderr from Docker or the CLI is never trusted as a
+      // provider signal: infrastructure failures must stay fatal.
+      const parsed = parseOpenCodeJsonl(result.stdout, result.status)
+      outcome =
+        parsed.status === "unavailable"
+          ? unavailableOutcome(input, parsed.code)
+          : reviewedOutcome(input, parsed)
     }
 
     writeOutcome(outcomePath, outcome)
@@ -202,9 +183,6 @@ export async function runReview({
     }
     console.error(`opencode-review: failed (${code})`)
     return { exitCode: 1, status: "error", code }
-  } finally {
-    if (home) fs.rmSync(home, { recursive: true, force: true })
-    if (workDir) fs.rmSync(workDir, { recursive: true, force: true })
   }
 }
 
@@ -224,9 +202,7 @@ export async function main(env = process.env) {
     inputPath: option("--input"),
     promptPath: option("--prompt"),
     outcomePath: option("--outcome"),
-    workPath: option("--work"),
     cliPath: option("--cli"),
-    apiKey: env.OPENCODE_API_KEY,
     expected,
   })
 
@@ -236,6 +212,18 @@ export async function main(env = process.env) {
   return result.exitCode
 }
 
+/**
+ * Hand the reviewed result to the process exit code without overwriting a
+ * cancellation already recorded by the runtime cleanup (SIGINT 130, SIGTERM
+ * 143). A late signal can arrive after a valid inference result; the signal
+ * code must win.
+ */
+export function preserveSignalExitCode(exitCode) {
+  if (process.exitCode !== 130 && process.exitCode !== 143) {
+    process.exitCode = exitCode
+  }
+}
+
 if (isMain(import.meta.url)) {
-  process.exitCode = await main()
+  preserveSignalExitCode(await main())
 }
