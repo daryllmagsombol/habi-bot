@@ -1,0 +1,22 @@
+{
+  "name": "habi",
+  "version": "0.0.0",
+  "private": true,
+  "packageManager": "pnpm@12.5.1",
+  "engines": {
+    "node": ">=24.20.0 <25",
+    "pnpm": ">=12.5.1 <13"
+  },
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "typecheck": "turbo run typecheck",
+    "lint": "turbo run lint",
+    "test": "turbo run test",
+    "test:verification": "node --test scripts/verify-foundation.test.mjs",
+    "verify:foundation": "node scripts/verify-foundation.mjs"
+  },
+  "devDependencies": {
+    "turbo": "2.11.9"
+  }
+}

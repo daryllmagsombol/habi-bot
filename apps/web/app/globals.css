@@ -1,0 +1,59 @@
+@import 'tailwindcss';
+
+:root {
+  color-scheme: light;
+  --paper: #f4f6f5;
+  --ink: #192d38;
+  --muted: #52636a;
+  --line: #ccd5d7;
+  --thread: #315bc5;
+  --thread-muted: #d6dfe3;
+  --selection: #dbe5ff;
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: var(--paper);
+  color: var(--ink);
+}
+
+body { margin: 0; }
+* { box-sizing: border-box; }
+::selection { background: var(--selection); color: var(--ink); }
+:focus-visible { outline: 2px solid var(--thread); outline-offset: 6px; }
+
+.foundation { padding-inline: clamp(1.5rem, 6vw, 5rem); }
+.masthead { padding-block: 2rem; border-bottom: 1px solid var(--line); }
+.wordmark { font-size: 1.75rem; line-height: 1; font-weight: 650; letter-spacing: -0.04em; }
+.preview-label { color: var(--muted); font-size: 0.8125rem; font-weight: 500; }
+
+.skip-link {
+  position: fixed;
+  top: 1rem;
+  left: 1rem;
+  z-index: 10;
+  padding: 0.75rem 1rem;
+  background: var(--ink);
+  color: var(--paper);
+  transform: translateY(-200%);
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+.skip-link:focus { transform: translateY(0); }
+
+.introduction { gap: 2rem; padding-block: 3.75rem 3rem; }
+h1 { max-width: 10ch; font-size: clamp(3.25rem, 7.5vw, 5.5rem); line-height: 1.02; font-weight: 500; letter-spacing: -0.04em; text-wrap: balance; }
+.introduction-note { margin-top: 1.75rem; color: var(--muted); font-size: 1rem; line-height: 1.65; }
+.weave { width: clamp(9rem, 42vw, 13rem); max-width: 100%; justify-self: end; }
+
+.scope { gap: 2rem; padding-block: 2rem 3rem; border-top: 1px solid var(--line); }
+.scope h2 { margin: 0 0 0.875rem; font-size: 1.0625rem; line-height: 1.4; font-weight: 600; letter-spacing: -0.015em; text-wrap: balance; }
+.scope p { max-width: 47ch; font-size: 0.9375rem; line-height: 1.75; color: var(--muted); }
+.scope .availability { margin-top: 1rem; color: var(--ink); font-weight: 500; }
+.footer { border-top: 1px solid var(--line); padding-block: 1.5rem; color: var(--muted); font-size: 0.75rem; line-height: 1.5; }
+
+@media (min-width: 48rem) {
+  .masthead { padding-block: 2.5rem; }
+  .introduction { grid-template-columns: 1.5fr 1fr; gap: 3rem; padding-block: clamp(4rem, 8vw, 7rem); }
+  .introduction-note { font-size: 1.0625rem; }
+  .weave { width: 100%; max-width: 17.5rem; }
+  .scope { grid-template-columns: 1.2fr 1fr; gap: clamp(3rem, 7vw, 6rem); padding-block: 2.5rem 4rem; }
+  .scope-boundary { border-left: 1px solid var(--line); padding-left: 2rem; }
+}
