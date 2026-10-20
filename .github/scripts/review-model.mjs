@@ -29,7 +29,7 @@ import {
   validateReviewManifest,
   validateTimedOutOpenCodeJsonl,
 } from "./review-lib.mjs"
-import { buildContainedConfig, runContainedCli } from "./review-container.mjs"
+import { buildContainedConfig, isRetryableIsolationFailure, runContainedCli } from "./review-container.mjs"
 
 const TRUSTED_PROMPT_MARKERS = [
   "# Habi review — trusted system context",
@@ -292,6 +292,18 @@ export async function runReview({
               : "container-failure"
         setAttempt(attempts, attemptEntry(invocation, "error", code))
         if (runtimeCancelled(signal)) throw cancellationFailure(attempts, invocation)
+        // Only the transient dedicated-network creation step may be retried,
+        // and only within the shared two-attempt cap. Every attempt is a full
+        // fresh invocation that recreates the network and reruns the complete
+        // fail-closed containment self-test before any model call, so a setup
+        // race cannot become uncontained inference. A persistent fault fails
+        // both attempts and stays fatal. Policy, forward-proof, self-test,
+        // cleanup, container-shape, integrity, protocol, tool-use, and
+        // post-text failures are never retried.
+        if (isRetryableIsolationFailure(error) && invocation < maxAttempts) {
+          if (runtimeCancelled(signal)) throw cancellationFailure(attempts, invocation)
+          continue
+        }
         throw withAttempts(error instanceof ReviewFailure ? error : new ReviewFailure(code), attempts)
       }
 

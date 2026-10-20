@@ -482,8 +482,8 @@ test("many files at the current PR scale are all included instead of silently ca
   assert.equal(rebuiltSize, originals.reduce((total, patch) => total + Buffer.byteLength(patch), 0))
 })
 
-test("the default target stays at 60,000 bytes while covering every expected segment", () => {
-  assert.equal(DEFAULT_BATCH_BYTES, 60_000)
+test("the default target stays at 40,000 bytes while covering every expected segment", () => {
+  assert.equal(DEFAULT_BATCH_BYTES, 40_000)
   assert.ok(DEFAULT_BATCH_BYTES <= INPUT_LIMIT_BYTES)
   const files = []
   for (let index = 0; index < 12; index += 1) {
@@ -509,6 +509,48 @@ test("the default target stays at 60,000 bytes while covering every expected seg
     batchSegments(result).length,
     result.manifest.files.reduce((total, entry) => total + entry.segmentCount, 0),
   )
+  assertLossless(result, files)
+  assertPromptLimits(result, DEFAULT_BATCH_BYTES)
+})
+
+test("the 40,000-byte default splits the observed b0007 file grouping across batches", () => {
+  // Regression for the run where three large files (11,931 + 14,244 + 17,269 bytes
+  // of patch) shared one ~54,920-byte batch and the request failed repeatedly.
+  const patch = (lineCount) => `@@ -1,1 +1,${lineCount} @@\n${`+${"x".repeat(99)}\n`.repeat(lineCount)}`
+  const largePatches = {
+    "review-markdown.mjs": patch(119),
+    "review-markdown.test.mjs": patch(142),
+    "review-model.mjs": patch(172),
+  }
+  const files = Object.entries(largePatches).map(([filename, text]) => file(filename, text))
+  const totalBytes = files.reduce((sum, entry) => sum + Buffer.byteLength(entry.patch), 0)
+  assert.ok(totalBytes > DEFAULT_BATCH_BYTES, `total=${totalBytes}`)
+
+  const result = buildReviewBatches({
+    identity: identity(),
+    trustedSource: trustedSource(),
+    prompts: SMALL_PROMPTS,
+    files,
+    expectedFileCount: files.length,
+  })
+
+  assert.ok(result.batches.length >= 2, `batches=${result.batches.length}`)
+  assert.deepEqual(result.manifest.fileList, {
+    expectedCount: files.length,
+    receivedCount: files.length,
+    complete: true,
+  })
+  assert.ok(result.manifest.files.every((entry) => entry.segmentCount > 0))
+  const grouping = result.batches.map(
+    (batch) => new Set(batch.segments.map((segment) => segment.filename)).size,
+  )
+  assert.equal(
+    grouping.some((fileCount) => fileCount === files.length),
+    false,
+    "the three large files must not all be assigned to one batch",
+  )
+  const maxBytes = Math.max(...result.manifest.batches.map((entry) => entry.inputBytes))
+  assert.ok(maxBytes <= DEFAULT_BATCH_BYTES, `maxBytes=${maxBytes}`)
   assertLossless(result, files)
   assertPromptLimits(result, DEFAULT_BATCH_BYTES)
 })
@@ -1217,7 +1259,7 @@ test("prepare leaves nonempty API patches byte-identical and makes no fallback r
   assert.equal(Object.hasOwn(result.manifest, "patchRecovery"), false)
 })
 
-test("prepare applies the 60,000-byte default target instead of the old hard-cap default", async () => {
+test("prepare applies the 40,000-byte default target instead of the old hard-cap default", async () => {
   const base = baseFixture()
   const outputDir = tempDir("habi-review-output-")
   const files = []
@@ -1243,6 +1285,10 @@ test("prepare applies the 60,000-byte default target instead of the old hard-cap
   assertLossless(result, files)
   assertPromptLimits(result, DEFAULT_BATCH_BYTES)
   assert.ok(result.manifest.batches.every((batch) => batch.inputBytes <= DEFAULT_BATCH_BYTES))
+  assert.ok(
+    result.batches.every((batch) => batch.input.coverage.inputLimitBytes === DEFAULT_BATCH_BYTES),
+    `limits=${result.batches.map((batch) => batch.input.coverage.inputLimitBytes).join(",")}`,
+  )
 })
 
 test("prepare rejects a post-fetch changed-file count change before writing artifacts", async () => {

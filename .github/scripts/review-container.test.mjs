@@ -12,11 +12,17 @@ import {
   BASE_IMAGE,
   CLI_SHA256,
   ContainerFailure,
+  ISOLATION_NETWORK_CREATE,
+  ISOLATION_POLICY_LOAD,
+  ISOLATION_SELFTEST_INSPECT,
+  ISOLATION_SELFTEST_PROBE,
+  ISOLATION_SELFTEST_REMOVE,
   buildContainerEnv,
   buildContainedConfig,
   buildEnvelope,
   buildHardenedCreateArgs,
   assertContainerInfo,
+  isRetryableIsolationFailure,
   OWNER_LABEL,
   runContainedCli,
   sha256File,
@@ -130,6 +136,8 @@ function makeHarness({
   ambiguousLabelMatches = true,
   counterReadFails = false,
   imageCleanupFails = false,
+  selftestStatus = 0,
+  selftestRunning = false,
 } = {}) {
   const commands = []
   const created = []
@@ -230,7 +238,9 @@ function makeHarness({
       const target = args[1]
       const record = created.find((entry) => entry.name === target || entry.id === target)
       if (!record || removedContainers.has(record.id)) throw absent(`Error: No such object: ${target}`)
-      return { stdout: JSON.stringify([inspectInfo(network.name, record)]), stderr: "" }
+      const info = inspectInfo(network.name, record)
+      if (selftestRunning && record.name.includes("selftest")) info.State.Running = true
+      return { stdout: JSON.stringify([info]), stderr: "" }
     }
     if (first === "rm" && args[1] === "-f") {
       const id = args[2]
@@ -269,15 +279,17 @@ function makeHarness({
       if (hangReview && /^habi-review-[0-9a-f]{8}$/.test(record?.name ?? "")) return
       queueMicrotask(() => {
         let stdout = ""
+        let status = 0
         if (record?.name.includes("selftest")) {
           if (incrementDrop) state.dropPackets += 1
           stdout = JSON.stringify(selftestPayload(input, { hostCode }))
+          status = selftestStatus
         } else {
           stdout = `${JSON.stringify({ type: "step_finish", part: { reason: "stop" } })}\n`
         }
         child.stdout.end(stdout)
         child.stderr.end("")
-        child.emit("close", 0, null)
+        child.emit("close", status, null)
       })
     })
     return child
@@ -740,15 +752,17 @@ test("runContainedCli hard-fails when network cleanup reports failure", async ()
   }
 })
 
-test("failed self-test container removal stops before creating the inference container", async () => {
+test("failed self-test container removal reports its own isolation stage and stops before inference", async () => {
   const { dir, file } = tempFile()
   const harness = makeHarness({
-    failRmFor: (record) => Boolean(record?.name.includes("selftest")),
+    // Fail the self-test's own removal attempts; the outer cleanup retry can
+    // still remove the container, so the reported failure is the stage code.
+    failRmFor: (record, attempts) => Boolean(record?.name.includes("selftest")) && attempts <= 3,
   })
   try {
     await assert.rejects(
       () => runContainedCli(baseOptions(file, harness)),
-      (error) => error instanceof ContainerFailure && error.code === "cleanup-failed",
+      (error) => error instanceof ContainerFailure && error.code === ISOLATION_SELFTEST_REMOVE,
     )
     assert.equal(harness.created.length, 1)
     assert.equal(harness.created[0].name.includes("selftest"), true)
@@ -837,28 +851,75 @@ test("runContainedCli timeout removes the owned review container and network", a
   }
 })
 
-test("runContainedCli fails closed when the isolation module is missing or refuses", async () => {
+test("runContainedCli maps isolation module and network-create failures to distinct stages", async () => {
   const { dir, file } = tempFile()
   try {
+    // A missing/invalid network module is a trusted-configuration failure.
     await assert.rejects(
       () =>
         runContainedCli({
           ...baseOptions(file, makeHarness()),
           networkModule: {},
         }),
-      (error) => error instanceof ContainerFailure && error.code === "isolation-failed",
+      (error) => error instanceof ContainerFailure && error.code === ISOLATION_POLICY_LOAD,
     )
+    // The dedicated network setup step is the only retryable isolation stage.
     await assert.rejects(
       () =>
         runContainedCli({
           ...baseOptions(file, makeHarness()),
           networkModule: {
             createIsolatedNetwork: async () => {
-              throw new Error("network policy rejected")
+              throw Object.assign(new Error("network create raced with Docker"), {
+                code: "docker-command-failed",
+              })
             },
           },
         }),
-      (error) => error instanceof ContainerFailure && error.code === "isolation-failed",
+      (error) => error instanceof ContainerFailure && error.code === ISOLATION_NETWORK_CREATE,
+    )
+    // A security-class failure from the same setup call is never retryable.
+    await assert.rejects(
+      () =>
+        runContainedCli({
+          ...baseOptions(file, makeHarness()),
+          networkModule: {
+            createIsolatedNetwork: async () => {
+              throw Object.assign(new Error("forward hook can be bypassed"), {
+                code: "forward-hook-bypass",
+              })
+            },
+          },
+        }),
+      (error) => error instanceof ContainerFailure && error.code === ISOLATION_POLICY_LOAD,
+    )
+    // Unknown setup errors stay non-retryable by default.
+    await assert.rejects(
+      () =>
+        runContainedCli({
+          ...baseOptions(file, makeHarness()),
+          networkModule: {
+            createIsolatedNetwork: async () => {
+              throw new Error("unclassified setup failure")
+            },
+          },
+        }),
+      (error) => error instanceof ContainerFailure && error.code === ISOLATION_POLICY_LOAD,
+    )
+    // The policy load stage validates the containment contract and is fatal.
+    const harness = makeHarness()
+    await assert.rejects(
+      () =>
+        runContainedCli({
+          ...baseOptions(file, harness),
+          networkModule: {
+            ...harness.networkModule,
+            assertNetworkIsolation: () => {
+              throw new Error("policy contract rejected")
+            },
+          },
+        }),
+      (error) => error instanceof ContainerFailure && error.code === ISOLATION_POLICY_LOAD,
     )
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
@@ -884,7 +945,7 @@ test("runContainedCli cleans a network resource that fails policy validation", a
             networkModule: { createIsolatedNetwork: async () => invalid },
           }),
         ),
-      (error) => error instanceof ContainerFailure && error.code === "isolation-failed",
+      (error) => error instanceof ContainerFailure && error.code === ISOLATION_POLICY_LOAD,
     )
     assert.equal(cleaned, 1)
   } finally {
@@ -935,20 +996,60 @@ test("runContainedCli rejects base images with declared volumes", async () => {
   }
 })
 
-test("runContainedCli treats a reachable host probe as an isolation failure before inference", async () => {
+test("runContainedCli maps self-test probe, inspect, and removal failures to distinct stages", async () => {
   const { dir, file } = tempFile()
-  const harness = makeHarness({ hostCode: "ECONNREFUSED" })
   try {
+    // A reachable host probe is a containment failure, not a setup race.
+    const reachable = makeHarness({ hostCode: "ECONNREFUSED" })
     await assert.rejects(
-      () => runContainedCli(baseOptions(file, harness)),
-      (error) => error instanceof ContainerFailure && error.code === "isolation-failed",
+      () => runContainedCli(baseOptions(file, reachable)),
+      (error) => error instanceof ContainerFailure && error.code === ISOLATION_SELFTEST_PROBE,
     )
-    assert.equal(harness.created.length, 1)
-    assert.equal(harness.created[0].name.includes("selftest"), true)
-    assert.equal(harness.created.some((entry) => /^habi-review-[0-9a-f]{8}$/.test(entry.name)), false)
+    assert.equal(reachable.created.length, 1)
+    assert.equal(reachable.created[0].name.includes("selftest"), true)
+    assert.equal(reachable.created.some((entry) => /^habi-review-[0-9a-f]{8}$/.test(entry.name)), false)
+
+    // A non-zero self-test process is a probe-stage failure.
+    const nonzero = makeHarness({ selftestStatus: 2 })
+    await assert.rejects(
+      () => runContainedCli(baseOptions(file, nonzero)),
+      (error) => error instanceof ContainerFailure && error.code === ISOLATION_SELFTEST_PROBE,
+    )
+    assert.equal(nonzero.created.length, 1)
+
+    // A self-test container that violates the hardened inspection contract is
+    // reported at the inspect stage, before any inference container exists.
+    const running = makeHarness({ selftestRunning: true })
+    await assert.rejects(
+      () => runContainedCli(baseOptions(file, running)),
+      (error) => error instanceof ContainerFailure && error.code === ISOLATION_SELFTEST_INSPECT,
+    )
+    assert.equal(running.created.length, 1)
+    assert.equal(running.created.some((entry) => /^habi-review-[0-9a-f]{8}$/.test(entry.name)), false)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test("only the network-create isolation stage is retryable", () => {
+  for (const code of ["isolation-network-create", "forward-proof-failed", "cleanup-failed"]) {
+    const error = new ContainerFailure(code)
+    assert.equal(isRetryableIsolationFailure(error), code === ISOLATION_NETWORK_CREATE, code)
+  }
+  for (const code of [
+    ISOLATION_POLICY_LOAD,
+    ISOLATION_SELFTEST_PROBE,
+    ISOLATION_SELFTEST_INSPECT,
+    ISOLATION_SELFTEST_REMOVE,
+    "container-invalid",
+    "container-create-failed",
+    "cli-integrity",
+    "env-invalid",
+  ]) {
+    assert.equal(isRetryableIsolationFailure(new ContainerFailure(code)), false, code)
+  }
+  assert.equal(isRetryableIsolationFailure(new Error("isolation-network-create")), false)
+  assert.equal(isRetryableIsolationFailure({ code: ISOLATION_NETWORK_CREATE }), false)
 })
 
 test("runContainedCli returns cancellation before creating any Docker resource", async () => {

@@ -11,7 +11,7 @@ import {
 
 // Smaller per-request target. More batches are preferred over less coverage;
 // the hard container cap (INPUT_LIMIT_BYTES) is unchanged and still enforced.
-export const DEFAULT_BATCH_BYTES = Math.min(60_000, INPUT_LIMIT_BYTES)
+export const DEFAULT_BATCH_BYTES = Math.min(40_000, INPUT_LIMIT_BYTES)
 export const MAX_REVIEW_BATCHES = 256
 export const MAX_REVIEW_FILES = 3_000
 

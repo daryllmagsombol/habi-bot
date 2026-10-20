@@ -32,12 +32,37 @@ export const SELFTEST_TIMEOUT_MS = 120_000
 export const ENTRY_FILE = "review-container-entry.mjs"
 export const CONTAINER_ENTRY_PATH = "/opt/habi/review-container-entry.mjs"
 export const CONTAINER_CLI_PATH = "/opt/habi/opencode"
-export const ISOLATION_FAILED = "isolation-failed"
+// Isolation failures are reported with stable, non-secret stage codes so an
+// operator can tell a transient Docker network-create race apart from a
+// containment/security failure without reading raw stderr or iptables dumps.
+export const ISOLATION_NETWORK_CREATE = "isolation-network-create"
+export const ISOLATION_POLICY_LOAD = "isolation-policy-load"
+export const ISOLATION_SELFTEST_PROBE = "isolation-selftest-probe"
+export const ISOLATION_SELFTEST_INSPECT = "isolation-selftest-inspect"
+export const ISOLATION_SELFTEST_REMOVE = "isolation-selftest-remove"
 export const CLEANUP_FAILED = "cleanup-failed"
 export const CONTAINER_CREATE_FAILED = "container-create-failed"
 export const CONTAINER_CREATE_AMBIGUOUS = "container-create-ambiguous"
 export const FORWARD_PROOF_FAILED = "forward-proof-failed"
 export const OWNER_LABEL = "habi.review.owner"
+
+// Only the dedicated-network creation step is treated as a transient setup
+// race. Every policy, forward-proof, self-test, cleanup, and container-shape
+// failure stays fatal: retrying a failed containment check could otherwise
+// turn a security signal into an accepted review.
+const RETRYABLE_ISOLATION_CODES = new Set([ISOLATION_NETWORK_CREATE])
+
+// `createIsolatedNetwork` also installs and verifies the iptables policy, so
+// only explicit transient command-execution codes from that stage may reach
+// the retryable network-create sub-code. Unknown, inspection, and security
+// failures are classified as policy-load and stay fatal.
+const TRANSIENT_NETWORK_SETUP_CODES = new Set(["docker-command-failed", "iptables-command-failed"])
+
+function isolationNetworkCreateCode(error) {
+  const code = typeof error?.code === "string" ? error.code : ""
+  return TRANSIENT_NETWORK_SETUP_CODES.has(code) ? ISOLATION_NETWORK_CREATE : ISOLATION_POLICY_LOAD
+}
+
 const CONTAINER_REMOVE_ATTEMPTS = 3
 const CONTAINER_REMOVE_RETRY_MS = 25
 
@@ -58,6 +83,15 @@ export class ContainerFailure extends Error {
 
 function fail(code, cause) {
   throw new ContainerFailure(code, cause ? { cause } : undefined)
+}
+
+/**
+ * A retry is allowed only for the transient network-creation setup class.
+ * Anything that verifies containment, policy, forwarding, self-test results,
+ * cleanup, or container shape remains fatal on the first observed attempt.
+ */
+export function isRetryableIsolationFailure(error) {
+  return error instanceof ContainerFailure && RETRYABLE_ISOLATION_CODES.has(error.code)
 }
 
 function requireString(value, code) {
@@ -360,27 +394,27 @@ function ipv4InCidr(address, cidr) {
 }
 
 function normalizeNetwork(network) {
-  if (!network || typeof network !== "object") fail(ISOLATION_FAILED)
-  requireString(network.name, ISOLATION_FAILED)
-  if (typeof network.cleanup !== "function") fail(ISOLATION_FAILED)
+  if (!network || typeof network !== "object") fail(ISOLATION_POLICY_LOAD)
+  requireString(network.name, ISOLATION_POLICY_LOAD)
+  if (typeof network.cleanup !== "function") fail(ISOLATION_POLICY_LOAD)
   const dns = Array.isArray(network.dns) ? network.dns : typeof network.dns === "string" ? [network.dns] : null
-  if (!dns || !dns.includes("1.1.1.1")) fail(ISOLATION_FAILED)
-  if (typeof network.subnet !== "string" || network.subnet.length === 0) fail(ISOLATION_FAILED)
+  if (!dns || !dns.includes("1.1.1.1")) fail(ISOLATION_POLICY_LOAD)
+  if (typeof network.subnet !== "string" || network.subnet.length === 0) fail(ISOLATION_POLICY_LOAD)
   return network
 }
 
 async function loadNetworkModule(provided) {
   if (provided !== undefined) {
-    if (!provided || typeof provided.createIsolatedNetwork !== "function") fail(ISOLATION_FAILED)
+    if (!provided || typeof provided.createIsolatedNetwork !== "function") fail(ISOLATION_POLICY_LOAD)
     return provided
   }
   let module
   try {
     module = await import("./review-network.mjs")
   } catch (error) {
-    fail(ISOLATION_FAILED, error)
+    fail(ISOLATION_POLICY_LOAD, error)
   }
-  if (!module || typeof module.createIsolatedNetwork !== "function") fail(ISOLATION_FAILED)
+  if (!module || typeof module.createIsolatedNetwork !== "function") fail(ISOLATION_POLICY_LOAD)
   return module
 }
 
@@ -470,9 +504,9 @@ function firstHost(subnet) {
 async function inspectGateway(run, network) {
   try {
     const { stdout } = await run("docker", ["network", "inspect", network.name])
-    const parsed = parseJson(stdout, "isolation-failed")
+    const parsed = parseJson(stdout, ISOLATION_SELFTEST_PROBE)
     const inspected = Array.isArray(parsed) ? parsed[0] : parsed
-    if (inspected?.EnableIPv6 === true) fail(ISOLATION_FAILED)
+    if (inspected?.EnableIPv6 === true) fail(ISOLATION_SELFTEST_PROBE)
     const config = inspected?.IPAM?.Config?.[0]
     if (typeof config?.Gateway === "string" && /^\d{1,3}(\.\d{1,3}){3}$/.test(config.Gateway)) {
       return config.Gateway
@@ -481,7 +515,7 @@ async function inspectGateway(run, network) {
     if (error instanceof ContainerFailure) throw error
   }
   const derived = firstHost(network.subnet)
-  if (!derived) fail(ISOLATION_FAILED)
+  if (!derived) fail(ISOLATION_SELFTEST_PROBE)
   return derived
 }
 
@@ -512,27 +546,27 @@ const PRIVATE_PROBE_CANDIDATES = [
 ]
 
 async function loadNetworkPolicy({ module, run, id, network }) {
-  if (typeof module?.assertNetworkIsolation !== "function") fail(ISOLATION_FAILED)
+  if (typeof module?.assertNetworkIsolation !== "function") fail(ISOLATION_POLICY_LOAD)
   let result
   try {
     result = await run("docker", ["network", "inspect", network.name])
   } catch {
-    fail(ISOLATION_FAILED)
+    fail(ISOLATION_POLICY_LOAD)
   }
   let policy
   try {
     policy = module.assertNetworkIsolation({
       id,
-      inspect: parseJson(result.stdout, ISOLATION_FAILED),
+      inspect: parseJson(result.stdout, ISOLATION_POLICY_LOAD),
       subnet: network.subnet,
     })
   } catch {
-    fail(ISOLATION_FAILED)
+    fail(ISOLATION_POLICY_LOAD)
   }
   const chain = policy?.policy?.dockerUserChain
   const rules = policy?.policy?.dockerUserRules
   if (typeof chain !== "string" || !/^[A-Za-z0-9_-]{1,28}$/.test(chain) || !Array.isArray(rules)) {
-    fail(ISOLATION_FAILED)
+    fail(ISOLATION_POLICY_LOAD)
   }
   return { chain, rules }
 }
@@ -606,21 +640,21 @@ function buildProbes(gateway, hostPort, privateProbe) {
 }
 
 function assertProbeOutcome(probes) {
-  if (!probes || typeof probes !== "object") fail(ISOLATION_FAILED)
+  if (!probes || typeof probes !== "object") fail(ISOLATION_SELFTEST_PROBE)
   const blocked = (entry) => entry && entry.ok === false && BLOCKED_CODES.has(entry.code)
-  if (!Array.isArray(probes.tcp) || probes.tcp.length === 0 || !probes.tcp.every(blocked)) fail(ISOLATION_FAILED)
+  if (!Array.isArray(probes.tcp) || probes.tcp.length === 0 || !probes.tcp.every(blocked)) fail(ISOLATION_SELFTEST_PROBE)
   if (!Array.isArray(probes.ipv6) || probes.ipv6.length === 0 || !probes.ipv6.every((entry) => entry.ok === false)) {
-    fail(ISOLATION_FAILED)
+    fail(ISOLATION_SELFTEST_PROBE)
   }
   if (!Array.isArray(probes.dns) || probes.dns.length === 0 || !probes.dns.every((entry) => entry.ok === true)) {
-    fail(ISOLATION_FAILED)
+    fail(ISOLATION_SELFTEST_PROBE)
   }
   if (
     !Array.isArray(probes.https) ||
     probes.https.length === 0 ||
     !probes.https.every((entry) => entry.ok === true && entry.status >= 200 && entry.status < 500)
   ) {
-    fail(ISOLATION_FAILED)
+    fail(ISOLATION_SELFTEST_PROBE)
   }
 }
 
@@ -863,7 +897,12 @@ async function runSelfTestStage({
     containers?.add(containerId)
     let result
     try {
-      await inspectContainer({ run, id: containerId, network: network.name, owner })
+      try {
+        await inspectContainer({ run, id: containerId, network: network.name, owner })
+      } catch (error) {
+        if (error instanceof ContainerFailure) fail(ISOLATION_SELFTEST_INSPECT, error)
+        throw error
+      }
       result = await streamAttached({
         run: cleanupRun,
         spawn,
@@ -875,10 +914,10 @@ async function runSelfTestStage({
         signal,
       })
       if (result.error?.code === "ECANCELED") return { cancelled: true }
-      if (result.error) fail(ISOLATION_FAILED)
-      if (result.status !== 0) fail(ISOLATION_FAILED)
-      const parsed = parseJson(result.stdout.trim(), ISOLATION_FAILED)
-      if (parsed.ok !== true) fail(ISOLATION_FAILED)
+      if (result.error) fail(ISOLATION_SELFTEST_PROBE)
+      if (result.status !== 0) fail(ISOLATION_SELFTEST_PROBE)
+      const parsed = parseJson(result.stdout.trim(), ISOLATION_SELFTEST_PROBE)
+      if (parsed.ok !== true) fail(ISOLATION_SELFTEST_PROBE)
       assertProbeOutcome(parsed.probes)
       if (signal?.aborted) return { cancelled: true }
       const after = await readDropCounter({ run: cleanupRun, chain: policy.chain, cidr: privateProbe.cidr })
@@ -886,7 +925,7 @@ async function runSelfTestStage({
     } finally {
       const removed = await removeContainerConfirmed({ run: cleanupRun, id: containerId })
       if (removed) containers?.delete(containerId)
-      else fail(CLEANUP_FAILED)
+      else fail(ISOLATION_SELFTEST_REMOVE)
     }
   } finally {
     await listener.close()
@@ -1011,9 +1050,9 @@ export async function runContainedCli({
       normalizeNetwork(network)
     } catch (error) {
       if (error instanceof ContainerFailure) throw error
-      fail(ISOLATION_FAILED, error)
+      fail(isolationNetworkCreateCode(error), error)
     }
-    if (containsHostDockerConfig(network)) fail(ISOLATION_FAILED)
+    if (containsHostDockerConfig(network)) fail(ISOLATION_POLICY_LOAD)
     const policy = await loadNetworkPolicy({ module, run: runSignal, id, network })
 
     await ensureBaseImage({ run: runSignal, imageInspector })

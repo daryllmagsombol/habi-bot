@@ -32,7 +32,15 @@ import {
 import { runReview } from "./review-model.mjs"
 import { publishAggregate, publishOutcome, readOutcomeEntries } from "./review-publish.mjs"
 import { buildReviewBatches } from "./review-batches.mjs"
-import { ContainerFailure, buildContainedConfig } from "./review-container.mjs"
+import {
+  ContainerFailure,
+  ISOLATION_NETWORK_CREATE,
+  ISOLATION_POLICY_LOAD,
+  ISOLATION_SELFTEST_INSPECT,
+  ISOLATION_SELFTEST_PROBE,
+  ISOLATION_SELFTEST_REMOVE,
+  buildContainedConfig,
+} from "./review-container.mjs"
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..")
 const REPO = "daryllmagsombol/habi-bot"
@@ -1025,6 +1033,121 @@ test("two output-length results remain a bounded fatal error, not a review", asy
   assert.deepEqual(written.attempts.map((attempt) => attempt.index), [1, 2])
 })
 
+test("one transient isolation setup failure retries with the identical validated request", async () => {
+  const fixture = modelFixture()
+  const requests = []
+  const secret = "SECRET /var/run/docker.sock iptables dump"
+  const execute = async (request) => {
+    requests.push(request)
+    if (requests.length === 1) {
+      throw new ContainerFailure(ISOLATION_NETWORK_CREATE, { cause: new Error(secret) })
+    }
+    return spawnResult({ stdout: VALID_JSONL })
+  }
+  const result = await runReview({
+    ...fixture,
+    cliPath: "/fake/opencode",
+    expected: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
+    execute,
+  })
+
+  assert.equal(result.exitCode, 0)
+  assert.equal(result.status, "reviewed")
+  assert.equal(requests.length, 2)
+  assert.equal(requests[0].cliPath, requests[1].cliPath)
+  assert.equal(requests[0].prompt, PROMPT)
+  assert.equal(requests[1].prompt, PROMPT)
+  assert.equal(sha256(requests[0].prompt), sha256(requests[1].prompt))
+  assert.deepEqual(requests[0].config, requests[1].config)
+  assert.equal(requests[0].timeoutMs, requests[1].timeoutMs)
+  assert.equal(requests[0].maxBuffer, requests[1].maxBuffer)
+  assert.equal(requests[0].signal, requests[1].signal)
+
+  const written = JSON.parse(fs.readFileSync(fixture.outcomePath, "utf8"))
+  assert.equal(written.status, "reviewed")
+  assert.equal(written.batchId, "b0001")
+  assert.equal(written.promptSha256, sha256(PROMPT))
+  assert.deepEqual(written.attempts, [
+    { index: 1, status: "error", code: ISOLATION_NETWORK_CREATE },
+    { index: 2, status: "reviewed", code: "reviewed", finishReason: "stop" },
+  ])
+  assert.equal(isValidAttempts(written.attempts, written.status), true)
+  const serialized = JSON.stringify(written)
+  assert.equal(serialized.includes(secret), false)
+  assert.equal(serialized.includes("docker.sock"), false)
+})
+
+test("two transient isolation failures remain fatal with both attempts recorded", async () => {
+  const fixture = modelFixture()
+  const secret = "SECRET provider body and iptables dump"
+  let calls = 0
+  const result = await runReview({
+    ...fixture,
+    cliPath: "/fake/opencode",
+    expected: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
+    execute: async () => {
+      calls += 1
+      throw new ContainerFailure(ISOLATION_NETWORK_CREATE, { cause: new Error(secret) })
+    },
+  })
+
+  assert.equal(calls, 2)
+  assert.equal(result.exitCode, 1)
+  assert.equal(result.status, "error")
+  assert.equal(result.code, ISOLATION_NETWORK_CREATE)
+  const written = JSON.parse(fs.readFileSync(fixture.outcomePath, "utf8"))
+  assert.equal(written.status, "error")
+  assert.equal(written.review, null)
+  assert.equal(written.batchId, "b0001")
+  assert.equal(written.promptSha256, sha256(PROMPT))
+  assert.equal(written.diagnostic.code, ISOLATION_NETWORK_CREATE)
+  assert.equal(written.attempts.length, 2)
+  assert.deepEqual(written.attempts, [
+    { index: 1, status: "error", code: ISOLATION_NETWORK_CREATE },
+    { index: 2, status: "error", code: ISOLATION_NETWORK_CREATE },
+  ])
+  assert.equal(isValidAttempts(written.attempts, written.status), true)
+  const serialized = JSON.stringify(written)
+  assert.equal(serialized.includes(secret), false)
+  assert.equal(serialized.includes("provider body"), false)
+})
+
+test("cancellation during an isolation retry is not retried", async () => {
+  for (const exitCode of [130, 143]) {
+    const original = process.exitCode
+    try {
+      const fixture = modelFixture()
+      let calls = 0
+      const result = await runReview({
+        ...fixture,
+        cliPath: "/fake/opencode",
+        expected: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
+        execute: async () => {
+          calls += 1
+          process.exitCode = exitCode
+          throw new ContainerFailure(ISOLATION_NETWORK_CREATE)
+        },
+      })
+      assert.equal(calls, 1, String(exitCode))
+      assert.equal(result.exitCode, 1, String(exitCode))
+      assert.equal(result.status, "error", String(exitCode))
+      assert.equal(result.code, "cancelled", String(exitCode))
+      assert.equal(process.exitCode, exitCode, String(exitCode))
+      const written = JSON.parse(fs.readFileSync(fixture.outcomePath, "utf8"))
+      assert.equal(written.status, "error", String(exitCode))
+      assert.equal(written.review, null, String(exitCode))
+      assert.equal(written.diagnostic.code, "cancelled", String(exitCode))
+      assert.deepEqual(
+        written.attempts,
+        [{ index: 1, status: "error", code: "cancelled" }],
+        String(exitCode),
+      )
+    } finally {
+      process.exitCode = original
+    }
+  }
+})
+
 test("fatal, security, overflow, and cancellation outcomes are never retried", async () => {
   const cases = [
     {
@@ -1046,11 +1169,43 @@ test("fatal, security, overflow, and cancellation outcomes are never retried", a
       exitCode: 1,
     },
     {
-      name: "isolation",
+      name: ISOLATION_POLICY_LOAD,
       execute: async () => {
-        throw new ContainerFailure("isolation-failed")
+        throw new ContainerFailure(ISOLATION_POLICY_LOAD)
       },
-      code: "isolation-failed",
+      code: ISOLATION_POLICY_LOAD,
+      exitCode: 1,
+    },
+    {
+      name: ISOLATION_SELFTEST_PROBE,
+      execute: async () => {
+        throw new ContainerFailure(ISOLATION_SELFTEST_PROBE)
+      },
+      code: ISOLATION_SELFTEST_PROBE,
+      exitCode: 1,
+    },
+    {
+      name: ISOLATION_SELFTEST_INSPECT,
+      execute: async () => {
+        throw new ContainerFailure(ISOLATION_SELFTEST_INSPECT)
+      },
+      code: ISOLATION_SELFTEST_INSPECT,
+      exitCode: 1,
+    },
+    {
+      name: ISOLATION_SELFTEST_REMOVE,
+      execute: async () => {
+        throw new ContainerFailure(ISOLATION_SELFTEST_REMOVE)
+      },
+      code: ISOLATION_SELFTEST_REMOVE,
+      exitCode: 1,
+    },
+    {
+      name: "forward-proof",
+      execute: async () => {
+        throw new ContainerFailure("forward-proof-failed")
+      },
+      code: "forward-proof-failed",
       exitCode: 1,
     },
     {
@@ -1934,7 +2089,17 @@ test("attempt metadata is validated and unsafe shapes never contribute findings"
 })
 
 test("every ContainerFailure is fatal and never classified unavailable", async () => {
-  for (const code of ["isolation-failed", "iptables-command-failed", "container-invalid", "provider-rate-limited"]) {
+  for (const code of [
+    ISOLATION_NETWORK_CREATE,
+    ISOLATION_POLICY_LOAD,
+    ISOLATION_SELFTEST_PROBE,
+    ISOLATION_SELFTEST_INSPECT,
+    ISOLATION_SELFTEST_REMOVE,
+    "forward-proof-failed",
+    "iptables-command-failed",
+    "container-invalid",
+    "provider-rate-limited",
+  ]) {
     const fixture = modelFixture()
     const result = await runReview({
       ...fixture,
