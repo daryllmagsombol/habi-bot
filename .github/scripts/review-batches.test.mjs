@@ -634,6 +634,84 @@ test("missing and empty patches are explicitly unreviewable, and enumeration mis
   assert.ok(prompt.includes("fileListComplete=false"))
 })
 
+test("batch coverage.complete is false when the PR file list is truncated even if assigned text is complete", () => {
+  const files = [file("src/a.ts", "@@ -1 +1 @@\n-a\n+b\n")]
+  const result = buildReviewBatches({
+    identity: identity(),
+    trustedSource: trustedSource(),
+    prompts: SMALL_PROMPTS,
+    files,
+    expectedFileCount: 1,
+    fileListTruncated: true,
+  })
+
+  assert.deepEqual(result.manifest.fileList, { expectedCount: 1, receivedCount: 1, complete: false })
+  assert.equal(result.manifest.unreviewableFiles.length, 0)
+  for (const batch of result.batches) {
+    assert.equal(batch.input.coverage.assignedComplete, true)
+    assert.equal(batch.input.coverage.fileListComplete, false)
+    assert.equal(batch.input.coverage.complete, false)
+  }
+})
+
+test("batch coverage.complete is false when any changed file in the PR is unreviewable", () => {
+  const patch = `@@ -1 +1 @@\n+${"x".repeat(900)}\n`
+  const files = [
+    file("src/a.ts", patch),
+    file("src/b.ts", patch),
+    file("assets/logo.png", null, { status: "added", sha: null }),
+  ]
+  const result = buildReviewBatches({
+    identity: identity(),
+    trustedSource: trustedSource(),
+    prompts: SMALL_PROMPTS,
+    files,
+    expectedFileCount: 3,
+    limitBytes: 3_000,
+  })
+
+  assert.deepEqual(result.manifest.fileList, { expectedCount: 3, receivedCount: 3, complete: true })
+  assert.equal(result.manifest.unreviewableFiles.length, 1)
+  assert.ok(result.batches.length > 1)
+  for (const batch of result.batches) {
+    assert.equal(batch.input.coverage.assignedComplete, true)
+    assert.equal(batch.input.coverage.fileListComplete, true)
+    assert.equal(batch.input.coverage.patchesUnavailable, 1)
+    assert.equal(batch.input.coverage.complete, false)
+  }
+})
+
+test("batch coverage.complete is true only when global coverage is complete and all assigned fragments are included", () => {
+  const patch = `@@ -1 +1 @@\n+${"x".repeat(900)}\n`
+  const files = [file("src/a.ts", patch), file("src/b.ts", patch)]
+  const result = buildReviewBatches({
+    identity: identity(),
+    trustedSource: trustedSource(),
+    prompts: SMALL_PROMPTS,
+    files,
+    expectedFileCount: 2,
+    limitBytes: 3_000,
+  })
+
+  assert.deepEqual(result.manifest.fileList, { expectedCount: 2, receivedCount: 2, complete: true })
+  assert.equal(result.manifest.unreviewableFiles.length, 0)
+  assert.ok(result.batches.length > 1)
+  for (const batch of result.batches) {
+    const batchSegmentIds = batch.segments.map((segment) => segment.id).sort()
+    const inputSegmentIds = batch.input.files
+      .flatMap((inputFile) => inputFile.segments.map((segment) => segment.id))
+      .sort()
+    assert.deepEqual(inputSegmentIds, batchSegmentIds)
+    assert.equal(batch.input.coverage.assignedComplete, true)
+    assert.equal(batch.input.coverage.fileListComplete, true)
+    assert.equal(batch.input.coverage.patchesUnavailable, 0)
+    assert.equal(batch.input.coverage.complete, true)
+  }
+  const covered = new Set(batchSegments(result).map((segment) => segment.id))
+  const expectedSegments = result.manifest.files.reduce((total, entry) => total + entry.segmentCount, 0)
+  assert.equal(covered.size, expectedSegments)
+})
+
 test("an empty PR still yields one metadata-only batch", () => {
   const result = buildReviewBatches({
     identity: identity(),

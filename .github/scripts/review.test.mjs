@@ -16,6 +16,7 @@ import {
   REVIEW_MARKER,
   aggregateReview,
   classifyProviderError,
+  classifyStructuredProviderError,
   escapeMentions,
   findBotComment,
   isValidAttempts,
@@ -607,6 +608,34 @@ test("JSONL parser separates provider limits from parser failures", () => {
   assert.equal(classifyProviderError({ data: { message: "tool schema invalid" } }), null)
 })
 
+test("structured provider status retryability is explicit for the whole table", () => {
+  const retryable = [
+    [429, "provider-rate-limited"],
+    [500, "provider-unavailable"],
+    [502, "provider-unavailable"],
+    [503, "provider-unavailable"],
+    [504, "provider-unavailable"],
+    [529, "provider-unavailable"],
+    [403, "provider-forbidden"],
+  ]
+  for (const [status, code] of retryable) {
+    const failure = classifyStructuredProviderError({ data: { statusCode: status } })
+    assert.equal(failure?.code, code, String(status))
+    assert.equal(failure?.retryable, true, String(status))
+    assert.equal(failure?.diagnostic?.httpStatus, status, String(status))
+  }
+
+  // Fatal statuses and non-numeric statuses return null so the structured
+  // error is never retried.
+  for (const error of [
+    { data: { statusCode: 401 } },
+    { data: { statusCode: 404 } },
+    { data: { message: "request failed" } },
+  ]) {
+    assert.equal(classifyStructuredProviderError(error), null, JSON.stringify(error))
+  }
+})
+
 test("review output is bounded and control characters are removed", () => {
   const huge = jsonl([
     { type: "text", part: { type: "text", text: "x".repeat(40_000), time: { end: 1 } } },
@@ -923,6 +952,69 @@ test("structured provider 429 and 503 retry once and accept the later clean stop
     assert.equal(written.attempts[0].providerStatus, status, code)
     assert.equal(written.attempts[1].status, "reviewed", code)
   }
+})
+
+test("a structured 529 retries once with the identical prompt and a repeated 529 is terminal", async () => {
+  const fixture = modelFixture()
+  const prompts = []
+  let calls = 0
+  const result = await runReview({
+    ...fixture,
+    cliPath: "/fake/opencode",
+    expected: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
+    execute: async ({ prompt }) => {
+      calls += 1
+      prompts.push(prompt)
+      if (calls === 1) {
+        return spawnResult({
+          status: 1,
+          stdout: providerErrorJsonl({ status: 529, name: "APIError", code: "overloaded" }),
+        })
+      }
+      return spawnResult({ stdout: VALID_JSONL })
+    },
+  })
+  assert.equal(result.exitCode, 0)
+  assert.equal(result.status, "reviewed")
+  assert.equal(calls, 2)
+  assert.equal(prompts[0], PROMPT)
+  assert.equal(prompts[1], PROMPT)
+  assert.equal(sha256(prompts[0]), sha256(prompts[1]))
+  const written = JSON.parse(fs.readFileSync(fixture.outcomePath, "utf8"))
+  assert.deepEqual(
+    written.attempts.map((attempt) => [attempt.status, attempt.code, attempt.providerStatus]),
+    [
+      ["unavailable", "provider-unavailable", 529],
+      ["reviewed", "reviewed", undefined],
+    ],
+  )
+
+  const repeated = modelFixture()
+  let repeatedCalls = 0
+  const repeatedResult = await runReview({
+    ...repeated,
+    cliPath: "/fake/opencode",
+    expected: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
+    execute: async () => {
+      repeatedCalls += 1
+      return spawnResult({
+        status: 1,
+        stdout: providerErrorJsonl({ status: 529, name: "APIError", code: "overloaded" }),
+      })
+    },
+  })
+  assert.equal(repeatedCalls, 2)
+  assert.equal(repeatedResult.exitCode, 0)
+  assert.equal(repeatedResult.status, "unavailable")
+  assert.equal(repeatedResult.code, "provider-unavailable")
+  const repeatedOutcome = JSON.parse(fs.readFileSync(repeated.outcomePath, "utf8"))
+  assert.deepEqual(
+    repeatedOutcome.attempts.map((attempt) => [attempt.status, attempt.code, attempt.providerStatus]),
+    [
+      ["unavailable", "provider-unavailable", 529],
+      ["unavailable", "provider-unavailable", 529],
+    ],
+  )
 })
 
 test("a generic structured 403 retries once and accepts a later clean stop", async () => {
@@ -1857,24 +1949,46 @@ test("timed-out structured errors retry only when transient", async () => {
   assert.equal(transientCalls, 2)
   assert.equal(transientResult.status, "reviewed")
 
-  const nonTransient = jsonl([
+  // 529 is transient overload too, so the captured guard consumes the shared
+  // bounded retry.
+  const overloaded = jsonl([
     { type: "error", error: { data: { statusCode: 529, message: "overloaded" } } },
   ])
-  const nonTransientFixture = modelFixture()
-  let nonTransientCalls = 0
-  const nonTransientResult = await runReview({
-    ...nonTransientFixture,
+  const overloadedFixture = modelFixture()
+  let overloadedCalls = 0
+  const overloadedResult = await runReview({
+    ...overloadedFixture,
     cliPath: "/fake/opencode",
     expected: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
     execute: async () => {
-      nonTransientCalls += 1
-      return spawnResult({ status: null, error: { code: "ETIMEDOUT" }, stdout: nonTransient })
+      overloadedCalls += 1
+      return spawnResult({ status: null, error: { code: "ETIMEDOUT" }, stdout: overloaded })
     },
   })
-  assert.equal(nonTransientCalls, 1)
-  assert.equal(nonTransientResult.exitCode, 0)
-  assert.equal(nonTransientResult.status, "unavailable")
-  assert.equal(nonTransientResult.code, "cli-timeout")
+  assert.equal(overloadedCalls, 2)
+  assert.equal(overloadedResult.exitCode, 0)
+  assert.equal(overloadedResult.status, "unavailable")
+  assert.equal(overloadedResult.code, "cli-timeout")
+
+  // A text-only provider signal is informational but never retried.
+  const textOnly = jsonl([
+    { type: "error", error: { data: { message: "service unavailable" } } },
+  ])
+  const textOnlyFixture = modelFixture()
+  let textOnlyCalls = 0
+  const textOnlyResult = await runReview({
+    ...textOnlyFixture,
+    cliPath: "/fake/opencode",
+    expected: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
+    execute: async () => {
+      textOnlyCalls += 1
+      return spawnResult({ status: null, error: { code: "ETIMEDOUT" }, stdout: textOnly })
+    },
+  })
+  assert.equal(textOnlyCalls, 1)
+  assert.equal(textOnlyResult.exitCode, 0)
+  assert.equal(textOnlyResult.status, "unavailable")
+  assert.equal(textOnlyResult.code, "cli-timeout")
 
   const forbidden = jsonl([
     { type: "error", error: { name: "APIError", data: { statusCode: 403, message: "forbidden" } } },

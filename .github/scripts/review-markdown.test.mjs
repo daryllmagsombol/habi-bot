@@ -3,8 +3,10 @@ import { Buffer } from "node:buffer"
 import test from "node:test"
 import { MODEL } from "./review-container-entry.mjs"
 import { computeReviewVerdict, renderReviewMarkdown } from "./review-markdown.mjs"
+import { fetchFiles, fetchPullRequest } from "./review-prepare.mjs"
 
 const CLEAN = "No high-confidence findings in the provided diff."
+const DISCLAIMER = "Automated review. Informational only; not an approval, merge instruction, or required status check. The verdict describes reported results, not proof that the PR is bug-free."
 const RUN = "https://github.com/habi/habi/actions/runs/123"
 const END = `**Model used:** \`${MODEL}\``
 const FINDING = "### [medium] `src/review.mjs:42` — Reject an invalid result\n\n- Evidence: `result` is used without a check.\n- Impact: Invalid results are published.\n- Minimal remedy: Validate first.\n- Confidence: high.\n\n```js\nif (!result) return\n```\n\n## Limits\n- Runtime behavior was not tested."
@@ -35,8 +37,17 @@ function render(aggregate, options = {}) {
 
 function assertTail(body, status = "FAILED") {
   assert.ok(body.endsWith(`**Status: ${status}**\n${END}`))
-  assert.ok(body.indexOf("Automated review. Informational only;") < body.lastIndexOf("**Status:"))
+  const disclaimerIndex = body.indexOf(DISCLAIMER)
+  assert.ok(disclaimerIndex >= 0, "rendered body must include the informational disclaimer")
+  assert.ok(disclaimerIndex < body.lastIndexOf("**Status:"))
 }
+
+test("the disclaimer assertion fails if the rendered disclaimer is removed", () => {
+  const body = render(fixture())
+  assert.doesNotThrow(() => assertTail(body, "LGTM"))
+  const withoutDisclaimer = body.replace(DISCLAIMER, "")
+  assert.throws(() => assertTail(withoutDisclaimer, "LGTM"), /informational disclaimer/)
+})
 
 test("every explicit clean reviewed batch permits LGTM, with optional Findings and Limits", () => {
   const aggregate = fixture([CLEAN, `## Findings\n\n${CLEAN}\n\n## Limits\n- Only the supplied diff was assessed.`])
@@ -286,4 +297,43 @@ test("ordinary material Limits and LF/CR/TAB whitespace retain canonical clean c
   assertTail(render(aggregate), "LGTM")
   aggregate.findings[0].truncated = true
   assertTail(render(aggregate))
+})
+
+test("prepare fetch rejects unsafe API bases before any token-bearing request", async () => {
+  let calls = 0
+  const fetchImpl = async () => {
+    calls += 1
+    throw new Error("must not be called")
+  }
+  for (const apiUrl of [
+    "http://api.github.com",
+    "https://user:pass@api.github.com",
+    "https://api.github.com/?x=1",
+    "https://api.github.com/#fragment",
+    "not-a-url",
+  ]) {
+    await assert.rejects(
+      fetchPullRequest({ fetchImpl, apiUrl, repo: "habi/habi", pr: 48, token: "token" }),
+      /invalid-api-url/,
+    )
+    await assert.rejects(
+      fetchFiles({ fetchImpl, apiUrl, repo: "habi/habi", pr: 48, token: "token", expectedCount: 0 }),
+      /invalid-api-url/,
+    )
+  }
+  assert.equal(calls, 0)
+})
+
+test("prepare fetch surfaces a redirect as an error without a second token-bearing request", async () => {
+  const calls = []
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, init })
+    return { ok: false, status: 302 }
+  }
+  await assert.rejects(
+    fetchPullRequest({ fetchImpl, apiUrl: "https://api.github.com", repo: "habi/habi", pr: 48, token: "token" }),
+    /github-api-302/,
+  )
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].init.redirect, "error")
 })

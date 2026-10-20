@@ -441,6 +441,11 @@ export function buildReviewBatches({
     unreviewableInternal.push(entry)
   }
 
+  // Per-batch completeness must include the global enumeration. A fully assigned
+  // batch is still not complete if the file list was truncated or any file in
+  // the PR has no reviewable patch text.
+  const globalComplete = fileList.complete && unreviewable.length === 0
+
   const baseContext = {
     identity: input.identity,
     trustedSource: input.trustedSource,
@@ -848,7 +853,7 @@ export function buildReviewBatches({
         segmentCount: batch.segments.length,
         segmentBytes,
         assignedComplete: true,
-        complete: true,
+        complete: globalComplete,
       },
       batchId: batch.id,
       promptSha256: manifestBatch.promptSha256,

@@ -42,7 +42,12 @@ const TOKEN_KEYS = [
   ["output", ["output", "outputTokens", "completionTokens"]],
   ["reasoning", ["reasoning", "reasoningTokens"]],
 ]
-const RETRYABLE_HTTP_STATUSES = new Set([429, 500, 502, 503, 504])
+// Retryability is explicit per provider HTTP status and is always bounded by
+// runReview's shared two-attempt cap (one retry). 429 and the transient 5xx
+// availability/overload codes are retryable; 403 gets the same single bounded
+// retry for the keyless free-tier gate. Every other status (401, other 4xx,
+// and unexpected 2xx/3xx) is fatal.
+const RETRYABLE_HTTP_STATUSES = new Set([429, 500, 502, 503, 504, 529])
 
 const UNSAFE_CONTROLS =
   /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g
@@ -776,7 +781,6 @@ export function classifyStructuredProviderError(error) {
     if (RETRYABLE_HTTP_STATUSES.has(httpStatus)) {
       return providerFailure("provider-unavailable", true, extra)
     }
-    if (httpStatus === 529) return providerFailure("provider-unavailable", false, extra)
     if (httpStatus === 403) return providerFailure("provider-forbidden", true, extra)
     return null
   }

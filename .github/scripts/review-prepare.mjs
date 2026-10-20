@@ -61,11 +61,26 @@ function githubHeaders(token) {
   }
 }
 
+function normalizeApiUrl(value) {
+  let url
+  try {
+    url = new URL(value)
+  } catch {
+    fail("invalid-api-url")
+  }
+  // Every request built from this base carries the bearer token, so only TLS is
+  // acceptable. Tests inject `fetchImpl`; there is no plaintext loopback exception.
+  if (url.protocol !== "https:") fail("invalid-api-url")
+  if (url.username || url.password || url.search || url.hash) fail("invalid-api-url")
+  return url.toString().replace(/\/+$/, "")
+}
+
 export async function fetchJson(fetchImpl, url, token) {
   if (typeof token !== "string" || token.length === 0) fail("missing-token")
   let response
   try {
-    response = await fetchImpl(url, { headers: githubHeaders(token) })
+    // Never forward the bearer token to a redirect target.
+    response = await fetchImpl(url, { headers: githubHeaders(token), redirect: "error" })
   } catch {
     fail("github-network")
   }
@@ -83,16 +98,17 @@ function repoPath(repo) {
 }
 
 export async function fetchPullRequest({ fetchImpl, apiUrl, repo, pr, token }) {
-  return fetchJson(fetchImpl, `${apiUrl}/repos/${repoPath(repo)}/pulls/${pr}`, token)
+  return fetchJson(fetchImpl, `${normalizeApiUrl(apiUrl)}/repos/${repoPath(repo)}/pulls/${pr}`, token)
 }
 
 export async function fetchFiles({ fetchImpl, apiUrl, repo, pr, token, expectedCount }) {
+  const baseUrl = normalizeApiUrl(apiUrl)
   const files = []
   let exhausted = false
   for (let page = 1; page <= MAX_FILE_PAGES; page += 1) {
     const batch = await fetchJson(
       fetchImpl,
-      `${apiUrl}/repos/${repoPath(repo)}/pulls/${pr}/files?per_page=${MAX_FILES_PER_PAGE}&page=${page}`,
+      `${baseUrl}/repos/${repoPath(repo)}/pulls/${pr}/files?per_page=${MAX_FILES_PER_PAGE}&page=${page}`,
       token,
     )
     if (!Array.isArray(batch)) fail("invalid-files")
@@ -232,14 +248,17 @@ export async function prepareReview({
   if (!isLowerSha(sourceSha)) fail("invalid-trusted-source")
   if (bootstrap !== true && sourceSha !== baseSha) fail("invalid-trusted-source")
   const trustedSource = { sha: sourceSha, bootstrap: bootstrap === true }
+  // Validate once, before any token-bearing request, and reuse the normalized
+  // base for pull, files, recheck, comparison, and recovery requests.
+  const validatedApiUrl = normalizeApiUrl(apiUrl)
 
   const prompts = loadTrustedPrompts(baseRoot)
-  const prData = await fetchPullRequest({ fetchImpl, apiUrl, repo, pr, token })
+  const prData = await fetchPullRequest({ fetchImpl, apiUrl: validatedApiUrl, repo, pr, token })
   assertPullRequest(prData, { repo, pr, baseSha, headSha })
   const expectedFileCount = prData.changed_files
   const { files, truncated } = await fetchFiles({
     fetchImpl,
-    apiUrl,
+    apiUrl: validatedApiUrl,
     repo,
     pr,
     token,
@@ -256,7 +275,7 @@ export async function prepareReview({
           baseSha,
           headSha,
           token,
-          apiUrl,
+          apiUrl: validatedApiUrl,
           fetchImpl,
           ...(limits !== undefined ? { limits } : {}),
         }),
@@ -269,7 +288,7 @@ export async function prepareReview({
         headSha,
         files: normalizedFiles,
         token,
-        apiUrl,
+        apiUrl: validatedApiUrl,
         fetchImpl,
         ...(gitRunner !== undefined ? { gitRunner } : {}),
         ...(limits !== undefined ? { limits } : {}),
@@ -278,7 +297,7 @@ export async function prepareReview({
   if (!recovered || !Array.isArray(recovered.files) || !Array.isArray(recovered.recoveries)) {
     fail("invalid-recovered-files")
   }
-  const rechecked = await fetchPullRequest({ fetchImpl, apiUrl, repo, pr, token })
+  const rechecked = await fetchPullRequest({ fetchImpl, apiUrl: validatedApiUrl, repo, pr, token })
   assertPullRequest(rechecked, { repo, pr, baseSha, headSha })
   if (rechecked.changed_files !== expectedFileCount) {
     // The file enumeration may no longer match the reviewed head. Fail before
