@@ -270,6 +270,22 @@ function outcomeEntryFromFile(directory, name, artifactBatchId) {
   return malformedEntry(name, fileBatchId, "invalid-outcome")
 }
 
+function isFileAt(filePath) {
+  try {
+    return fs.statSync(filePath).isFile()
+  } catch {
+    return false
+  }
+}
+
+function isDirectoryAt(directory) {
+  try {
+    return fs.statSync(directory).isDirectory()
+  } catch {
+    return false
+  }
+}
+
 function pushOutcome(state, entry) {
   if (state.count >= MAX_OUTCOME_FILES) {
     if (!state.limited) {
@@ -282,12 +298,16 @@ function pushOutcome(state, entry) {
   state.outcomes.push(entry)
 }
 
-function readArtifactOutcomeEntries(directory, artifact, state) {
+function readArtifactOutcomeEntries(directory, artifactEntry, state) {
   let entries
   try {
     entries = fs.readdirSync(directory, { withFileTypes: true })
   } catch {
-    fail("outcome-artifact-missing")
+    pushOutcome(
+      state,
+      malformedEntry(artifactEntry.artifact.name, artifactEntry.batchId, "outcome-missing"),
+    )
+    return
   }
   const byName = new Map(entries.map((entry) => [entry.name, entry]))
   const names = [...byName.keys()].sort((left, right) => (left < right ? -1 : left > right ? 1 : 0))
@@ -297,7 +317,7 @@ function readArtifactOutcomeEntries(directory, artifact, state) {
       pushOutcome(state, malformedEntry(name, null, "unexpected-artifact"))
       continue
     }
-    pushOutcome(state, outcomeEntryFromFile(directory, name, artifact.batchId))
+    pushOutcome(state, outcomeEntryFromFile(directory, name, artifactEntry.batchId))
   }
 }
 
@@ -351,6 +371,21 @@ export function readOutcomeEntries(outcomesDir, artifactMetadata, { runId, repo 
   const state = { outcomes: [], count: 0, limited: false }
   if (downloadedArtifacts.length === 0) return state.outcomes
 
+  const accepted = []
+  for (const artifact of downloadedArtifacts) {
+    const match = artifact.name.match(OUTCOME_ARTIFACT_NAME)
+    if (!match) {
+      pushOutcome(state, malformedEntry(artifact.name, null, "unexpected-artifact"))
+      continue
+    }
+    if (artifact.expired === true) {
+      pushOutcome(state, malformedEntry(artifact.name, match[1], "artifact-expired"))
+      continue
+    }
+    accepted.push({ artifact, batchId: match[1] })
+  }
+  if (accepted.length === 0) return state.outcomes
+
   let rootStat
   try {
     rootStat = fs.statSync(outcomesDir)
@@ -359,25 +394,29 @@ export function readOutcomeEntries(outcomesDir, artifactMetadata, { runId, repo 
   }
   if (!rootStat.isDirectory()) fail("outcomes-unreadable")
 
-  const accepted = []
-  for (const artifact of downloadedArtifacts) {
-    const match = artifact.name.match(OUTCOME_ARTIFACT_NAME)
-    if (!match) {
-      pushOutcome(state, malformedEntry(artifact.name, null, "unexpected-artifact"))
-      continue
-    }
-    accepted.push({ artifact, batchId: match[1] })
-  }
-
-  // download-artifact flattens a single matching artifact into the root even
-  // with merge-multiple false; multiple artifacts keep their names as folders.
-  const flat = downloadedArtifacts.length === 1
+  // download-artifact flattens a lone accepted artifact into the root even with
+  // merge-multiple false; multiple accepted artifacts keep their names as
+  // folders. Layout follows the accepted outcomes, never unrelated listing
+  // entries, so an unexpected artifact cannot redirect the reader.
+  const flat = accepted.length === 1
   for (const entry of accepted) {
-    if (entry.artifact.expired === true) {
-      pushOutcome(state, malformedEntry(entry.artifact.name, entry.batchId, "artifact-expired"))
+    const namedDirectory = path.join(outcomesDir, entry.artifact.name)
+    const expectedFile = path.join(outcomesDir, `${entry.batchId}.json`)
+    let directory = null
+    if (flat && isFileAt(expectedFile)) {
+      directory = outcomesDir
+    } else if (isDirectoryAt(namedDirectory)) {
+      directory = namedDirectory
+    } else if (flat) {
+      // The lone accepted artifact was still extracted into the root; inspect
+      // it so wrong filenames and extra files stay visible, and let the
+      // aggregate report any missing batch explicitly.
+      directory = outcomesDir
+    }
+    if (directory === null) {
+      pushOutcome(state, malformedEntry(entry.artifact.name, entry.batchId, "outcome-missing"))
       continue
     }
-    const directory = flat ? outcomesDir : path.join(outcomesDir, entry.artifact.name)
     readArtifactOutcomeEntries(directory, entry, state)
   }
   return state.outcomes

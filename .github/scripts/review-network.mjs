@@ -14,8 +14,8 @@
 // - 1.1.1.1 is an intentional public resolver. Callers must pass it as the
 //   container DNS (`dns` in the returned object).
 // - The Docker network has IPv6 disabled. Callers must also set the container
-//   IPv6 sysctls returned by assertNetworkIsolation; this module cannot enforce
-//   per-container sysctls without starting the container.
+//   IPv6 sysctls returned in `ipv6.sysctls` by createIsolatedNetwork; this
+//   module cannot enforce per-container sysctls without starting the container.
 // - FORWARD policy and unrelated chains/rules are never modified. The module
 //   requires Docker's DOCKER-USER chain to exist and verifies that the selected
 //   iptables backend dispatches bridge traffic into it through the exact Docker
@@ -54,10 +54,10 @@ const DOCKER_USER_CHAIN_PREFIX = "HBRV-DU-"
 const MAX_CHAIN_LENGTH = 28
 const MAX_BRIDGE_LENGTH = 15
 
-const IPV6_SYSCTLS = [
+export const IPV6_SYSCTLS = Object.freeze([
   "net.ipv6.conf.all.disable_ipv6=1",
   "net.ipv6.conf.default.disable_ipv6=1",
-]
+])
 
 // RFC 6890 special-use ranges, link-local metadata, and Azure's platform
 // address. These are denied for new outbound connections.
@@ -729,6 +729,10 @@ export async function createIsolatedNetwork({ id, dockerConfig, run } = {}) {
       bridge: policy.bridge,
       dns: policy.dns,
       subnet: network.subnet,
+      ipv6: {
+        networkEnabled: network.ipv6.networkEnabled,
+        sysctls: [...network.ipv6.sysctls],
+      },
       cleanup,
     }
   } catch (error) {

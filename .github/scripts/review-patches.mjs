@@ -80,7 +80,9 @@ function normalizeApiUrl(value) {
   } catch {
     fail("invalid-api-url")
   }
-  if (url.protocol !== "https:" && url.protocol !== "http:") fail("invalid-api-url")
+  // The bearer token is attached to every request built from this base, so only
+  // TLS is acceptable. Tests inject `fetchImpl`; no plaintext loopback exception.
+  if (url.protocol !== "https:") fail("invalid-api-url")
   if (url.username || url.password || url.search || url.hash) fail("invalid-api-url")
   return url.toString().replace(/\/+$/, "")
 }

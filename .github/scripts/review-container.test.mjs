@@ -34,6 +34,7 @@ import {
   CLI_ARGS,
   MODEL,
   buildCliEnv,
+  checkIpv6Disabled,
   parseEnvelope,
   validateReviewConfig,
 } from "./review-container-entry.mjs"
@@ -46,6 +47,13 @@ const NETWORK = {
   bridge: "habr-test",
   dns: ["1.1.1.1"],
   subnet: "172.30.0.0/16",
+  ipv6: {
+    networkEnabled: false,
+    sysctls: [
+      "net.ipv6.conf.all.disable_ipv6=1",
+      "net.ipv6.conf.default.disable_ipv6=1",
+    ],
+  },
   cleanup: async () => {},
 }
 
@@ -138,6 +146,8 @@ function makeHarness({
   imageCleanupFails = false,
   selftestStatus = 0,
   selftestRunning = false,
+  networkIpv6 = NETWORK.ipv6,
+  omitNetworkIpv6 = false,
 } = {}) {
   const commands = []
   const created = []
@@ -158,6 +168,11 @@ function makeHarness({
       if (remaining) return { ok: false, errors: ["active endpoints"] }
       return { ok: true, errors: [] }
     },
+  }
+  if (omitNetworkIpv6) {
+    delete network.ipv6
+  } else {
+    network.ipv6 = networkIpv6
   }
 
   const networkModule = {
@@ -387,6 +402,60 @@ test("entry rejects provider secrets, wrong models, and expanded permissions", (
   )
 })
 
+test("entry fails closed on unknown config keys and accepts every approved key", () => {
+  const approved = [
+    "$schema",
+    "model",
+    "small_model",
+    "default_agent",
+    "enabled_providers",
+    "share",
+    "autoupdate",
+    "snapshot",
+    "formatter",
+    "lsp",
+    "plugin",
+    "instructions",
+    "skills",
+    "permission",
+    "compaction",
+    "agent",
+  ]
+  const config = buildContainedConfig()
+  for (const key of approved) assert.ok(Object.hasOwn(config, key), key)
+  assert.doesNotThrow(() => validateReviewConfig(config))
+
+  for (const key of ["mcp", "experimental", "providerOptions", "permissionMode"]) {
+    assert.throws(
+      () => validateReviewConfig({ ...buildContainedConfig(), [key]: {} }),
+      /config-unknown-key/,
+      key,
+    )
+  }
+
+  const unknownAgentKey = buildContainedConfig()
+  unknownAgentKey.agent.review.mcp = {}
+  assert.throws(() => validateReviewConfig(unknownAgentKey), /config-agent-key/)
+})
+
+test("entry rejects unknown keys in the validated nested config maps", () => {
+  const skills = buildContainedConfig()
+  skills.skills.extra = true
+  assert.throws(() => validateReviewConfig(skills), /config-skills/)
+
+  const compaction = buildContainedConfig()
+  compaction.compaction.extra = true
+  assert.throws(() => validateReviewConfig(compaction), /config-compaction/)
+
+  const agentMap = buildContainedConfig()
+  agentMap.agent.extra = { disable: true }
+  assert.throws(() => validateReviewConfig(agentMap), /config-agent/)
+
+  const agentEntry = buildContainedConfig()
+  agentEntry.agent.title.extra = true
+  assert.throws(() => validateReviewConfig(agentEntry), /config-agent/)
+})
+
 test("entry builds the fixed CLI invocation and strips forbidden environment", () => {
   assert.deepEqual(CLI_ARGS, [
     "run",
@@ -431,6 +500,17 @@ test("entry envelope accepts a bounded config and prompt only", () => {
   assert.throws(() => parseEnvelope("{}"), /invalid-envelope/)
 })
 
+test("self-test IPv6 sysctl probe fails closed when unreadable or not disabled", () => {
+  assert.doesNotThrow(() => checkIpv6Disabled(() => "1"))
+  assert.throws(() => checkIpv6Disabled(() => null), /ipv6-unreadable/)
+  assert.throws(() => checkIpv6Disabled(() => ""), /ipv6-unreadable/)
+  assert.throws(() => checkIpv6Disabled(() => "0"), /ipv6-enabled/)
+  assert.throws(
+    () => checkIpv6Disabled((file) => (file.includes("default") ? null : "1")),
+    /ipv6-unreadable/,
+  )
+})
+
 test("hardened create arguments cannot bind host resources", () => {
   const args = buildHardenedCreateArgs({
     name: "habi-review-abc",
@@ -438,6 +518,7 @@ test("hardened create arguments cannot bind host resources", () => {
     image: "image",
     env: buildContainerEnv(),
     owner: "owner-token",
+    ipv6: NETWORK.ipv6,
   })
   const joined = args.join(" ")
   assert.match(joined, /--read-only/)
@@ -447,6 +528,11 @@ test("hardened create arguments cannot bind host resources", () => {
   assert.match(joined, /--dns 1.1.1.1/)
   assert.match(joined, /--log-driver none/)
   assert.match(joined, /--label habi\.review\.owner=owner-token/)
+  const sysctls = []
+  args.forEach((arg, index) => {
+    if (arg === "--sysctl") sysctls.push(args[index + 1])
+  })
+  assert.deepEqual(sysctls, NETWORK.ipv6.sysctls)
   assert.doesNotMatch(joined, /(^| )-p( |$)|--publish/)
   assert.doesNotMatch(joined, /(^| )-v( |$)|--volume|--mount|--volumes-from/)
   assert.doesNotMatch(joined, /--privileged|--network[= ]host|--pid[= ]host|--ipc[= ]host/)
@@ -456,26 +542,58 @@ test("hardened create arguments cannot bind host resources", () => {
   }
 })
 
+test("hardened create arguments fail closed without the validated IPv6 policy", () => {
+  const base = {
+    name: "habi-review-abc",
+    network: "habi-review-net",
+    image: "image",
+    env: buildContainerEnv(),
+    owner: "owner-token",
+  }
+  assert.throws(() => buildHardenedCreateArgs(base), /isolation-policy-load/)
+  assert.throws(
+    () => buildHardenedCreateArgs({ ...base, ipv6: { networkEnabled: false, sysctls: [] } }),
+    /isolation-policy-load/,
+  )
+  assert.throws(
+    () =>
+      buildHardenedCreateArgs({
+        ...base,
+        ipv6: {
+          networkEnabled: false,
+          sysctls: ["net.ipv6.conf.all.disable_ipv6=0", "net.ipv6.conf.default.disable_ipv6=1"],
+        },
+      }),
+    /isolation-policy-load/,
+  )
+})
+
 test("container inspection rejects unconfined seccomp and host mounts", () => {
   const network = "habi-review-net-test"
   const good = inspectInfo(network)
-  assert.doesNotThrow(() => assertContainerInfo(good, network))
+  assert.doesNotThrow(() => assertContainerInfo(good, network, NETWORK.ipv6))
 
   const unconfined = inspectInfo(network)
   unconfined.HostConfig.SecurityOpt = ["no-new-privileges", "seccomp=unconfined"]
-  assert.throws(() => assertContainerInfo(unconfined, network), /container-invalid/)
+  assert.throws(() => assertContainerInfo(unconfined, network, NETWORK.ipv6), /container-invalid/)
 
   const mounted = inspectInfo(network)
   mounted.Mounts = [{ Type: "bind", Destination: "/workspace" }]
-  assert.throws(() => assertContainerInfo(mounted, network), /container-invalid/)
+  assert.throws(() => assertContainerInfo(mounted, network, NETWORK.ipv6), /container-invalid/)
 
   const logging = inspectInfo(network)
   logging.HostConfig.LogConfig = { Type: "json-file", Config: {} }
-  assert.throws(() => assertContainerInfo(logging, network), /container-invalid/)
+  assert.throws(() => assertContainerInfo(logging, network, NETWORK.ipv6), /container-invalid/)
 
   const publicDifferentNetwork = inspectInfo(network)
   publicDifferentNetwork.HostConfig.NetworkMode = "host"
-  assert.throws(() => assertContainerInfo(publicDifferentNetwork, network), /container-invalid/)
+  assert.throws(() => assertContainerInfo(publicDifferentNetwork, network, NETWORK.ipv6), /container-invalid/)
+
+  const ipv6Enabled = inspectInfo(network)
+  ipv6Enabled.HostConfig.Sysctls["net.ipv6.conf.all.disable_ipv6"] = "0"
+  assert.throws(() => assertContainerInfo(ipv6Enabled, network, NETWORK.ipv6), /container-invalid/)
+
+  assert.throws(() => assertContainerInfo(good, network), /isolation-policy-load/)
 })
 
 test("CLI digest verification rejects a mismatched binary", async () => {
@@ -574,6 +692,11 @@ test("runContainedCli builds, self-tests, streams one exact envelope, and cleans
 
     for (const { args } of harness.created) {
       assert.equal(args[args.indexOf("--log-driver") + 1], "none")
+      const sysctls = []
+      args.forEach((arg, index) => {
+        if (arg === "--sysctl") sysctls.push(args[index + 1])
+      })
+      assert.deepEqual(sysctls, harness.network.ipv6.sysctls)
     }
     const selftestInput = harness.inputs.find((entry) => entry.name === selftest.name)
     const selftestProbes = JSON.parse(selftestInput.input)
@@ -612,6 +735,32 @@ test("runContainedCli builds, self-tests, streams one exact envelope, and cleans
       ),
     )
     assert.equal(harness.commands.some((entry) => entry.args.includes("prune")), false)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("runContainedCli fails closed when the network IPv6 policy is missing or mismatched", async () => {
+  const { dir, file } = tempFile()
+  try {
+    for (const options of [
+      { omitNetworkIpv6: true },
+      { networkIpv6: { networkEnabled: true, sysctls: NETWORK.ipv6.sysctls } },
+      {
+        networkIpv6: {
+          networkEnabled: false,
+          sysctls: ["net.ipv6.conf.all.disable_ipv6=0", "net.ipv6.conf.default.disable_ipv6=1"],
+        },
+      },
+      { networkIpv6: { networkEnabled: false, sysctls: NETWORK.ipv6.sysctls.slice(0, 1) } },
+    ]) {
+      const harness = makeHarness(options)
+      await assert.rejects(
+        () => runContainedCli(baseOptions(file, harness)),
+        (error) => error instanceof ContainerFailure && error.code === ISOLATION_POLICY_LOAD,
+      )
+      assert.equal(harness.created.length, 0)
+    }
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
@@ -1230,6 +1379,13 @@ const network = {
   bridge: "hbrvtest",
   dns: "1.1.1.1",
   subnet: "172.30.0.0/16",
+  ipv6: {
+    networkEnabled: false,
+    sysctls: [
+      "net.ipv6.conf.all.disable_ipv6=1",
+      "net.ipv6.conf.default.disable_ipv6=1",
+    ],
+  },
   cleanup: async () => {
     state.networkCleanup += 1
     return { ok: true, errors: [] }

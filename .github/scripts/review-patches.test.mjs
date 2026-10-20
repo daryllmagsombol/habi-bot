@@ -14,7 +14,7 @@ import {
 const REPO = "daryllmagsombol/habi-bot"
 const BASE = "a".repeat(40)
 const HEAD = "b".repeat(40)
-const API = "http://api.test"
+const API = "https://api.test"
 const TOKEN = "test-token"
 const GIT_ENV_KEYS = [
   "GIT_ATTR_NOSYSTEM",
@@ -820,6 +820,44 @@ test("rejects invalid inputs and limits raising", async () => {
   const untouched = await call(api, [patchFile("a.txt", "existing\n")], { token: undefined })
   assert.equal(untouched.files[0].patch, "existing\n")
   assert.equal(untouched.recoveries.length, 0)
+})
+
+test("rejects plaintext API URLs before fetching or exposing the bearer token", async () => {
+  const api = makeApi({ baseSpec: {}, headSpec: { "a.txt": "content\n" } })
+  const files = [missingFile("a.txt", "added", { sha: api.headSha("a.txt") })]
+
+  await assert.rejects(
+    call(api, files, { apiUrl: "http://api.test" }),
+    (error) => error?.code === "invalid-api-url",
+  )
+  assert.equal(api.requests.length, 0)
+
+  await assert.rejects(
+    call(api, files, {
+      apiUrl: "http://api.test",
+      fetchImpl: async () => assert.fail("no fetch expected for plaintext API URL"),
+    }),
+    (error) => error?.code === "invalid-api-url",
+  )
+
+  await assert.rejects(
+    resolveComparisonBaseSha({
+      repo: REPO,
+      baseSha: BASE,
+      headSha: HEAD,
+      token: TOKEN,
+      apiUrl: "http://api.test",
+      fetchImpl: async () => assert.fail("no fetch expected for plaintext API URL"),
+    }),
+    (error) => error?.code === "invalid-api-url",
+  )
+
+  await call(api, files)
+  assert.ok(api.requests.length > 0)
+  for (const request of api.requests) {
+    assert.ok(request.url.startsWith(`${API}/`))
+    assert.equal(request.init.headers.Authorization, `Bearer ${TOKEN}`)
+  }
 })
 
 test("resolves a divergent comparison merge base through the exact immutable SHA compare URL", async () => {

@@ -59,6 +59,37 @@ const SAFE_ENV_KEYS = Object.freeze([
 const FORBIDDEN_ENV = /^(GITHUB|ACTIONS)_|^ACTIONS_RUNTIME_TOKEN$|^OPENCODE_API_KEY$|^(HTTPS?|ALL|NO|FTP|SOCKS)_PROXY$/i
 const SECRET_KEY = /api[_-]?key|apikey|secret|token|password|credential|authorization|private[_-]?key/i
 const TOOL_KEYS = new Set(["*", "read", "bash"])
+// Fail closed on anything buildContainedConfig does not emit. An unexpected
+// top-level key can be honoured by the CLI even when it is not a secret.
+const ALLOWED_CONFIG_KEYS = new Set([
+  "$schema",
+  "model",
+  "small_model",
+  "default_agent",
+  "enabled_providers",
+  "share",
+  "autoupdate",
+  "snapshot",
+  "formatter",
+  "lsp",
+  "plugin",
+  "instructions",
+  "skills",
+  "permission",
+  "compaction",
+  "agent",
+])
+const ALLOWED_AGENT_KEYS = new Set([
+  "mode",
+  "model",
+  "steps",
+  "description",
+  "permission",
+  "options",
+])
+const ALLOWED_AGENT_ENTRY_KEYS = new Set(["review", "title", "summary", "compaction"])
+const ALLOWED_SKILLS_KEYS = new Set(["paths", "urls"])
+const ALLOWED_COMPACTION_KEYS = new Set(["auto", "prune"])
 
 function fail(code) {
   const error = new Error(code)
@@ -79,6 +110,18 @@ function assertNoSecrets(value, depth = 0) {
   for (const [key, item] of Object.entries(value)) {
     if (SECRET_KEY.test(key)) fail("config-secret")
     assertNoSecrets(item, depth + 1)
+  }
+}
+
+function assertAllowedKeys(value, allowed, code) {
+  for (const key of Object.keys(value)) {
+    if (!allowed.has(key)) fail(code)
+  }
+}
+
+function assertDisabledAgent(value) {
+  if (!isPlainObject(value) || Object.keys(value).length !== 1 || value.disable !== true) {
+    fail("config-agent")
   }
 }
 
@@ -123,6 +166,7 @@ export function validateReviewConfig(config) {
   ) {
     fail("config-skills")
   }
+  assertAllowedKeys(config.skills, ALLOWED_SKILLS_KEYS, "config-skills")
   if (config.enabled_providers !== undefined) {
     if (!Array.isArray(config.enabled_providers) || config.enabled_providers.length !== 1) fail("config-provider")
     if (config.enabled_providers[0] !== "opencode") fail("config-provider")
@@ -130,16 +174,23 @@ export function validateReviewConfig(config) {
   if (config.compaction !== undefined) {
     if (!isPlainObject(config.compaction)) fail("config-compaction")
     if (config.compaction.auto !== false || config.compaction.prune !== false) fail("config-compaction")
+    assertAllowedKeys(config.compaction, ALLOWED_COMPACTION_KEYS, "config-compaction")
   }
   assertPermission(config.permission, "permission")
   if (!isPlainObject(config.agent) || !isPlainObject(config.agent.review)) fail("config-agent")
+  assertAllowedKeys(config.agent, ALLOWED_AGENT_ENTRY_KEYS, "config-agent")
+  assertDisabledAgent(config.agent.title)
+  assertDisabledAgent(config.agent.summary)
+  assertDisabledAgent(config.agent.compaction)
   const agent = config.agent.review
+  assertAllowedKeys(agent, ALLOWED_AGENT_KEYS, "config-agent-key")
   if (agent.mode !== "primary" || agent.model !== MODEL || agent.steps !== 1) fail("config-agent")
   assertPermission(agent.permission, "agent-permission")
   assertReviewOptions(agent.options)
   for (const key of Object.keys(config)) {
     if (key === "apiKey" || key === "providers" || key === "provider") fail("config-secret")
   }
+  assertAllowedKeys(config, ALLOWED_CONFIG_KEYS, "config-unknown-key")
   return config
 }
 
@@ -371,8 +422,9 @@ function statusValue(name) {
 
 function checkProcess() {
   if (typeof process.getuid === "function" && process.getuid() !== 65534) throw new Error("uid-mismatch")
-  const capEff = BigInt(`0x${statusValue("CapEff") || "0"}`)
-  if (capEff !== 0n) throw new Error("capabilities-present")
+  const capEffText = statusValue("CapEff")
+  if (!/^[0-9a-fA-F]+$/.test(capEffText)) throw new Error("capabilities-unreadable")
+  if (BigInt(`0x${capEffText}`) !== 0n) throw new Error("capabilities-present")
   if (statusValue("NoNewPrivs") !== "1") throw new Error("no-new-privileges-missing")
 }
 
@@ -384,13 +436,16 @@ function readSysctl(file) {
   }
 }
 
-function checkIpv6Disabled() {
+export function checkIpv6Disabled(read = readSysctl) {
   for (const file of [
     "/proc/sys/net/ipv6/conf/all/disable_ipv6",
     "/proc/sys/net/ipv6/conf/default/disable_ipv6",
   ]) {
-    const value = readSysctl(file)
-    if (value !== null && value !== "1") throw new Error("ipv6-enabled")
+    const value = read(file)
+    // Containment assertions fail closed: an unreadable or empty sysctl is not
+    // evidence that IPv6 is disabled.
+    if (value === null || value === undefined || value === "") throw new Error("ipv6-unreadable")
+    if (value !== "1") throw new Error("ipv6-enabled")
   }
 }
 

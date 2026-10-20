@@ -2762,6 +2762,96 @@ test("duplicate outcome filenames across artifact directories stay visible and i
   assert.ok(aggregate.issues.some((issue) => issue.code === "missing-batch" && issue.batchId === "b0002"))
 })
 
+test("outcome layout follows accepted artifacts so an unexpected listing entry cannot redirect the flat root", () => {
+  const manifest = twoBatchManifest()
+  const outcomesDir = tempDir("habi-review-flat-with-unexpected-")
+  writeFile(path.join(outcomesDir, "b0001.json"), JSON.stringify(batchOutcome("b0001", manifest)))
+  const metadata = artifactMetadataFixture([
+    artifactFixture("review-outcome-b0001", 1),
+    artifactFixture("review-outcome-b0001-extra", 2),
+  ])
+  const entries = readOutcomeEntries(outcomesDir, metadata, { runId: RUN_ID, repo: REPO })
+  assert.ok(entries.some((entry) => entry.malformed !== true && entry.batchId === "b0001"))
+  assert.ok(
+    entries.some(
+      (entry) =>
+        entry.malformed === true &&
+        entry.code === "unexpected-artifact" &&
+        entry.source === "review-outcome-b0001-extra",
+    ),
+  )
+  const aggregate = aggregateReview(manifest, entries)
+  assert.ok(aggregate.findings.some((finding) => finding.batchId === "b0001"))
+  assert.equal(aggregate.status, "incomplete")
+  assert.ok(aggregate.issues.some((issue) => issue.code === "missing-batch" && issue.batchId === "b0002"))
+})
+
+test("a single accepted outcome artifact still reads the flattened root", () => {
+  const manifest = twoBatchManifest()
+  const outcomesDir = tempDir("habi-review-flat-single-")
+  writeFile(path.join(outcomesDir, "b0001.json"), JSON.stringify(batchOutcome("b0001", manifest)))
+  const metadata = artifactMetadataFixture([artifactFixture("review-outcome-b0001", 1)])
+  const entries = readOutcomeEntries(outcomesDir, metadata, { runId: RUN_ID, repo: REPO })
+  assert.equal(entries.length, 1)
+  assert.equal(entries[0].malformed, undefined)
+  assert.equal(entries[0].batchId, "b0001")
+})
+
+test("a listing with only a non-outcome artifact yields missing outcomes instead of a crash or misread", () => {
+  const manifest = twoBatchManifest()
+
+  const nonPrefixDir = path.join(tempDir("habi-review-non-outcome-"), "absent")
+  const nonPrefix = readOutcomeEntries(
+    nonPrefixDir,
+    artifactMetadataFixture([artifactFixture("review-input", 1)]),
+    { runId: RUN_ID, repo: REPO },
+  )
+  assert.deepEqual(nonPrefix, [])
+
+  const prefixDir = path.join(tempDir("habi-review-non-outcome-prefix-"), "absent")
+  const prefix = readOutcomeEntries(
+    prefixDir,
+    artifactMetadataFixture([artifactFixture("review-outcome-notes", 1)]),
+    { runId: RUN_ID, repo: REPO },
+  )
+  assert.deepEqual(
+    prefix.map((entry) => [entry.malformed, entry.code, entry.source]),
+    [[true, "unexpected-artifact", "review-outcome-notes"]],
+  )
+
+  for (const entries of [nonPrefix, prefix]) {
+    const aggregate = aggregateReview(manifest, entries)
+    assert.equal(aggregate.status, "incomplete")
+    assert.equal(aggregate.coverage.batchesMissing, 2)
+    assert.equal(aggregate.findings.length, 0)
+  }
+})
+
+test("multiple accepted outcome artifacts still use their named directories", () => {
+  const manifest = twoBatchManifest()
+  const outcomesDir = tempDir("habi-review-named-dirs-")
+  writeFile(
+    path.join(outcomesDir, "review-outcome-b0001", "b0001.json"),
+    JSON.stringify(batchOutcome("b0001", manifest)),
+  )
+  writeFile(
+    path.join(outcomesDir, "review-outcome-b0002", "b0002.json"),
+    JSON.stringify(batchOutcome("b0002", manifest)),
+  )
+  const metadata = artifactMetadataFixture([
+    artifactFixture("review-outcome-b0001", 1),
+    artifactFixture("review-outcome-b0002", 2),
+  ])
+  const entries = readOutcomeEntries(outcomesDir, metadata, { runId: RUN_ID, repo: REPO })
+  assert.deepEqual(
+    entries.map((entry) => entry.batchId),
+    ["b0001", "b0002"],
+  )
+  const aggregate = aggregateReview(manifest, entries)
+  assert.equal(aggregate.status, "complete")
+  assert.equal(aggregate.findings.length, 2)
+})
+
 test("zero outcome artifacts aggregate as missing batches instead of a clean report", () => {
   const manifest = twoBatchManifest()
   const outcomesDir = path.join(tempDir("habi-review-zero-artifacts-"), "review-outcomes")

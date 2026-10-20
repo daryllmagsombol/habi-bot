@@ -11,6 +11,7 @@ import {
   MODEL,
   validateReviewConfig,
 } from "./review-container-entry.mjs"
+import { IPV6_SYSCTLS } from "./review-network.mjs"
 
 export const CLI_VERSION = "v1.19.3"
 // Approved SHA-256 of the official opencode-linux-x64.tar.gz asset for v1.19.3.
@@ -262,8 +263,9 @@ export function buildEnvelope(config, prompt) {
   return JSON.stringify({ version, config, prompt })
 }
 
-export function buildHardenedCreateArgs({ name, network, image, env, owner }) {
+export function buildHardenedCreateArgs({ name, network, image, env, owner, ipv6 }) {
   if (typeof owner !== "string" || owner.length === 0) fail("owner-missing")
+  const sysctls = ipv6SysctlPairs(ipv6)
   const args = [
     "create",
     "--name",
@@ -292,10 +294,7 @@ export function buildHardenedCreateArgs({ name, network, image, env, owner }) {
     "1",
     "--tmpfs",
     TMPFS_ARGS,
-    "--sysctl",
-    "net.ipv6.conf.all.disable_ipv6=1",
-    "--sysctl",
-    "net.ipv6.conf.default.disable_ipv6=1",
+    ...sysctls.flatMap(({ name: sysctlName, value }) => ["--sysctl", `${sysctlName}=${value}`]),
     "--ulimit",
     "core=0",
     "--dns",
@@ -306,7 +305,7 @@ export function buildHardenedCreateArgs({ name, network, image, env, owner }) {
   return args
 }
 
-export function assertContainerInfo(info, networkName) {
+export function assertContainerInfo(info, networkName, ipv6) {
   if (!info || typeof info !== "object") fail("container-invalid")
   const config = info.Config
   const host = info.HostConfig
@@ -347,8 +346,10 @@ export function assertContainerInfo(info, networkName) {
   if (!host.Tmpfs || typeof host.Tmpfs["/tmp"] !== "string" || !host.Tmpfs["/tmp"].includes("size=268435456")) {
     fail("container-invalid")
   }
-  if (host.Sysctls?.["net.ipv6.conf.all.disable_ipv6"] !== "1") fail("container-invalid")
-  if (host.Sysctls?.["net.ipv6.conf.default.disable_ipv6"] !== "1") fail("container-invalid")
+  const sysctls = ipv6SysctlPairs(ipv6)
+  for (const { name: sysctlName, value } of sysctls) {
+    if (host.Sysctls?.[sysctlName] !== value) fail("container-invalid")
+  }
   const mounts = Array.isArray(info.Mounts) ? info.Mounts : []
   for (const mount of mounts) {
     if (mount?.Type !== "tmpfs" || mount?.Destination !== "/tmp") fail("container-invalid")
@@ -415,6 +416,31 @@ function ipv4InCidr(address, cidr) {
   return (parsed & mask) >>> 0 === (network.address & mask) >>> 0
 }
 
+function ipv6SysctlPairs(ipv6) {
+  if (!ipv6 || typeof ipv6 !== "object" || Array.isArray(ipv6)) fail(ISOLATION_POLICY_LOAD)
+  if (ipv6.networkEnabled !== false) fail(ISOLATION_POLICY_LOAD)
+  if (!Array.isArray(ipv6.sysctls)) fail(ISOLATION_POLICY_LOAD)
+  const values = new Map()
+  for (const entry of ipv6.sysctls) {
+    if (typeof entry !== "string") fail(ISOLATION_POLICY_LOAD)
+    const separator = entry.indexOf("=")
+    if (separator <= 0 || separator === entry.length - 1) fail(ISOLATION_POLICY_LOAD)
+    const name = entry.slice(0, separator)
+    if (values.has(name)) fail(ISOLATION_POLICY_LOAD)
+    values.set(name, entry.slice(separator + 1))
+  }
+  const pairs = []
+  for (const entry of IPV6_SYSCTLS) {
+    const separator = entry.indexOf("=")
+    const name = entry.slice(0, separator)
+    const value = entry.slice(separator + 1)
+    if (values.get(name) !== value) fail(ISOLATION_POLICY_LOAD)
+    pairs.push({ name, value })
+  }
+  if (values.size !== pairs.length) fail(ISOLATION_POLICY_LOAD)
+  return pairs
+}
+
 function normalizeNetwork(network) {
   if (!network || typeof network !== "object") fail(ISOLATION_POLICY_LOAD)
   requireString(network.name, ISOLATION_POLICY_LOAD)
@@ -422,6 +448,7 @@ function normalizeNetwork(network) {
   const dns = Array.isArray(network.dns) ? network.dns : typeof network.dns === "string" ? [network.dns] : null
   if (!dns || !dns.includes("1.1.1.1")) fail(ISOLATION_POLICY_LOAD)
   if (typeof network.subnet !== "string" || network.subnet.length === 0) fail(ISOLATION_POLICY_LOAD)
+  ipv6SysctlPairs(network.ipv6)
   return network
 }
 
@@ -796,8 +823,8 @@ async function findOwnedContainer({ run, name, owner }) {
   return info.Id
 }
 
-async function createContainer({ run, cleanupRun, onOwned, owner, name, network, image, env, command }) {
-  const args = buildHardenedCreateArgs({ name, network, image, env, owner })
+async function createContainer({ run, cleanupRun, onOwned, owner, name, network, image, env, command, ipv6 }) {
+  const args = buildHardenedCreateArgs({ name, network, image, env, owner, ipv6 })
   if (command) args.push(...command)
   let stdout
   try {
@@ -823,11 +850,11 @@ async function createContainer({ run, cleanupRun, onOwned, owner, name, network,
   return id
 }
 
-async function inspectContainer({ run, id, network, owner }) {
+async function inspectContainer({ run, id, network, ipv6, owner }) {
   const { stdout } = await run("docker", ["inspect", id])
   const parsed = parseJson(stdout, "container-invalid")
   const info = Array.isArray(parsed) ? parsed[0] : parsed
-  assertContainerInfo(info, network)
+  assertContainerInfo(info, network, ipv6)
   if (info.Config?.Labels?.[OWNER_LABEL] !== owner) fail("container-invalid")
   return info
 }
@@ -915,12 +942,13 @@ async function runSelfTestStage({
       image,
       env: containerEnv,
       command: ["--self-test"],
+      ipv6: network.ipv6,
     })
     containers?.add(containerId)
     let result
     try {
       try {
-        await inspectContainer({ run, id: containerId, network: network.name, owner })
+        await inspectContainer({ run, id: containerId, network: network.name, ipv6: network.ipv6, owner })
       } catch (error) {
         if (error instanceof ContainerFailure) fail(ISOLATION_SELFTEST_INSPECT, error)
         throw error
@@ -1114,9 +1142,10 @@ export async function runContainedCli({
       network: network.name,
       image: imageTag,
       env: containerEnv,
+      ipv6: network.ipv6,
     })
     containers.add(containerId)
-    await inspectContainer({ run: runSignal, id: containerId, network: network.name, owner: reviewOwner })
+    await inspectContainer({ run: runSignal, id: containerId, network: network.name, ipv6: network.ipv6, owner: reviewOwner })
 
     const result = await streamAttached({
       run: runDocker,
