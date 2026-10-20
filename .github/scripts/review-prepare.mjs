@@ -1,7 +1,6 @@
 import fs from "node:fs"
 import path from "node:path"
 import {
-  INPUT_LIMIT_BYTES,
   MODEL,
   ReviewFailure,
   fail,
@@ -14,7 +13,7 @@ import {
   safeCode,
   sha256,
 } from "./review-lib.mjs"
-import { buildReviewBatches } from "./review-batches.mjs"
+import { DEFAULT_BATCH_BYTES, buildReviewBatches } from "./review-batches.mjs"
 
 const PROMPT_FILES = [
   ["system", "system.md"],
@@ -180,7 +179,7 @@ export async function prepareReview({
   bootstrap = false,
   apiUrl = "https://api.github.com",
   fetchImpl = fetch,
-  limitBytes = INPUT_LIMIT_BYTES,
+  limitBytes = DEFAULT_BATCH_BYTES,
 }) {
   if (!isRepo(repo)) fail("invalid-repo")
   if (!isPr(pr)) fail("invalid-pr-number")

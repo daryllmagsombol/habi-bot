@@ -249,8 +249,8 @@ function makeHarness({
     throw new Error(`unexpected command: ${command} ${args.join(" ")}`)
   }
 
-  function spawn(command, args) {
-    spawns.push({ command, args })
+  function spawn(command, args, options) {
+    spawns.push({ command, args, options })
     const id = args[args.length - 1]
     const record = created.find((entry) => entry.id === id)
     const child = new EventEmitter()
@@ -566,6 +566,56 @@ test("runContainedCli builds, self-tests, streams one exact envelope, and cleans
       ),
     )
     assert.equal(harness.commands.some((entry) => entry.args.includes("prune")), false)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("self-test container receives the same hardened environment as the review container", async () => {
+  const { dir, file } = tempFile()
+  const harness = makeHarness()
+  try {
+    const result = await runContainedCli(baseOptions(file, harness))
+    assert.equal(result.status, 0)
+    const [selftest, review] = harness.created
+
+    const envArgs = (record) => {
+      const values = []
+      record.args.forEach((arg, index) => {
+        if (arg === "--env") values.push(record.args[index + 1])
+      })
+      return values
+    }
+    const expected = Object.entries(buildContainerEnv()).map(([key, value]) => `${key}=${value}`)
+    assert.deepEqual(envArgs(selftest), expected)
+    assert.deepEqual(envArgs(review), expected)
+    assert.deepEqual(envArgs(selftest), envArgs(review))
+
+    // The self-test must not inherit the host Docker client environment.
+    for (const entry of envArgs(selftest)) {
+      const key = entry.slice(0, entry.indexOf("="))
+      assert.doesNotMatch(
+        key,
+        /^(GITHUB|ACTIONS)_|^ACTIONS_RUNTIME_TOKEN$|^OPENCODE_API_KEY$|^(HTTPS?|ALL|NO|FTP|SOCKS)_PROXY$/i,
+      )
+      assert.notEqual(key, "DOCKER_CONFIG")
+      assert.doesNotMatch(entry, /DOCKER_CONFIG|habi-review-container-|OPENCODE_API_KEY|GITHUB_TOKEN|ACTIONS_RUNTIME_TOKEN|HTTPS_PROXY/)
+      assert.notEqual(entry, `HOME=${os.homedir()}`)
+    }
+
+    // Both attached streams still use the trusted host Docker client environment.
+    for (const record of [selftest, review]) {
+      const attached = harness.spawns.find((entry) => entry.args.at(-1) === record.id)
+      assert.ok(attached.options.env)
+      assert.ok(attached.options.env.DOCKER_CONFIG.endsWith("docker"))
+      assert.equal(attached.options.env.TMPDIR, attached.options.env.HOME)
+      assert.match(attached.options.env.HOME, /habi-review-container-.*[/\\]home$/)
+    }
+
+    // The actual review container keeps the hardened runtime settings.
+    assert.equal(review.args[review.args.indexOf("--user") + 1], "65534:65534")
+    assert.ok(review.args.includes("--read-only"))
+    assert.equal(review.args[review.args.indexOf("--security-opt") + 1], "no-new-privileges")
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }

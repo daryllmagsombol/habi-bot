@@ -5,7 +5,7 @@ import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { INPUT_LIMIT_BYTES, MODEL, sha256 } from "./review-lib.mjs"
-import { MAX_REVIEW_BATCHES, buildReviewBatches } from "./review-batches.mjs"
+import { DEFAULT_BATCH_BYTES, MAX_REVIEW_BATCHES, buildReviewBatches } from "./review-batches.mjs"
 import { fetchFiles, prepareReview } from "./review-prepare.mjs"
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..")
@@ -395,6 +395,81 @@ test("many files at the current PR scale are all included instead of silently ca
   assert.equal(rebuiltSize, originals.reduce((total, patch) => total + Buffer.byteLength(patch), 0))
 })
 
+test("the default target stays at 60,000 bytes while covering every expected segment", () => {
+  assert.equal(DEFAULT_BATCH_BYTES, 60_000)
+  assert.ok(DEFAULT_BATCH_BYTES <= INPUT_LIMIT_BYTES)
+  const files = []
+  for (let index = 0; index < 12; index += 1) {
+    const patch = `@@ -1,10 +1,190 @@\n-line\n${`+line ${index} ${"x".repeat(80)}\n`.repeat(190)}`
+    files.push(file(`src/default${String(index).padStart(2, "0")}.ts`, patch))
+  }
+  const result = buildReviewBatches({
+    identity: identity(),
+    trustedSource: trustedSource(),
+    prompts: GUIDES,
+    files,
+    expectedFileCount: files.length,
+  })
+
+  assert.ok(result.batches.length > 1, `batches=${result.batches.length}`)
+  assert.deepEqual(result.manifest.fileList, {
+    expectedCount: files.length,
+    receivedCount: files.length,
+    complete: true,
+  })
+  assert.ok(result.manifest.files.every((entry) => entry.segmentCount > 0))
+  assert.equal(
+    batchSegments(result).length,
+    result.manifest.files.reduce((total, entry) => total + entry.segmentCount, 0),
+  )
+  assertLossless(result, files)
+  assertPromptLimits(result, DEFAULT_BATCH_BYTES)
+})
+
+test("an explicit 120,000-byte limit stays valid and lossless with fewer batches than the default", () => {
+  const files = []
+  for (let index = 0; index < 24; index += 1) {
+    const patch = `@@ -1,10 +1,190 @@\n-line\n${`+line ${index} ${"x".repeat(60)}\n`.repeat(190)}`
+    files.push(file(`src/explicit${String(index).padStart(2, "0")}.ts`, patch))
+  }
+  const byDefault = buildReviewBatches({
+    identity: identity(),
+    trustedSource: trustedSource(),
+    prompts: GUIDES,
+    files,
+    expectedFileCount: files.length,
+  })
+  const result = buildReviewBatches({
+    identity: identity(),
+    trustedSource: trustedSource(),
+    prompts: GUIDES,
+    files,
+    expectedFileCount: files.length,
+    limitBytes: INPUT_LIMIT_BYTES,
+  })
+
+  assert.ok(result.batches.length < byDefault.batches.length)
+  assert.ok(result.batches.length > 1)
+  assertLossless(result, files)
+  assertPromptLimits(result, INPUT_LIMIT_BYTES)
+  assert.equal(result.manifest.batches.length, result.batches.length)
+})
+
+test("an explicit limit above the hard 120,000-byte cap is rejected", () => {
+  assert.throws(
+    () =>
+      buildReviewBatches({
+        identity: identity(),
+        trustedSource: trustedSource(),
+        prompts: SMALL_PROMPTS,
+        files: [],
+        expectedFileCount: 0,
+        limitBytes: INPUT_LIMIT_BYTES + 1,
+      }),
+    (error) => error.code === "invalid-limit",
+  )
+})
+
 test("missing and empty patches are explicitly unreviewable, and enumeration mismatch is not complete", () => {
   const files = [
     file("assets/logo.png", null, { status: "added", sha: null }),
@@ -619,6 +694,33 @@ test("prepare writes manifest, per-batch artifacts, trusted helpers, and produce
   assert.equal(prompt.includes(prData().title), false)
   assert.equal(prompt.includes(prData().body), false)
   assert.ok(prompt.includes(GUIDES.system))
+})
+
+test("prepare applies the 60,000-byte default target instead of the old hard-cap default", async () => {
+  const base = baseFixture()
+  const outputDir = tempDir("habi-review-output-")
+  const files = []
+  for (let index = 0; index < 8; index += 1) {
+    const patch = `@@ -1,10 +1,190 @@\n-line\n${`+line ${index} ${"x".repeat(80)}\n`.repeat(190)}`
+    files.push(file(`src/large${index}.ts`, patch))
+  }
+  const { fetchImpl } = prepareFetch({ files, pr: prData({ changed_files: files.length }) })
+
+  const result = await prepareReview({
+    repo: REPO,
+    pr: 48,
+    baseSha: BASE,
+    headSha: HEAD,
+    baseRoot: base,
+    outputDir,
+    token: "token",
+    fetchImpl,
+  })
+
+  assert.ok(result.batches.length > 1, `batches=${result.batches.length}`)
+  assertLossless(result, files)
+  assertPromptLimits(result, DEFAULT_BATCH_BYTES)
+  assert.ok(result.manifest.batches.every((batch) => batch.inputBytes <= DEFAULT_BATCH_BYTES))
 })
 
 test("prepare rejects a post-fetch changed-file count change before writing artifacts", async () => {

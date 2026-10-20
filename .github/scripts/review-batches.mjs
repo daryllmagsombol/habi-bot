@@ -9,6 +9,9 @@ import {
   sha256,
 } from "./review-lib.mjs"
 
+// Smaller per-request target. More batches are preferred over less coverage;
+// the hard container cap (INPUT_LIMIT_BYTES) is unchanged and still enforced.
+export const DEFAULT_BATCH_BYTES = Math.min(60_000, INPUT_LIMIT_BYTES)
 export const MAX_REVIEW_BATCHES = 256
 export const MAX_REVIEW_FILES = 3_000
 
@@ -141,9 +144,14 @@ function normalizeInput({ identity, trustedSource, prompts, files, expectedFileC
   }
   if (!Array.isArray(files)) fail("invalid-files")
   if (!Number.isInteger(expectedFileCount) || expectedFileCount < 0) fail("invalid-file-list")
-  if (limitBytes !== undefined && (!Number.isInteger(limitBytes) || limitBytes <= 0)) fail("invalid-limit")
+  if (
+    limitBytes !== undefined &&
+    (!Number.isInteger(limitBytes) || limitBytes <= 0 || limitBytes > INPUT_LIMIT_BYTES)
+  ) {
+    fail("invalid-limit")
+  }
 
-  const limit = limitBytes ?? INPUT_LIMIT_BYTES
+  const limit = limitBytes ?? DEFAULT_BATCH_BYTES
   const normalized = files.map((file, index) => {
     if (!file || typeof file !== "object") fail("invalid-file")
     if (typeof file.filename !== "string" || file.filename.length === 0 || file.filename.length > 4_096) {
@@ -391,7 +399,7 @@ export function buildReviewBatches({
   files,
   expectedFileCount,
   fileListTruncated = false,
-  limitBytes = INPUT_LIMIT_BYTES,
+  limitBytes = DEFAULT_BATCH_BYTES,
 }) {
   const input = normalizeInput({
     identity,
