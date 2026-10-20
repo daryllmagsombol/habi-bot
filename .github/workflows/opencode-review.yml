@@ -93,6 +93,7 @@ jobs:
             '.github/review/bugs.md',
             '.github/scripts/review-lib.mjs',
             '.github/scripts/review-markdown.mjs',
+            '.github/scripts/review-patches.mjs',
             '.github/scripts/review-prepare.mjs',
             '.github/scripts/review-model.mjs',
             '.github/scripts/review-publish.mjs',
@@ -178,6 +179,7 @@ jobs:
           for rel in \
             .github/scripts/review-lib.mjs \
             .github/scripts/review-markdown.mjs \
+            .github/scripts/review-patches.mjs \
             .github/scripts/review-prepare.mjs \
             .github/scripts/review-model.mjs \
             .github/scripts/review-publish.mjs \

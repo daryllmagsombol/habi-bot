@@ -14,6 +14,7 @@ import {
   sha256,
 } from "./review-lib.mjs"
 import { DEFAULT_BATCH_BYTES, buildReviewBatches } from "./review-batches.mjs"
+import { recoverMissingPatches, resolveComparisonBaseSha } from "./review-patches.mjs"
 
 const PROMPT_FILES = [
   ["system", "system.md"],
@@ -23,6 +24,7 @@ const PROMPT_FILES = [
 const TRUSTED_HELPERS = [
   "review-lib.mjs",
   "review-markdown.mjs",
+  "review-patches.mjs",
   "review-batches.mjs",
   "review-prepare.mjs",
   "review-model.mjs",
@@ -105,6 +107,14 @@ export async function fetchFiles({ fetchImpl, apiUrl, repo, pr, token, expectedC
   return { files, truncated }
 }
 
+function canonicalPath(value) {
+  if (typeof value !== "string" || value.length === 0 || value.length > 4_096) return null
+  if (value.includes("\0") || value.startsWith("/") || value.includes("\\")) return null
+  const parts = value.split("/")
+  if (parts.some((part) => part.length === 0 || part === "." || part === "..")) return null
+  return value
+}
+
 export function normalizeFile(file) {
   if (!file || typeof file !== "object") fail("invalid-file")
   if (typeof file.filename !== "string" || file.filename.length === 0 || file.filename.length > 4_096) {
@@ -113,6 +123,7 @@ export function normalizeFile(file) {
   const count = (value) => (Number.isInteger(value) && value >= 0 ? value : 0)
   return {
     filename: file.filename,
+    previousFilename: canonicalPath(file.previous_filename),
     status: typeof file.status === "string" ? file.status : "unknown",
     additions: count(file.additions),
     deletions: count(file.deletions),
@@ -168,6 +179,33 @@ function writeArtifactManifest(outputDir, baseSha, trustedSource, batchIds) {
   return manifest
 }
 
+function normalizeComparisonBaseSha(value) {
+  if (!isSha(value)) fail("invalid-comparison-base")
+  return value.toLowerCase()
+}
+
+function patchRecoveryProvenance(baseSha, headSha, comparisonBaseSha, recoveries) {
+  const normalized = recoveries
+    .map((recovery) => ({
+      filename: typeof recovery?.filename === "string" ? recovery.filename : "",
+      status: safeCode(recovery?.status),
+      patchSource: recovery?.patchSource === "immutable-blob-diff" ? "immutable-blob-diff" : null,
+      baseBlobSha: isSha(recovery?.baseBlobSha) ? recovery.baseBlobSha.toLowerCase() : null,
+      headBlobSha: isSha(recovery?.headBlobSha) ? recovery.headBlobSha.toLowerCase() : null,
+      baseBytes: Number.isInteger(recovery?.baseBytes) && recovery.baseBytes >= 0 ? recovery.baseBytes : null,
+      headBytes: Number.isInteger(recovery?.headBytes) && recovery.headBytes >= 0 ? recovery.headBytes : null,
+      ...(typeof recovery?.reason === "string" ? { reason: safeCode(recovery.reason) } : {}),
+    }))
+    .sort((left, right) => (left.filename < right.filename ? -1 : left.filename > right.filename ? 1 : 0))
+  return {
+    kind: "immutable-blob-diff",
+    baseSha: baseSha.toLowerCase(),
+    comparisonBaseSha: comparisonBaseSha.toLowerCase(),
+    headSha: headSha.toLowerCase(),
+    recoveries: normalized,
+  }
+}
+
 export async function prepareReview({
   repo,
   pr,
@@ -181,6 +219,10 @@ export async function prepareReview({
   apiUrl = "https://api.github.com",
   fetchImpl = fetch,
   limitBytes = DEFAULT_BATCH_BYTES,
+  patchResolver = recoverMissingPatches,
+  comparisonResolver = resolveComparisonBaseSha,
+  gitRunner,
+  limits,
 }) {
   if (!isRepo(repo)) fail("invalid-repo")
   if (!isPr(pr)) fail("invalid-pr-number")
@@ -203,6 +245,39 @@ export async function prepareReview({
     token,
     expectedCount: expectedFileCount,
   })
+  const normalizedFiles = files.map(normalizeFile)
+  const needsPatchRecovery = normalizedFiles.some(
+    (file) => typeof file.patch !== "string" || file.patch.length === 0,
+  )
+  const comparisonBaseSha = needsPatchRecovery
+    ? normalizeComparisonBaseSha(
+        await comparisonResolver({
+          repo,
+          baseSha,
+          headSha,
+          token,
+          apiUrl,
+          fetchImpl,
+          ...(limits !== undefined ? { limits } : {}),
+        }),
+      )
+    : null
+  const recovered = needsPatchRecovery
+    ? await patchResolver({
+        repo,
+        baseSha: comparisonBaseSha,
+        headSha,
+        files: normalizedFiles,
+        token,
+        apiUrl,
+        fetchImpl,
+        ...(gitRunner !== undefined ? { gitRunner } : {}),
+        ...(limits !== undefined ? { limits } : {}),
+      })
+    : { files: normalizedFiles, recoveries: [] }
+  if (!recovered || !Array.isArray(recovered.files) || !Array.isArray(recovered.recoveries)) {
+    fail("invalid-recovered-files")
+  }
   const rechecked = await fetchPullRequest({ fetchImpl, apiUrl, repo, pr, token })
   assertPullRequest(rechecked, { repo, pr, baseSha, headSha })
   if (rechecked.changed_files !== expectedFileCount) {
@@ -210,16 +285,23 @@ export async function prepareReview({
     // writing artifacts so callers retry rather than publish an unknown range.
     fail("stale-file-count")
   }
-  const normalizedFiles = files.map(normalizeFile)
   const { manifest, batches } = buildReviewBatches({
     identity: { repo, pr, baseSha, headSha },
     trustedSource,
     prompts,
-    files: normalizedFiles,
+    files: recovered.files,
     expectedFileCount,
     fileListTruncated: truncated,
     limitBytes,
   })
+  if (recovered.recoveries.length > 0) {
+    manifest.patchRecovery = patchRecoveryProvenance(
+      baseSha,
+      headSha,
+      comparisonBaseSha,
+      recovered.recoveries,
+    )
+  }
 
   fs.mkdirSync(outputDir, { recursive: true })
   writeFile(path.join(outputDir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`)

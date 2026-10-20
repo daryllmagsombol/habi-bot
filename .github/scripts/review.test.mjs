@@ -43,6 +43,7 @@ const ABSENT_HEAD = "c".repeat(40)
 const TRUSTED_HELPERS = [
   "review-lib.mjs",
   "review-markdown.mjs",
+  "review-patches.mjs",
   "review-prepare.mjs",
   "review-model.mjs",
   "review-publish.mjs",
@@ -2574,6 +2575,7 @@ test("batched workflow uses a trusted generated matrix with bounded parallelism 
   assert.doesNotMatch(OPENCODE_WORKFLOW, /apiKey/)
   assert.ok(OPENCODE_WORKFLOW.split("review-batches.mjs").length - 1 >= 2)
   assert.ok(OPENCODE_WORKFLOW.split("review-markdown.mjs").length - 1 >= 2)
+  assert.ok(OPENCODE_WORKFLOW.split("review-patches.mjs").length - 1 >= 2)
   assert.match(OPENCODE_WORKFLOW, /--markdown "\$RUNNER_TEMP\/review-aggregate\/review\.md"/)
   assert.ok(OPENCODE_WORKFLOW.includes("path: ${{ runner.temp }}/review-aggregate"))
 
@@ -2585,6 +2587,7 @@ test("batched workflow uses a trusted generated matrix with bounded parallelism 
   const ci = fs.readFileSync(path.join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8")
   assert.match(ci, /review-batches\.test\.mjs/)
   assert.match(ci, /review-markdown\.test\.mjs/)
+  assert.match(ci, /review-patches\.test\.mjs/)
 })
 
 test("batch matrix output contains only generated IDs and fails closed above 256", () => {
@@ -3074,23 +3077,27 @@ test("stale publish leaves comments untouched but writes the honest Markdown rep
   assert.ok(markdown.endsWith(`**Model used:** \`${MODEL}\``))
 })
 
-test("missing native Markdown renderer prevents base trust without a bootstrap pin", () => {
-  const missing = ".github/scripts/review-markdown.mjs"
-  const withoutPin = runBootstrapSelector({ baseAssets: true, omitAsset: missing })
-  assert.equal(withoutPin.result.status, 0)
-  assert.equal(withoutPin.outputs.ready, "false")
-  assert.equal(withoutPin.outputs.source, "missing")
+test("missing native Markdown or patch-recovery helpers prevent base trust without a bootstrap pin", () => {
+  for (const missing of [
+    ".github/scripts/review-markdown.mjs",
+    ".github/scripts/review-patches.mjs",
+  ]) {
+    const withoutPin = runBootstrapSelector({ baseAssets: true, omitAsset: missing })
+    assert.equal(withoutPin.result.status, 0, missing)
+    assert.equal(withoutPin.outputs.ready, "false", missing)
+    assert.equal(withoutPin.outputs.source, "missing", missing)
 
-  const withPin = runBootstrapSelector({
-    baseAssets: true,
-    omitAsset: missing,
-    bootstrapSha: PINNED_SOURCE,
-    headSha: ABSENT_HEAD,
-  })
-  assert.equal(withPin.result.status, 0)
-  assert.equal(withPin.outputs.ready, "true")
-  assert.equal(withPin.outputs.bootstrap, "true")
-  assert.equal(withPin.outputs.source_sha, PINNED_SOURCE)
+    const withPin = runBootstrapSelector({
+      baseAssets: true,
+      omitAsset: missing,
+      bootstrapSha: PINNED_SOURCE,
+      headSha: ABSENT_HEAD,
+    })
+    assert.equal(withPin.result.status, 0, missing)
+    assert.equal(withPin.outputs.ready, "true", missing)
+    assert.equal(withPin.outputs.bootstrap, "true", missing)
+    assert.equal(withPin.outputs.source_sha, PINNED_SOURCE, missing)
+  }
 })
 
 test("bot comment lookup requires the exact Actions bot identity", () => {

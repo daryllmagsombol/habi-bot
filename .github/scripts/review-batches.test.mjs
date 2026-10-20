@@ -3,19 +3,22 @@ import assert from "node:assert/strict"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { createHash } from "node:crypto"
 import { fileURLToPath } from "node:url"
 import { INPUT_LIMIT_BYTES, MODEL, sha256 } from "./review-lib.mjs"
 import { DEFAULT_BATCH_BYTES, MAX_REVIEW_BATCHES, buildReviewBatches } from "./review-batches.mjs"
-import { fetchFiles, prepareReview } from "./review-prepare.mjs"
+import { fetchFiles, normalizeFile, prepareReview } from "./review-prepare.mjs"
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..")
 const REPO = "daryllmagsombol/habi-bot"
 const BASE = "a".repeat(40)
 const HEAD = "b".repeat(40)
 const PINNED = "0123456789abcdef0123456789abcdef01234567"
+const MERGE_BASE = "9".repeat(40)
 const HELPERS = [
   "review-lib.mjs",
   "review-markdown.mjs",
+  "review-patches.mjs",
   "review-batches.mjs",
   "review-prepare.mjs",
   "review-model.mjs",
@@ -98,6 +101,89 @@ function baseFixture(prompts = GUIDES) {
     writeFile(path.join(root, ".github", "scripts", helper), `// fixture ${helper}\n`)
   }
   return root
+}
+
+const passthroughPatches = async ({ files }) => ({ files, recoveries: [] })
+
+function gitBlobSha(bytes) {
+  const buffer = Buffer.from(bytes)
+  return createHash("sha1").update(`blob ${buffer.length}\u0000`).update(buffer).digest("hex")
+}
+
+function gitRecoveryFixture(contents, { baseSha = BASE, headSha = HEAD } = {}) {
+  const baseTreeSha = "1".repeat(40)
+  const headTreeSha = "2".repeat(40)
+  const blobs = new Map()
+  const entries = []
+  const files = []
+  for (const [filename, text] of Object.entries(contents)) {
+    const bytes = Buffer.from(text)
+    const sha = gitBlobSha(bytes)
+    blobs.set(sha, { sha, size: bytes.length, encoding: "base64", content: bytes.toString("base64") })
+    entries.push({ path: filename, mode: "100644", type: "blob", sha, size: bytes.length })
+    files.push({
+      filename,
+      status: "added",
+      additions: text.split("\n").length,
+      deletions: 0,
+      changes: text.split("\n").length,
+      sha,
+      patch: null,
+    })
+  }
+  return {
+    baseTreeSha,
+    headTreeSha,
+    blobs,
+    entries,
+    files,
+    commitTrees: new Map([[baseSha, baseTreeSha], [headSha, headTreeSha]]),
+    trees: new Map([[baseTreeSha, []], [headTreeSha, entries]]),
+  }
+}
+
+function recoveryFetch({
+  files,
+  pr = prData({ changed_files: files.length }),
+  recheck = pr,
+  commitTrees,
+  trees,
+  blobs,
+  comparison,
+}) {
+  const calls = []
+  const fetchImpl = async (url) => {
+    calls.push(url)
+    if (url.includes("/compare/")) {
+      if (!comparison) throw new Error(`unexpected compare: ${url}`)
+      return response(comparison)
+    }
+    if (url.includes("/files?")) return response(files)
+    if (url.endsWith("/pulls/48")) {
+      const pulls = calls.filter((entry) => entry.endsWith("/pulls/48")).length
+      return response(pulls === 1 ? pr : recheck)
+    }
+    if (url.includes("/git/commits/")) {
+      const sha = url.slice(url.lastIndexOf("/") + 1)
+      const treeSha = commitTrees.get(sha)
+      if (!treeSha) throw new Error(`unexpected commit: ${sha}`)
+      return response({ tree: { sha: treeSha } })
+    }
+    if (url.includes("/git/trees/")) {
+      const sha = url.slice(url.lastIndexOf("/") + 1)
+      const tree = trees.get(sha)
+      if (!tree) throw new Error(`unexpected tree: ${sha}`)
+      return response({ sha, tree, truncated: false })
+    }
+    if (url.includes("/git/blobs/")) {
+      const sha = url.slice(url.lastIndexOf("/") + 1)
+      const blob = blobs.get(sha)
+      if (!blob) throw new Error(`unexpected blob: ${sha}`)
+      return response(blob)
+    }
+    throw new Error(`unexpected fetch: ${url}`)
+  }
+  return { fetchImpl, calls }
 }
 
 function prepareFetch({ files, pr = prData(), recheck = pr }) {
@@ -648,6 +734,8 @@ test("prepare writes manifest, per-batch artifacts, trusted helpers, and produce
     outputDir,
     token: "token",
     fetchImpl,
+    comparisonResolver: async () => BASE,
+    patchResolver: passthroughPatches,
   })
 
   assert.equal(calls.filter((url) => url.includes("/files?")).length, 1)
@@ -669,6 +757,7 @@ test("prepare writes manifest, per-batch artifacts, trusted helpers, and produce
     )
   }
   assert.ok(fs.existsSync(path.join(outputDir, "trusted", "review-batches.mjs")))
+  assert.ok(fs.existsSync(path.join(outputDir, "trusted", "review-patches.mjs")))
   assert.deepEqual(
     result.paths.batches.map((entry) => entry.id),
     result.batches.map((entry) => entry.id),
@@ -697,6 +786,437 @@ test("prepare writes manifest, per-batch artifacts, trusted helpers, and produce
   assert.ok(prompt.includes(GUIDES.system))
 })
 
+test("normalizeFile preserves only canonical rename sources", () => {
+  assert.equal(
+    normalizeFile({ filename: "new.ts", status: "renamed", previous_filename: "old.ts" }).previousFilename,
+    "old.ts",
+  )
+  for (const value of ["../old.ts", "/old.ts", "a/../b", "a//b", "a\\b", "", null]) {
+    assert.equal(
+      normalizeFile({ filename: "new.ts", status: "renamed", previous_filename: value }).previousFilename,
+      null,
+    )
+  }
+})
+
+test("prepare resolves the comparison merge base from event base/head and passes it to recovery", async () => {
+  const base = baseFixture()
+  const outputDir = tempDir("habi-review-recover-shas-")
+  const files = [file("src/code.ts", null, { status: "modified" })]
+  const { fetchImpl } = prepareFetch({ files, pr: prData({ changed_files: 1 }) })
+  let comparisonRequest
+  let captured
+  const comparisonResolver = async (request) => {
+    comparisonRequest = request
+    return MERGE_BASE
+  }
+  const patchResolver = async (request) => {
+    captured = request
+    return { files: request.files, recoveries: [] }
+  }
+
+  await prepareReview({
+    repo: REPO,
+    pr: 48,
+    baseSha: BASE,
+    headSha: HEAD,
+    baseRoot: base,
+    outputDir,
+    token: "token",
+    trustedSourceSha: PINNED,
+    bootstrap: true,
+    comparisonResolver,
+    patchResolver,
+    fetchImpl,
+  })
+
+  assert.equal(comparisonRequest.baseSha, BASE)
+  assert.equal(comparisonRequest.headSha, HEAD)
+  assert.equal(captured.baseSha, MERGE_BASE)
+  assert.equal(captured.headSha, HEAD)
+  assert.notEqual(captured.baseSha, BASE)
+  assert.notEqual(captured.baseSha, PINNED)
+  assert.notEqual(captured.headSha, PINNED)
+})
+
+test("prepare uses the production comparison resolver and recovery path", async () => {
+  const base = baseFixture()
+  const outputDir = tempDir("habi-review-comparison-real-")
+  const contents = { "a.txt": "a\n" }
+  const fixture = gitRecoveryFixture(contents, { baseSha: MERGE_BASE })
+  const { fetchImpl, calls } = recoveryFetch({
+    files: fixture.files,
+    commitTrees: fixture.commitTrees,
+    trees: fixture.trees,
+    blobs: fixture.blobs,
+    comparison: {
+      base_commit: { sha: BASE },
+      merge_base_commit: { sha: MERGE_BASE },
+    },
+  })
+
+  const result = await prepareReview({
+    repo: REPO,
+    pr: 48,
+    baseSha: BASE,
+    headSha: HEAD,
+    baseRoot: base,
+    outputDir,
+    token: "token",
+    fetchImpl,
+  })
+
+  assert.equal(calls.filter((url) => url.includes("/compare/")).length, 1)
+  assert.ok(calls.some((url) => url.includes(`/compare/${BASE}...${HEAD}?per_page=1`)))
+  assert.equal(result.manifest.identity.baseSha, BASE)
+  assert.equal(result.manifest.patchRecovery.comparisonBaseSha, MERGE_BASE)
+  assert.ok(calls.some((url) => url.includes(`/git/commits/${HEAD}`)))
+  assert.equal(calls.some((url) => url.includes(`/git/commits/${BASE}`)), false)
+  const segmentText = result.batches
+    .flatMap((batch) => batch.segments)
+    .map((segment) => segment.text)
+    .join("\n")
+  assert.ok(segmentText.includes("+a"))
+})
+
+test("prepare recovers missing patches from immutable Git blobs with deterministic provenance", async () => {
+  const base = baseFixture()
+  const outputDir = tempDir("habi-review-recover-")
+  const contents = {
+    "b.ts": "export const b = 1\n",
+    "a.ts": `export const a = 1\n${"x".repeat(120_000)}\n`,
+  }
+  const fixture = gitRecoveryFixture(contents, { baseSha: MERGE_BASE })
+  const byName = new Map(fixture.files.map((entry) => [entry.filename, entry]))
+  const files = [byName.get("b.ts"), byName.get("a.ts")]
+  const { fetchImpl, calls } = recoveryFetch({
+    files,
+    commitTrees: fixture.commitTrees,
+    trees: fixture.trees,
+    blobs: fixture.blobs,
+  })
+
+  const result = await prepareReview({
+    repo: REPO,
+    pr: 48,
+    baseSha: BASE,
+    headSha: HEAD,
+    baseRoot: base,
+    outputDir,
+    token: "token",
+    trustedSourceSha: PINNED,
+    bootstrap: true,
+    comparisonResolver: async () => MERGE_BASE,
+    fetchImpl,
+  })
+
+  assert.deepEqual(result.manifest.trustedSource, { sha: PINNED, bootstrap: true })
+  assert.equal(result.manifest.fileList.expectedCount, 2)
+  assert.equal(result.manifest.fileList.receivedCount, 2)
+  assert.equal(result.manifest.fileList.complete, true)
+  assert.equal(result.manifest.unreviewableFiles.length, 0)
+  const provenance = result.manifest.patchRecovery
+  assert.equal(provenance.kind, "immutable-blob-diff")
+  assert.equal(provenance.baseSha, BASE)
+  assert.equal(provenance.comparisonBaseSha, MERGE_BASE)
+  assert.equal(provenance.headSha, HEAD)
+  assert.deepEqual(
+    provenance.recoveries.map((recovery) => recovery.filename),
+    ["a.ts", "b.ts"],
+  )
+  for (const recovery of provenance.recoveries) {
+    assert.equal(recovery.status, "recovered")
+    assert.equal(recovery.patchSource, "immutable-blob-diff")
+    assert.equal(recovery.baseBytes, 0)
+    assert.equal(recovery.headBytes, Buffer.byteLength(contents[recovery.filename]))
+    assert.equal(recovery.baseBlobSha, null)
+    assert.match(recovery.headBlobSha, /^[0-9a-f]{40}$/)
+    assert.equal(Object.hasOwn(recovery, "patch"), false)
+  }
+  assert.equal(JSON.stringify(provenance).includes("token"), false)
+  assert.equal(JSON.stringify(provenance).includes("Authorization"), false)
+
+  const segmentText = result.batches
+    .flatMap((batch) => batch.segments)
+    .map((segment) => segment.text)
+    .join("\n")
+  assert.ok(segmentText.includes("+export const a = 1"))
+  assert.ok(segmentText.includes("+export const b = 1"))
+
+  const pullIndexes = calls
+    .map((url, index) => (url.endsWith("/pulls/48") ? index : -1))
+    .filter((index) => index >= 0)
+  assert.equal(pullIndexes.length, 2)
+  const blobIndex = calls.findIndex((url) => url.includes("/git/blobs/"))
+  assert.ok(blobIndex >= 0 && blobIndex < pullIndexes[pullIndexes.length - 1])
+  assert.ok(calls.some((url) => url.includes(`/git/commits/${HEAD}`)))
+  assert.equal(calls.some((url) => url.includes(`/git/commits/${BASE}`)), false)
+  assert.equal(calls.some((url) => url.includes(`/git/commits/${PINNED}`)), false)
+})
+
+test("recovery uses the comparison merge base, not the event base tip", async () => {
+  const base = baseFixture()
+  const outputDir = tempDir("habi-review-recover-diverged-")
+  const oldText = "a\n"
+  const newText = "a\nb\n"
+  const tipText = "a\nc\n"
+  const oldSha = gitBlobSha(oldText)
+  const newSha = gitBlobSha(newText)
+  const tipSha = gitBlobSha(tipText)
+  const baseTree = "3".repeat(40)
+  const headTree = "4".repeat(40)
+  const tipTree = "5".repeat(40)
+  const entry = (sha, size) => [{ path: "file.txt", mode: "100644", type: "blob", sha, size }]
+  const blobs = new Map([
+    [
+      oldSha,
+      {
+        sha: oldSha,
+        size: Buffer.byteLength(oldText),
+        encoding: "base64",
+        content: Buffer.from(oldText).toString("base64"),
+      },
+    ],
+    [
+      newSha,
+      {
+        sha: newSha,
+        size: Buffer.byteLength(newText),
+        encoding: "base64",
+        content: Buffer.from(newText).toString("base64"),
+      },
+    ],
+    [
+      tipSha,
+      {
+        sha: tipSha,
+        size: Buffer.byteLength(tipText),
+        encoding: "base64",
+        content: Buffer.from(tipText).toString("base64"),
+      },
+    ],
+  ])
+  const files = [
+    {
+      filename: "file.txt",
+      status: "modified",
+      additions: 1,
+      deletions: 0,
+      changes: 1,
+      sha: newSha,
+      patch: null,
+    },
+  ]
+  const { fetchImpl, calls } = recoveryFetch({
+    files,
+    commitTrees: new Map([
+      [MERGE_BASE, baseTree],
+      [HEAD, headTree],
+    ]),
+    trees: new Map([
+      [baseTree, entry(oldSha, Buffer.byteLength(oldText))],
+      [headTree, entry(newSha, Buffer.byteLength(newText))],
+      [tipTree, entry(tipSha, Buffer.byteLength(tipText))],
+    ]),
+    blobs,
+  })
+
+  const result = await prepareReview({
+    repo: REPO,
+    pr: 48,
+    baseSha: BASE,
+    headSha: HEAD,
+    baseRoot: base,
+    outputDir,
+    token: "token",
+    trustedSourceSha: PINNED,
+    bootstrap: true,
+    comparisonResolver: async () => MERGE_BASE,
+    fetchImpl,
+  })
+
+  const segmentText = result.batches
+    .flatMap((batch) => batch.segments)
+    .map((segment) => segment.text)
+    .join("\n")
+  assert.ok(segmentText.includes("+b"))
+  assert.equal(segmentText.includes("-c"), false)
+  assert.deepEqual(result.manifest.trustedSource, { sha: PINNED, bootstrap: true })
+  assert.equal(result.manifest.identity.baseSha, BASE)
+  assert.equal(result.manifest.identity.headSha, HEAD)
+  assert.equal(result.manifest.patchRecovery.baseSha, BASE)
+  assert.equal(result.manifest.patchRecovery.comparisonBaseSha, MERGE_BASE)
+  assert.equal(result.manifest.patchRecovery.headSha, HEAD)
+  assert.ok(calls.some((url) => url.includes(`/git/commits/${MERGE_BASE}`)))
+  assert.ok(calls.some((url) => url.includes(`/git/commits/${HEAD}`)))
+  assert.equal(calls.some((url) => url.includes(`/git/commits/${BASE}`)), false)
+  assert.equal(calls.some((url) => url.includes(`/git/trees/${tipTree}`)), false)
+})
+
+test("comparison resolution failure or invalid SHA prevents artifact writes", async () => {
+  const variants = [
+    {
+      name: "throws",
+      resolver: async () => {
+        throw new Error("comparison unavailable")
+      },
+      match: /comparison unavailable/,
+    },
+    {
+      name: "invalid",
+      resolver: async () => "not-a-sha",
+      match: (error) => error.code === "invalid-comparison-base",
+    },
+  ]
+  for (const variant of variants) {
+    const base = baseFixture()
+    const outputDir = tempDir(`habi-review-comparison-${variant.name}-`)
+    const files = [file("src/code.ts", null)]
+    const { fetchImpl } = prepareFetch({ files, pr: prData({ changed_files: 1 }) })
+
+    await assert.rejects(
+      prepareReview({
+        repo: REPO,
+        pr: 48,
+        baseSha: BASE,
+        headSha: HEAD,
+        baseRoot: base,
+        outputDir,
+        token: "token",
+        comparisonResolver: variant.resolver,
+        patchResolver: async () => {
+          throw new Error("recovery must not run")
+        },
+        fetchImpl,
+      }),
+      variant.match,
+      variant.name,
+    )
+
+    for (const relative of ["manifest.json", "matrix.json", "artifact-manifest.json"]) {
+      assert.equal(fs.existsSync(path.join(outputDir, relative)), false, `${variant.name}: ${relative}`)
+    }
+    assert.equal(fs.existsSync(path.join(outputDir, "batches")), false, variant.name)
+  }
+})
+
+test("prepare leaves non-text recovered patches explicitly unreviewable", async () => {
+  const base = baseFixture()
+  const outputDir = tempDir("habi-review-recover-binary-")
+  const fixture = gitRecoveryFixture(
+    { "image.bin": "abc\u0000def" },
+    { baseSha: MERGE_BASE },
+  )
+  const { fetchImpl } = recoveryFetch({
+    files: fixture.files,
+    commitTrees: fixture.commitTrees,
+    trees: fixture.trees,
+    blobs: fixture.blobs,
+  })
+
+  const result = await prepareReview({
+    repo: REPO,
+    pr: 48,
+    baseSha: BASE,
+    headSha: HEAD,
+    baseRoot: base,
+    outputDir,
+    token: "token",
+    comparisonResolver: async () => MERGE_BASE,
+    fetchImpl,
+  })
+
+  assert.equal(result.manifest.fileList.complete, true)
+  assert.equal(result.manifest.unreviewableFiles.length, 1)
+  assert.equal(result.manifest.unreviewableFiles[0].filename, "image.bin")
+  assert.equal(result.manifest.patchRecovery.comparisonBaseSha, MERGE_BASE)
+  assert.equal(result.manifest.patchRecovery.recoveries.length, 1)
+  assert.equal(result.manifest.patchRecovery.recoveries[0].status, "unreviewable")
+  assert.equal(result.manifest.patchRecovery.recoveries[0].reason, "binary-content")
+  assert.equal(result.batches.flatMap((batch) => batch.segments).length, 0)
+})
+
+test("prepare rechecks identity and changed-file count after fallback recovery", async () => {
+  for (const variant of [
+    { name: "count", recheck: prData({ changed_files: 2 }), code: "stale-file-count" },
+    { name: "head", recheck: prData({ head: "f".repeat(40) }), code: "identity-mismatch" },
+  ]) {
+    const base = baseFixture()
+    const outputDir = tempDir(`habi-review-recover-stale-${variant.name}-`)
+    const fixture = gitRecoveryFixture(
+      { "a.ts": "export const a = 1\n" },
+      { baseSha: MERGE_BASE },
+    )
+    const { fetchImpl, calls } = recoveryFetch({
+      files: fixture.files,
+      recheck: variant.recheck,
+      commitTrees: fixture.commitTrees,
+      trees: fixture.trees,
+      blobs: fixture.blobs,
+    })
+
+    await assert.rejects(
+      prepareReview({
+        repo: REPO,
+        pr: 48,
+        baseSha: BASE,
+        headSha: HEAD,
+        baseRoot: base,
+        outputDir,
+        token: "token",
+        comparisonResolver: async () => MERGE_BASE,
+        fetchImpl,
+      }),
+      (error) => error.code === variant.code,
+      variant.name,
+    )
+
+    const pullIndexes = calls
+      .map((url, index) => (url.endsWith("/pulls/48") ? index : -1))
+      .filter((index) => index >= 0)
+    const blobIndex = calls.findIndex((url) => url.includes("/git/blobs/"))
+    assert.ok(blobIndex >= 0 && blobIndex < pullIndexes[pullIndexes.length - 1], variant.name)
+    for (const relative of ["manifest.json", "matrix.json", "artifact-manifest.json"]) {
+      assert.equal(fs.existsSync(path.join(outputDir, relative)), false, `${variant.name}: ${relative}`)
+    }
+    assert.equal(fs.existsSync(path.join(outputDir, "batches")), false, variant.name)
+  }
+})
+
+test("prepare leaves nonempty API patches byte-identical and makes no fallback requests", async () => {
+  const base = baseFixture()
+  const outputDir = tempDir("habi-review-api-patch-")
+  const patch = "@@ -1 +1 @@\n-old\n+new\n"
+  const files = [file("src/code.ts", patch)]
+  const { fetchImpl, calls } = prepareFetch({ files, pr: prData({ changed_files: 1 }) })
+
+  const result = await prepareReview({
+    repo: REPO,
+    pr: 48,
+    baseSha: BASE,
+    headSha: HEAD,
+    baseRoot: base,
+    outputDir,
+    token: "token",
+    comparisonResolver: async () => {
+      throw new Error("comparison must not run")
+    },
+    patchResolver: async () => {
+      throw new Error("recovery must not run")
+    },
+    fetchImpl,
+  })
+
+  assert.equal(calls.some((url) => url.includes("/git/")), false)
+  assert.equal(calls.some((url) => url.includes("/compare/")), false)
+  const segment = result.batches
+    .flatMap((batch) => batch.segments)
+    .find((candidate) => candidate.filename === "src/code.ts")
+  assert.ok(segment)
+  assert.equal(segment.text, patch)
+  assert.equal(Object.hasOwn(result.manifest, "patchRecovery"), false)
+})
+
 test("prepare applies the 60,000-byte default target instead of the old hard-cap default", async () => {
   const base = baseFixture()
   const outputDir = tempDir("habi-review-output-")
@@ -716,6 +1236,7 @@ test("prepare applies the 60,000-byte default target instead of the old hard-cap
     outputDir,
     token: "token",
     fetchImpl,
+    patchResolver: passthroughPatches,
   })
 
   assert.ok(result.batches.length > 1, `batches=${result.batches.length}`)
@@ -743,6 +1264,7 @@ test("prepare rejects a post-fetch changed-file count change before writing arti
       outputDir,
       token: "token",
       fetchImpl,
+      patchResolver: passthroughPatches,
     }),
     (error) => error.code === "stale-file-count",
   )
@@ -771,6 +1293,7 @@ test("prepare rejects a post-fetch head change before writing artifacts", async 
       outputDir,
       token: "token",
       fetchImpl,
+      patchResolver: passthroughPatches,
     }),
     (error) => error.code === "identity-mismatch",
   )

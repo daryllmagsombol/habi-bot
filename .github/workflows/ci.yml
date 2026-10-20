@@ -42,7 +42,7 @@ jobs:
         run: pnpm verify:foundation
 
       - name: Test review helpers
-        run: node --test .github/scripts/review.test.mjs .github/scripts/review-container.test.mjs .github/scripts/review-network.test.mjs .github/scripts/review-batches.test.mjs .github/scripts/review-markdown.test.mjs
+        run: node --test .github/scripts/review.test.mjs .github/scripts/review-container.test.mjs .github/scripts/review-network.test.mjs .github/scripts/review-batches.test.mjs .github/scripts/review-markdown.test.mjs .github/scripts/review-patches.test.mjs
 
       - name: Test SonarQube workflow checks
         run: node --test scripts/ci/sonarqube.test.mjs
