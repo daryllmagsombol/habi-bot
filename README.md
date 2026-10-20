@@ -8,6 +8,8 @@ Habi is planned as a mobile-first, multi-user conversational AI workspace for pr
 
 The repository now contains a **runnable development foundation**, not a usable product. The workspace, web shell, API health endpoint, headless worker entrypoint, shared packages, and local PostgreSQL Compose configuration are implemented. Application smoke tests pass; Compose CLI validation requires the Docker Compose plugin. Authentication, chat, Bots, model calls, Hermes, persistence, queues, and deployment are not implemented.
 
+GitHub Actions now runs the foundation verification, the focused OpenCode review helper/security suites through `node --test .github/scripts/review*.test.mjs`, and a separate focused SonarQube workflow check. The SonarQube scan itself is optional and configuration-gated; no live analysis result is claimed. Passing the review helper/security tests is not evidence of a live review pass.
+
 - **Repository:** [daryllmagsombol/habi-bot](https://github.com/daryllmagsombol/habi-bot)
 - **Roadmap board:** [Habi Roadmap, Project #1](https://github.com/users/daryllmagsombol/projects/1)
 - **Issues:** [H-001 through H-046](https://github.com/daryllmagsombol/habi-bot/issues)
@@ -27,6 +29,7 @@ The foundation is a tooling-only exception to the P0 sequence. **H-009 remains o
 - Shared `@habi/contracts` and `@habi/config` packages. The contract is type-only; the compiled runtime module is intentionally empty.
 - A local-only PostgreSQL 18 Compose service with loopback binding, a healthcheck, resource caps, and a named volume.
 - Smoke tests for the API health response, invalid API configuration, worker lifecycle and inertness, and the honest web page.
+- GitHub Actions foundation verification, OpenCode review helper/security checks, and focused SonarQube workflow checks. Batched review is implemented; only an actual current batched run with complete manifest coverage for the reviewed SHA proves a review pass. The SonarQube scan is optional and configuration-gated.
 
 ### Not implemented
 
@@ -34,14 +37,14 @@ The foundation is a tooling-only exception to the P0 sequence. **H-009 remains o
 - Users, workspaces, Bots, conversations, messages, memory, attachments, or artifacts.
 - Model calls, provider selection, Hermes, or any agent runtime.
 - Database schema, migrations, ORM, durable queue, cache, or background jobs.
-- Application container images, CI/release automation, Nginx, Cloudflare, backups, or production deployment.
+- Release automation, application container images, Nginx, Cloudflare, backups, or production deployment.
 - Bun launch paths or Bun benchmarks. Node.js is the baseline.
 
 The PostgreSQL service is tooling-only. The API and worker do not connect to it yet.
 
 ## Quick start
 
-**Prerequisites:** Node.js `24.20.0`, pnpm `12.5.1`, and the Docker Compose CLI plugin if you want the local database. Bun is deferred.
+**Prerequisites:** the Node.js version in [`.node-version`](.node-version), the pnpm version in [`package.json`](package.json) (`packageManager`), and the Docker Compose CLI plugin if you want the local database. Bun is deferred.
 
 ```bash
 pnpm install --frozen-lockfile
@@ -105,6 +108,18 @@ Run only the focused runner checks with:
 ```bash
 pnpm test:verification
 ```
+
+## Automation and agent guidance
+
+- [CI workflow](.github/workflows/ci.yml) runs `pnpm verify:foundation`, `node --test .github/scripts/review*.test.mjs`, and a separate `node --test scripts/ci/sonarqube.test.mjs`.
+- [OpenCode pull-request review](docs/ci/opencode-review.md) is the operational authority. It is informational and cannot edit the repository or review policy. Batched review is implemented; only an actual current batched run with complete manifest coverage for the reviewed SHA proves a review pass. The approved mode is keyless only: no `OPENCODE_API_KEY` or provider token is required.
+- The review runtime receives public diff input only, has no GitHub/provider token, host mounts, or PR checkout, and permits read/bash only inside its contained runtime while denying all other tool permissions; "read-only" is a repository/output boundary, not a strict no-tools environment. Public HTTPS and DNS remain reachable; endpoint-level restrictions are not claimed. Tool-use output is not accepted as review evidence. A separate publisher owns limited GitHub comment access; share is off, one free model is fixed, and there is no paid fallback. Details and current pins live in the operations doc.
+- A full batched review covers all available changed text in bounded, three-way-parallel batches. It is complete only when every manifest expected text segment was covered by a valid reviewed batch, the file list was complete, and there were no unreviewable patch gaps or failed, missing, or unexpected outcomes; binary, empty, or oversized patches and errors make it incomplete. Full review is bounded to the provided diff and does not guarantee that all bugs are found or that the whole repository was reviewed. Treat a head as fully reviewed only after an actual batched run reports complete coverage for that reviewed SHA; passing helper tests or a planner dry run is not that evidence.
+- It loads only its three trusted base prompts, taken from the immutable event base or an administrator-approved bootstrap commit rather than the PR head; these are CI review input only, not product model skills. It does not load `AGENTS.md`, native skills, or the Sonar guidelines automatically. Editing guidance does not change review policy; trusted prompt changes require a separately reviewed manual update. The CI review container is not product Bot capability; the POC no-shell/no-browser boundary is unchanged.
+- [SonarQube operations](docs/ci/sonarqube.md) cover the optional self-hosted scan, variables, TLS/certificate handling, and configuration-gated behavior. The workflow uses the standalone analyzer config `tsconfig.sonar.json`. Missing configuration skips; configured results may pass or fail. No live SonarQube result, LCOV coverage, or numeric server-gate mandate is claimed.
+- [SonarQube engineering guidelines](docs/SONAR_GUIDELINES.md) are pragmatic repository guidance, not a server quality profile.
+- [AGENTS.md](AGENTS.md) contains the project-specific agent instructions.
+- Focused workflow checks are `node --test .github/scripts/review*.test.mjs` and the separate `node --test scripts/ci/sonarqube.test.mjs`. These are distinct from `pnpm test` and `pnpm test:verification`, and `pnpm verify:foundation` does not include the review-helper or Sonar suites.
 
 ## Intended journey
 
@@ -194,6 +209,10 @@ CI must build the images. Worker concurrency must be capped, containers must hav
 
 ```text
 habi-bot/
+├── .github/
+│   ├── review/              # trusted OpenCode review prompts
+│   ├── scripts/             # review helpers and focused tests
+│   └── workflows/           # ci.yml, opencode-review.yml, sonarqube.yml
 ├── apps/
 │   ├── web/                 # Next.js web shell
 │   └── backend/             # Nest API and headless worker
@@ -201,10 +220,16 @@ habi-bot/
 │   ├── contracts/           # @habi/contracts, compiled to dist
 │   └── config/              # @habi/config, shared tsconfig and ESLint base
 ├── scripts/
-│   └── verify-foundation.mjs
+│   ├── ci/                  # SonarQube workflow checks
+│   └── verify-foundation*   # foundation runner and focused tests
 ├── docs/
+│   ├── ci/                  # OpenCode review and SonarQube operations
+│   ├── SONAR_GUIDELINES.md  # engineering guidance
 │   └── superpowers/         # design, plan, and execution ledger
+├── AGENTS.md                # project-specific agent guidance
 ├── compose.yaml             # local PostgreSQL only
+├── sonar-project.properties
+├── tsconfig.sonar.json      # analyzer-only TypeScript config
 ├── .env.example             # local PostgreSQL placeholders
 ├── package.json
 ├── pnpm-workspace.yaml
@@ -212,7 +237,7 @@ habi-bot/
 └── turbo.json
 ```
 
-There are no application Docker build contexts, production Compose stack, CI workflows, or deployment manifests yet.
+There are no application Docker build contexts, production Compose stack, or release/deploy manifests yet. CI workflows exist; the SonarQube scan is optional and its live service result is unverified.
 
 ## Planning principles
 
