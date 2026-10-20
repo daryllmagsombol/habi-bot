@@ -20,7 +20,9 @@ jobs:
       contents: read
       pull-requests: read
     outputs:
-      ready: ${{ steps.bootstrap.outputs.ready }}
+      ready: ${{ steps.source.outputs.ready }}
+      trusted_source_sha: ${{ steps.source.outputs.source_sha }}
+      bootstrap: ${{ steps.source.outputs.bootstrap }}
     steps:
       - name: Check review eligibility
         id: gate
@@ -44,18 +46,125 @@ jobs:
           path: base
           persist-credentials: false
 
-      - name: Check trusted base assets
-        id: bootstrap
+      - name: Verify event base checkout
         if: steps.gate.outputs.eligible == 'true'
         shell: bash
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          base="$GITHUB_WORKSPACE/base"
-          actual_base="$(git -C "$base" rev-parse HEAD)"
+          actual_base="$(git -C "$GITHUB_WORKSPACE/base" rev-parse HEAD)"
           if [ "$actual_base" != "$BASE_SHA" ]; then
             echo "::error::Trusted base checkout does not match the event base SHA."
+            exit 1
+          fi
+
+      - name: Set up Node.js
+        if: steps.gate.outputs.eligible == 'true'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.20.0
+
+      - name: Select trusted review source
+        id: source
+        if: steps.gate.outputs.eligible == 'true'
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BOOTSTRAP_SHA: ${{ vars.OPENCODE_REVIEW_BOOTSTRAP_SHA }}
+          WORKSPACE: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+
+          const outputPath = process.env.GITHUB_OUTPUT;
+          if (!outputPath) {
+            console.error('::error::GITHUB_OUTPUT is unavailable.');
+            process.exit(1);
+          }
+
+          const assets = [
+            '.github/review/system.md',
+            '.github/review/security.md',
+            '.github/review/bugs.md',
+            '.github/scripts/review-lib.mjs',
+            '.github/scripts/review-prepare.mjs',
+            '.github/scripts/review-model.mjs',
+            '.github/scripts/review-publish.mjs',
+          ];
+          const workspace = process.env.WORKSPACE ?? '';
+          const baseSha = process.env.BASE_SHA ?? '';
+          const bootstrapSha = process.env.BOOTSTRAP_SHA ?? '';
+          const write = (values) => {
+            fs.appendFileSync(
+              outputPath,
+              Object.entries(values)
+                .map(([key, value]) => `${key}=${value}`)
+                .join('\n') + '\n',
+            );
+          };
+          const usable = (root) =>
+            assets.every((relative) => {
+              try {
+                const stat = fs.statSync(path.join(root, relative));
+                return stat.isFile() && stat.size > 0;
+              } catch {
+                return false;
+              }
+            });
+
+          if (usable(path.join(workspace, 'base'))) {
+            write({ ready: 'true', bootstrap: 'false', source: 'base', source_sha: baseSha });
+            console.log('opencode-review: trusted source base');
+            process.exit(0);
+          }
+
+          if (bootstrapSha.length === 0) {
+            write({ ready: 'false', bootstrap: 'false', source: 'missing', source_sha: '' });
+            console.log(
+              '::notice::OpenCode review skipped: trusted base assets are missing and OPENCODE_REVIEW_BOOTSTRAP_SHA is not configured.',
+            );
+            process.exit(0);
+          }
+
+          if (!/^[0-9a-f]{40}$/.test(bootstrapSha)) {
+            console.error(
+              '::error::OPENCODE_REVIEW_BOOTSTRAP_SHA must be an exact 40-character lowercase commit SHA.',
+            );
+            process.exit(1);
+          }
+
+          write({ ready: 'true', bootstrap: 'true', source: 'trusted', source_sha: bootstrapSha });
+          console.log(`opencode-review: trusted source bootstrap ${bootstrapSha.slice(0, 12)}...`);
+          NODE
+
+      - name: Check out approved bootstrap source
+        if: steps.source.outputs.bootstrap == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.source.outputs.source_sha }}
+          path: trusted
+          persist-credentials: false
+
+      - name: Verify selected trusted source
+        if: steps.source.outputs.ready == 'true'
+        shell: bash
+        env:
+          SOURCE: ${{ steps.source.outputs.source }}
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          root="$GITHUB_WORKSPACE/$SOURCE"
+          actual_source="$(git -C "$root" rev-parse HEAD)"
+          if [ "$actual_source" != "$SOURCE_SHA" ]; then
+            echo "::error::Trusted review source checkout does not match the selected immutable SHA."
+            exit 1
+          fi
+          if [ "$SOURCE" = "base" ] && [ "$SOURCE_SHA" != "$BASE_SHA" ]; then
+            echo "::error::Base source SHA does not match the event base SHA."
             exit 1
           fi
           missing=0
@@ -67,26 +176,18 @@ jobs:
             .github/review/system.md \
             .github/review/security.md \
             .github/review/bugs.md; do
-            if [ ! -f "$base/$rel" ]; then
-              echo "::warning::Missing trusted base asset: $rel"
+            if [ ! -f "$root/$rel" ] || [ ! -s "$root/$rel" ]; then
+              echo "::error::Missing or empty trusted review asset: $rel"
               missing=1
             fi
           done
           if [ "$missing" -ne 0 ]; then
-            echo "::notice::OpenCode review skipped: trusted review assets are not on the base commit. This lane activates after these files merge to the base branch."
-            echo "ready=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "ready=true" >> "$GITHUB_OUTPUT"
+            echo "::error::Trusted review source is incomplete; refusing to execute partial review assets."
+            exit 1
           fi
 
-      - name: Set up Node.js
-        if: steps.gate.outputs.eligible == 'true' && steps.bootstrap.outputs.ready == 'true'
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 24.20.0
-
       - name: Build bounded review input
-        if: steps.gate.outputs.eligible == 'true' && steps.bootstrap.outputs.ready == 'true'
+        if: steps.source.outputs.ready == 'true'
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_API_URL: ${{ github.api_url }}
@@ -94,12 +195,46 @@ jobs:
           REVIEW_PR: ${{ github.event.pull_request.number }}
           REVIEW_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           REVIEW_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          REVIEW_BASE_ROOT: ${{ github.workspace }}/base
+          REVIEW_BASE_ROOT: ${{ github.workspace }}/${{ steps.source.outputs.source }}
+          REVIEW_TRUSTED_SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+          REVIEW_BOOTSTRAP: ${{ steps.source.outputs.bootstrap }}
           REVIEW_OUTPUT_DIR: ${{ runner.temp }}/review-input
-        run: node "$GITHUB_WORKSPACE/base/.github/scripts/review-prepare.mjs"
+        run: node "$REVIEW_BASE_ROOT/.github/scripts/review-prepare.mjs"
+
+      - name: Record trusted source metadata
+        if: steps.source.outputs.ready == 'true'
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+          BOOTSTRAP: ${{ steps.source.outputs.bootstrap }}
+          EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          OUTPUT_DIR: ${{ runner.temp }}/review-input
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+
+          const outputDir = process.env.OUTPUT_DIR;
+          fs.mkdirSync(outputDir, { recursive: true });
+          fs.writeFileSync(
+            path.join(outputDir, 'trusted-source.json'),
+            JSON.stringify(
+              {
+                sha: process.env.SOURCE_SHA,
+                bootstrap: process.env.BOOTSTRAP === 'true',
+                eventBaseSha: process.env.EVENT_BASE_SHA,
+                eventHeadSha: process.env.EVENT_HEAD_SHA,
+              },
+              null,
+              2,
+            ) + '\n',
+          );
+          NODE
 
       - name: Upload trusted review input
-        if: steps.gate.outputs.eligible == 'true' && steps.bootstrap.outputs.ready == 'true'
+        if: steps.source.outputs.ready == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: review-input
@@ -161,6 +296,42 @@ jobs:
             --work "$RUNNER_TEMP/opencode-work" \
             --cli "$RUNNER_TEMP/opencode-bin/opencode" \
             --outcome "$RUNNER_TEMP/review-outcome/outcome.json"
+
+      - name: Record reviewed head SHA in outcome
+        if: always()
+        shell: bash
+        env:
+          REVIEW_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          OUTCOME_PATH: ${{ runner.temp }}/review-outcome/outcome.json
+        run: |
+          set -euo pipefail
+          if [ ! -f "$OUTCOME_PATH" ]; then
+            exit 0
+          fi
+          node - <<'NODE'
+          const fs = require('node:fs');
+
+          const headSha = process.env.REVIEW_HEAD_SHA ?? '';
+          if (!/^[0-9a-f]{40}$/.test(headSha)) {
+            console.error('::error::Reviewed head SHA is not an exact commit SHA.');
+            process.exit(1);
+          }
+
+          const outcomePath = process.env.OUTCOME_PATH;
+          const outcome = JSON.parse(fs.readFileSync(outcomePath, 'utf8'));
+          if (outcome.status !== 'reviewed' || !outcome.review || typeof outcome.review.markdown !== 'string') {
+            process.exit(0);
+          }
+
+          const marker = `Reviewed head SHA: ${headSha}`;
+          let markdown = outcome.review.markdown;
+          if (!markdown.includes(marker)) {
+            markdown = `${marker}\n\n${markdown}`;
+          }
+          outcome.review.markdown = markdown;
+          outcome.review.bytes = Buffer.byteLength(markdown);
+          fs.writeFileSync(outcomePath, `${JSON.stringify(outcome, null, 2)}\n`);
+          NODE
 
       - name: Upload bounded review outcome
         if: always()

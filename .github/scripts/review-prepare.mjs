@@ -8,6 +8,7 @@ import {
   isMain,
   isPr,
   isRepo,
+  isLowerSha,
   isSha,
   normalizedRepo,
   safeCode,
@@ -132,9 +133,11 @@ export function buildPrompt({
   headSha,
   prompts,
   files,
+  trustedSource,
   fileListTruncated = false,
   limitBytes = INPUT_LIMIT_BYTES,
 }) {
+  const source = trustedSource ?? { sha: baseSha, bootstrap: false }
   const chunks = []
   let bytes = 0
   const append = (text, limit = limitBytes) => {
@@ -145,10 +148,13 @@ export function buildPrompt({
     return true
   }
 
+  const sourceDescription = source.bootstrap === true
+    ? `an approved immutable bootstrap commit (${source.sha})`
+    : "the immutable event base commit"
   const intro = [
     "# Trusted base review instructions",
     "",
-    "These instructions were loaded from the immutable base commit, not from the pull request.",
+    `These instructions were loaded from ${sourceDescription}, not from the pull request.`,
     "",
     "## System",
     "",
@@ -175,6 +181,7 @@ export function buildPrompt({
     `Base SHA: ${baseSha}`,
     `Head SHA: ${headSha}`,
     `Model: ${MODEL}`,
+    `Trusted instructions source: ${source.bootstrap === true ? `approved bootstrap commit ${source.sha}` : "event base commit"}`,
     "The PR title and description are intentionally excluded.",
     "Only the changed files and patches supplied below are in scope.",
     "",
@@ -295,7 +302,7 @@ function copyTrustedHelpers(baseRoot, outputDir) {
   }
 }
 
-function writeManifest(outputDir, baseSha) {
+function writeManifest(outputDir, baseSha, trustedSource) {
   // Producer-side bookkeeping only. The same-run artifact is trusted by provenance; consumers do not verify these hashes.
   const files = [
     "input.json",
@@ -307,7 +314,7 @@ function writeManifest(outputDir, baseSha) {
   ]
   const hashes = {}
   for (const file of files) hashes[file] = sha256(fs.readFileSync(path.join(outputDir, file)))
-  const manifest = { version: 1, baseSha, model: MODEL, files: hashes }
+  const manifest = { version: 1, baseSha, trustedSource, model: MODEL, files: hashes }
   writeFile(path.join(outputDir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`)
   return manifest
 }
@@ -320,6 +327,8 @@ export async function prepareReview({
   baseRoot,
   outputDir,
   token,
+  trustedSourceSha,
+  bootstrap = false,
   apiUrl = "https://api.github.com",
   fetchImpl = fetch,
   limitBytes = INPUT_LIMIT_BYTES,
@@ -327,6 +336,11 @@ export async function prepareReview({
   if (!isRepo(repo)) fail("invalid-repo")
   if (!isPr(pr)) fail("invalid-pr-number")
   if (!isSha(baseSha) || !isSha(headSha)) fail("invalid-identity")
+
+  const sourceSha = trustedSourceSha ?? baseSha
+  if (!isLowerSha(sourceSha)) fail("invalid-trusted-source")
+  if (bootstrap !== true && sourceSha !== baseSha) fail("invalid-trusted-source")
+  const trustedSource = { sha: sourceSha, bootstrap: bootstrap === true }
 
   const prompts = loadTrustedPrompts(baseRoot)
   const prData = await fetchPullRequest({ fetchImpl, apiUrl, repo, pr, token })
@@ -342,6 +356,7 @@ export async function prepareReview({
     headSha,
     prompts,
     files: normalizedFiles,
+    trustedSource,
     fileListTruncated: truncated,
     limitBytes,
   })
@@ -353,6 +368,7 @@ export async function prepareReview({
     baseSha,
     headSha,
     model: MODEL,
+    trustedSource,
     prompts,
     files: built.includedFiles,
     coverage: built.coverage,
@@ -366,7 +382,7 @@ export async function prepareReview({
     writeFile(path.join(outputDir, "prompts", file), prompts[name])
   }
   copyTrustedHelpers(baseRoot, outputDir)
-  const manifest = writeManifest(outputDir, baseSha)
+  const manifest = writeManifest(outputDir, baseSha, trustedSource)
 
   return { input, prompt: built.prompt, manifest }
 }
@@ -381,6 +397,8 @@ export async function main(env = process.env) {
       baseRoot: env.REVIEW_BASE_ROOT,
       outputDir: env.REVIEW_OUTPUT_DIR,
       token: env.GITHUB_TOKEN,
+      trustedSourceSha: env.REVIEW_TRUSTED_SOURCE_SHA || env.REVIEW_BASE_SHA,
+      bootstrap: env.REVIEW_BOOTSTRAP === "true",
       apiUrl: env.GITHUB_API_URL || "https://api.github.com",
     })
     console.log("opencode-review-prepare: ready")

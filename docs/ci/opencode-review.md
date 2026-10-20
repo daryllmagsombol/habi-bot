@@ -6,7 +6,7 @@ This lane runs an automated, read-only review on internal pull requests. It is d
 
 `.github/workflows/opencode-review.yml` runs on `pull_request` events `opened`, `synchronize`, `reopened`, and `ready_for_review`.
 
-- **prepare** — checks out only the pull request's base SHA, fetches PR metadata and file patches through the GitHub API, and builds a bounded input from base-commit helpers and prompts. It never checks out, installs, or executes files from the PR checkout.
+- **prepare** — checks out the pull request's immutable base SHA, or a separately verified approved bootstrap commit when base review assets are absent. It fetches PR metadata and file patches through the GitHub API and builds a bounded input from that trusted source. It never checks out, installs, or executes files from the PR checkout.
 - **review** — has no repository checkout and `permissions: {}`. It downloads the trusted input artifact with the Actions runtime token, verifies and runs the pinned OpenCode CLI, and writes a bounded outcome artifact.
 - **publish** — has only `pull-requests: write`. It rechecks that the PR is open and still at the same base/head SHAs, then creates or updates one marker comment.
 
@@ -14,7 +14,25 @@ Concurrency is per PR and cancels older runs. Fork PRs are skipped with a workfl
 
 ## Bootstrap
 
-The helpers and all three review prompts must exist on the immutable base SHA. An initial PR that adds these assets to a base without them is expected to skip review until they merge. Later PRs that change them are still reviewed with the base copies until the change merges. This is intentional: a PR cannot supply the review policy or executable helpers that review it. After the first merge, later PRs use the merged base copies automatically.
+The default trusted source is the immutable event base SHA. All review helpers and the three prompts come from that source, never from the PR head or a working tree.
+
+If the base lacks any of the seven trusted assets, the prepare job may use one administrator-controlled repository variable:
+
+```text
+OPENCODE_REVIEW_BOOTSTRAP_SHA=<full 40-character lowercase commit SHA>
+```
+
+The initial reviewed value for the introducing PR is:
+
+```text
+OPENCODE_REVIEW_BOOTSTRAP_SHA=17b90acd17bc70c212043e9c3cc4e09ab29b8a6b
+```
+
+This is a one-time rollout value, not a repository invariant. The value must be an exact, immutable, same-repository commit SHA approved by maintainers. It is read only from repository variables, never from PR content, the PR head, a branch, tag, or prefix. The workflow checks out that SHA into a separate directory, verifies the checked-out HEAD equals the pin, verifies all seven assets, and only then runs the prepare helper. A missing pin produces an explicit skip; a malformed pin fails. If the event base already contains all assets, the base wins and the variable is ignored automatically.
+
+The introducing PR keeps its original `base.sha`; rerunning that PR event still uses the old base and may use the pin. After the assets merge, remove the variable so future reviews use their own base. The trusted source SHA and whether bootstrap was used are recorded in the workflow log and artifact metadata; the publisher includes the source in the comment when the trusted helper supports the metadata field. The diff base and head remain the event's original values; the bootstrap SHA never replaces them.
+
+This is intentional: a PR cannot supply the review policy or executable helpers that review it. Later PRs that change the assets are still reviewed with the trusted base copies until the change merges.
 
 ## Setup
 
@@ -45,15 +63,15 @@ The prepare artifact also contains a producer-side `manifest.json` with hashes f
 
 ## Output and reliability
 
-The published comment starts with `<!-- habi-opencode-review:v1 -->` and is updated in place rather than duplicated. Review text is sanitized: unsafe controls and bidi characters are removed, mentions are escaped, and the text is rendered inside a dynamic inert code fence so HTML and image syntax cannot execute.
+The published comment starts with `<!-- habi-opencode-review:v1 -->` and is updated in place rather than duplicated. Review text is sanitized: unsafe controls and bidi characters are removed, mentions are escaped, and the text is rendered inside a dynamic inert code fence so HTML and image syntax cannot execute. A reviewed outcome is stamped with the event head SHA before upload, and the published comment includes that reviewed SHA; the publisher still rechecks that the PR is open at the same base and head before posting.
 
 The publisher inspects up to 500 existing comments. If the owned marker is not found and that window is incomplete, it skips with a warning instead of creating a duplicate. Review text truncated by the model output cap or the comment-size budget is disclosed by a fixed notice outside the inert fence.
 
-Provider quota, rate-limit, model-unavailable, and CLI timeout outcomes are informational and do not fail required CI. Malformed JSONL, missing stop/final text, tool use, identity mismatch, invalid schema, prompt corruption, and publish failures do fail this workflow. No blanket `continue-on-error` is used.
+Provider quota, rate-limit, model-unavailable, and CLI timeout outcomes are informational and do not fail required CI, but they are not review evidence. Acceptance requires a real final comment from a `reviewed` outcome with sanitized review text and the reviewed head SHA; a notice-only or `unavailable` outcome does not satisfy review acceptance. Malformed JSONL, missing stop/final text, tool use, identity mismatch, invalid schema, prompt corruption, and publish failures do fail this workflow. No blanket `continue-on-error` is used.
 
 ## Security boundaries and limitations
 
-- The workflow assumes trusted repository writers. On an internal PR, the workflow file itself is part of the PR and could be modified; the base helpers and prompts are still taken from the base SHA, but a malicious workflow edit is outside the protection this lane can provide.
+- The workflow assumes trusted repository writers. On an internal PR, the workflow file itself is part of the PR and could be modified; helpers and prompts are still taken from the event base or an administrator-approved bootstrap SHA, but a malicious workflow edit is outside the protection this lane can provide.
 - The review job has no GitHub API permissions and no repository checkout. Its artifact actions use the Actions runtime token; the CLI environment is allowlisted and built from scratch, so the CLI receives no GitHub token or Actions runtime variables. Only `OPENCODE_API_KEY`, when present, is exposed to the CLI.
 - The publish token is limited to `pull-requests: write`; there is no `contents` write, `id-token`, or Actions cache permission.
 - Comment ownership requires the exact GitHub.com Actions bot login `github-actions[bot]`, type `Bot`, and the official id when present. A GHES installation uses a different bot identity; this lane targets GitHub.com.

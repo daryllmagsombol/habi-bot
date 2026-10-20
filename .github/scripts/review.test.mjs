@@ -1,6 +1,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import fs from "node:fs"
+import { spawnSync } from "node:child_process"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
@@ -33,6 +34,21 @@ const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..
 const REPO = "daryllmagsombol/habi-bot"
 const BASE = "a".repeat(40)
 const HEAD = "b".repeat(40)
+const APPROVED_BOOTSTRAP = "17b90acd17bc70c212043e9c3cc4e09ab29b8a6b"
+const ABSENT_HEAD = "c".repeat(40)
+const TRUSTED_ASSET_PATHS = [
+  ".github/review/system.md",
+  ".github/review/security.md",
+  ".github/review/bugs.md",
+  ".github/scripts/review-lib.mjs",
+  ".github/scripts/review-prepare.mjs",
+  ".github/scripts/review-model.mjs",
+  ".github/scripts/review-publish.mjs",
+]
+const OPENCODE_WORKFLOW = fs.readFileSync(
+  path.join(REPO_ROOT, ".github/workflows/opencode-review.yml"),
+  "utf8",
+)
 const ACTIONS_BOT = { id: GITHUB_ACTIONS_BOT_ID, login: GITHUB_ACTIONS_BOT_LOGIN, type: "Bot" }
 const OTHER_BOT = { id: 999, login: "other-actions[bot]", type: "Bot" }
 const REGULAR_USER = { id: 123, login: "octocat", type: "User" }
@@ -160,6 +176,59 @@ function modelFixture({ input = inputFixture(), prompt = PROMPT } = {}) {
     outcomePath: path.join(root, "outcome.json"),
     workPath: path.join(root, "work"),
   }
+}
+
+function workflowStepScript(stepName) {
+  const step = OPENCODE_WORKFLOW.indexOf(`- name: ${stepName}`)
+  assert.notEqual(step, -1, `Missing workflow step: ${stepName}`)
+  const marker = "node - <<'NODE'"
+  const start = OPENCODE_WORKFLOW.indexOf(marker, step)
+  assert.notEqual(start, -1, `Missing inline script for: ${stepName}`)
+  const after = OPENCODE_WORKFLOW.slice(start + marker.length)
+  const end = after.search(/\n\s*NODE\s*(?:\n|$)/)
+  assert.notEqual(end, -1, `Missing inline script terminator for: ${stepName}`)
+  const lines = after.slice(0, end).split("\n")
+  const indents = lines
+    .filter((line) => line.trim().length > 0)
+    .map((line) => line.match(/^ */)[0].length)
+  const common = indents.length > 0 ? Math.min(...indents) : 0
+  return lines.map((line) => line.slice(Math.min(common, line.match(/^ */)[0].length))).join("\n")
+}
+
+function bootstrapSelectorScript() {
+  return workflowStepScript("Select trusted review source")
+}
+
+function runBootstrapSelector({ baseAssets = false, bootstrapSha = "", baseSha = BASE, headSha = HEAD } = {}) {
+  const root = tempDir("habi-review-bootstrap-")
+  if (baseAssets) {
+    for (const relative of TRUSTED_ASSET_PATHS) {
+      writeFile(path.join(root, "base", relative), `// fixture ${relative}\n`)
+    }
+  }
+  const scriptPath = path.join(root, "selector.cjs")
+  const outputPath = path.join(root, "github-output")
+  writeFile(scriptPath, bootstrapSelectorScript())
+  writeFile(outputPath, "")
+  const result = spawnSync(process.execPath, [scriptPath], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      GITHUB_OUTPUT: outputPath,
+      WORKSPACE: root,
+      BASE_SHA: baseSha,
+      BOOTSTRAP_SHA: bootstrapSha,
+      HEAD_SHA: headSha,
+    },
+  })
+  const outputText = fs.readFileSync(outputPath, "utf8")
+  const outputs = {}
+  for (const line of outputText.split("\n")) {
+    if (line.length === 0) continue
+    const separator = line.indexOf("=")
+    outputs[line.slice(0, separator)] = line.slice(separator + 1)
+  }
+  return { result, outputs }
 }
 
 function jsonl(events) {
@@ -402,6 +471,70 @@ test("prepare permits no changed files but reports complete scope", async () => 
   })
   assert.equal(result.input.coverage.filesChanged, 0)
   assert.equal(result.input.coverage.complete, true)
+})
+
+test("bootstrap trusted source is metadata only and leaves event identity unchanged", async () => {
+  const base = baseFixture()
+  const outputDir = tempDir("habi-review-output-")
+  const { fetchImpl } = prepareFetch({ files: [] })
+  const result = await prepareReview({
+    repo: REPO,
+    pr: 7,
+    baseSha: BASE,
+    headSha: HEAD,
+    baseRoot: base,
+    outputDir,
+    token: "token",
+    trustedSourceSha: APPROVED_BOOTSTRAP,
+    bootstrap: true,
+    fetchImpl,
+  })
+
+  assert.equal(result.input.baseSha, BASE)
+  assert.equal(result.input.headSha, HEAD)
+  assert.deepEqual(result.input.trustedSource, { sha: APPROVED_BOOTSTRAP, bootstrap: true })
+  assert.deepEqual(result.manifest.trustedSource, { sha: APPROVED_BOOTSTRAP, bootstrap: true })
+  assert.match(result.prompt, /approved immutable bootstrap commit/)
+  assert.match(
+    result.prompt,
+    new RegExp(`Trusted instructions source: approved bootstrap commit ${APPROVED_BOOTSTRAP}`),
+  )
+  assert.match(result.prompt, new RegExp(`Base SHA: ${BASE}`))
+  assert.match(result.prompt, new RegExp(`Head SHA: ${HEAD}`))
+  assert.doesNotMatch(result.prompt, new RegExp(`Base SHA: ${APPROVED_BOOTSTRAP}`))
+})
+
+test("trusted bootstrap source must be exact and cannot masquerade as base", async () => {
+  const base = baseFixture()
+  const fetchImpl = async () => {
+    throw new Error("trusted source validation must happen before fetching")
+  }
+
+  for (const [trustedSourceSha, bootstrap] of [
+    ["main", true],
+    ["17b90ac", true],
+    ["refs/heads/main", true],
+    [APPROVED_BOOTSTRAP.toUpperCase(), true],
+    [APPROVED_BOOTSTRAP, false],
+    ["", true],
+  ]) {
+    await assert.rejects(
+      prepareReview({
+        repo: REPO,
+        pr: 7,
+        baseSha: BASE,
+        headSha: HEAD,
+        baseRoot: base,
+        outputDir: tempDir("habi-review-output-"),
+        token: "token",
+        trustedSourceSha,
+        bootstrap,
+        fetchImpl,
+      }),
+      (error) => error.code === "invalid-trusted-source",
+      `${trustedSourceSha}/${bootstrap}`,
+    )
+  }
 })
 
 test("JSONL parser accepts only a clean stop with final text", () => {
@@ -755,6 +888,19 @@ test("parser and renderer truncation add a notice outside the fence", () => {
   assert.equal(multibyte.includes("\ufffd"), false)
 })
 
+test("comment records the approved bootstrap source without altering event identity", () => {
+  const bootstrapBody = renderComment(
+    outcomeFixture({ trustedSource: { sha: APPROVED_BOOTSTRAP, bootstrap: true } }),
+  )
+  assert.match(bootstrapBody, /Trusted review source: approved bootstrap commit/)
+  assert.match(bootstrapBody, new RegExp(APPROVED_BOOTSTRAP))
+
+  const baseBody = renderComment(
+    outcomeFixture({ trustedSource: { sha: BASE, bootstrap: false } }),
+  )
+  assert.match(baseBody, /Trusted review source: event base commit/)
+})
+
 test("publisher posts an informational unavailable outcome", async () => {
   const calls = []
   const fetchImpl = async (url, options = {}) => {
@@ -948,6 +1094,159 @@ test("a full early comment page still posts when pagination completes", async ()
   })
   assert.equal(result.status, "posted")
   assert.deepEqual(commentPages, [1, 2])
+})
+
+test("bootstrap selector skips when base assets and pin are absent", () => {
+  const { result, outputs } = runBootstrapSelector()
+  assert.equal(result.status, 0)
+  assert.equal(outputs.ready, "false")
+  assert.equal(outputs.source, "missing")
+  assert.equal(outputs.bootstrap, "false")
+  assert.match(result.stdout, /OPENCODE_REVIEW_BOOTSTRAP_SHA is not configured/)
+})
+
+test("bootstrap selector uses only an exact approved full SHA", () => {
+  const { result, outputs } = runBootstrapSelector({ bootstrapSha: APPROVED_BOOTSTRAP })
+  assert.equal(result.status, 0)
+  assert.equal(outputs.ready, "true")
+  assert.equal(outputs.bootstrap, "true")
+  assert.equal(outputs.source, "trusted")
+  assert.equal(outputs.source_sha, APPROVED_BOOTSTRAP)
+})
+
+test("bootstrap selector rejects malformed and unpinned refs", () => {
+  for (const pin of [
+    "main",
+    "17b90ac",
+    "refs/heads/main",
+    APPROVED_BOOTSTRAP.toUpperCase(),
+    `${APPROVED_BOOTSTRAP} `,
+    "0".repeat(39),
+    "0".repeat(41),
+  ]) {
+    const { result, outputs } = runBootstrapSelector({ bootstrapSha: pin })
+    assert.equal(result.status, 1, pin)
+    assert.equal(outputs.ready, undefined, pin)
+    assert.match(result.stderr, /exact 40-character lowercase commit SHA/, pin)
+  }
+})
+
+test("bootstrap selector never substitutes the PR head", () => {
+  const { result, outputs } = runBootstrapSelector({
+    bootstrapSha: APPROVED_BOOTSTRAP,
+    headSha: ABSENT_HEAD,
+  })
+  assert.equal(result.status, 0)
+  assert.equal(outputs.source_sha, APPROVED_BOOTSTRAP)
+  assert.notEqual(outputs.source_sha, ABSENT_HEAD)
+})
+
+test("base assets always win over any configured bootstrap pin", () => {
+  for (const pin of ["", "main", APPROVED_BOOTSTRAP]) {
+    const { result, outputs } = runBootstrapSelector({ baseAssets: true, bootstrapSha: pin })
+    assert.equal(result.status, 0, pin)
+    assert.equal(outputs.ready, "true", pin)
+    assert.equal(outputs.bootstrap, "false", pin)
+    assert.equal(outputs.source, "base", pin)
+    assert.equal(outputs.source_sha, BASE, pin)
+  }
+})
+
+test("workflow prepends the reviewed head SHA to a reviewed outcome", () => {
+  const root = tempDir("habi-review-head-sha-")
+  const scriptPath = path.join(root, "head-sha.cjs")
+  writeFile(scriptPath, workflowStepScript("Record reviewed head SHA in outcome"))
+
+  const reviewedPath = path.join(root, "reviewed.json")
+  writeFile(
+    reviewedPath,
+    JSON.stringify(
+      outcomeFixture({
+        headSha: HEAD,
+        review: { markdown: "No high-confidence findings in the provided diff.", bytes: 1, truncated: false },
+      }),
+    ),
+  )
+  const reviewedResult = spawnSync(process.execPath, [scriptPath], {
+    encoding: "utf8",
+    env: { ...process.env, REVIEW_HEAD_SHA: HEAD, OUTCOME_PATH: reviewedPath },
+  })
+  assert.equal(reviewedResult.status, 0)
+  const reviewed = JSON.parse(fs.readFileSync(reviewedPath, "utf8"))
+  assert.ok(reviewed.review.markdown.startsWith(`Reviewed head SHA: ${HEAD}`))
+  assert.match(reviewed.review.markdown, /No high-confidence findings/)
+  assert.equal(reviewed.review.bytes, Buffer.byteLength(reviewed.review.markdown))
+
+  const unavailablePath = path.join(root, "unavailable.json")
+  writeFile(
+    unavailablePath,
+    JSON.stringify(
+      outcomeFixture({
+        status: "unavailable",
+        review: null,
+        diagnostic: { code: "provider-rate-limited" },
+      }),
+    ),
+  )
+  const unavailableResult = spawnSync(process.execPath, [scriptPath], {
+    encoding: "utf8",
+    env: { ...process.env, REVIEW_HEAD_SHA: HEAD, OUTCOME_PATH: unavailablePath },
+  })
+  assert.equal(unavailableResult.status, 0)
+  const unavailable = JSON.parse(fs.readFileSync(unavailablePath, "utf8"))
+  assert.equal(unavailable.status, "unavailable")
+  assert.equal(unavailable.review, null)
+})
+
+test("workflow records trusted source metadata without replacing event identity", () => {
+  const root = tempDir("habi-review-source-metadata-")
+  const scriptPath = path.join(root, "metadata.cjs")
+  const outputDir = path.join(root, "review-input")
+  writeFile(scriptPath, workflowStepScript("Record trusted source metadata"))
+  const result = spawnSync(process.execPath, [scriptPath], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      OUTPUT_DIR: outputDir,
+      SOURCE_SHA: APPROVED_BOOTSTRAP,
+      BOOTSTRAP: "true",
+      EVENT_BASE_SHA: BASE,
+      EVENT_HEAD_SHA: HEAD,
+    },
+  })
+  assert.equal(result.status, 0)
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(outputDir, "trusted-source.json"), "utf8")), {
+    sha: APPROVED_BOOTSTRAP,
+    bootstrap: true,
+    eventBaseSha: BASE,
+    eventHeadSha: HEAD,
+  })
+})
+
+test("workflow bootstrap path preserves fork and draft gates", () => {
+  assert.match(
+    OPENCODE_WORKFLOW,
+    /HEAD_REPO: \$\{\{ github\.event\.pull_request\.head\.repo\.full_name \}\}/,
+  )
+  assert.match(OPENCODE_WORKFLOW, /if \[ "\$HEAD_REPO" != "\$BASE_REPO" \]/)
+  assert.match(OPENCODE_WORKFLOW, /if: \$\{\{ github\.event\.pull_request\.draft == false \}\}/)
+  const selector = bootstrapSelectorScript()
+  assert.doesNotMatch(selector, /head\.sha|pull_request|HEAD_SHA/)
+  assert.match(OPENCODE_WORKFLOW, /if: steps\.source\.outputs\.bootstrap == 'true'/)
+  assert.match(OPENCODE_WORKFLOW, /ref: \$\{\{ steps\.source\.outputs\.source_sha \}\}/)
+  assert.match(
+    OPENCODE_WORKFLOW,
+    /REVIEW_BASE_SHA: \$\{\{ github\.event\.pull_request\.base\.sha \}\}/,
+  )
+  assert.match(
+    OPENCODE_WORKFLOW,
+    /REVIEW_HEAD_SHA: \$\{\{ github\.event\.pull_request\.head\.sha \}\}/,
+  )
+  assert.doesNotMatch(
+    OPENCODE_WORKFLOW,
+    /REVIEW_BASE_SHA: \$\{\{ steps\.source\.outputs\.source_sha \}\}/,
+  )
+  assert.match(OPENCODE_WORKFLOW, /trusted-source\.json/)
 })
 
 test("API file pagination is bounded and binary patches remain absent", async () => {

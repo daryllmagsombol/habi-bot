@@ -15,6 +15,7 @@ import {
   fail,
   isMain,
   isPr,
+  isLowerSha,
   isRepo,
   isSha,
   parseOpenCodeJsonl,
@@ -53,6 +54,18 @@ function validateInput(input, expected) {
   if (input.model !== MODEL) fail("model-mismatch")
   if (!Array.isArray(input.files)) fail("invalid-input")
   if (!input.coverage || typeof input.coverage !== "object") fail("invalid-coverage")
+  if (input.trustedSource !== undefined) {
+    if (
+      !input.trustedSource ||
+      !isLowerSha(input.trustedSource.sha) ||
+      typeof input.trustedSource.bootstrap !== "boolean"
+    ) {
+      fail("invalid-input")
+    }
+    if (input.trustedSource.bootstrap === false && input.trustedSource.sha !== input.baseSha) {
+      fail("invalid-input")
+    }
+  }
   if (expected) validateIdentity(expected, input, "input")
 }
 
@@ -84,6 +97,7 @@ function baseOutcome(input, status) {
     headSha: input.headSha,
     model: MODEL,
     coverage: input.coverage,
+    trustedSource: input.trustedSource ?? { sha: input.baseSha, bootstrap: false },
   }
 }
 

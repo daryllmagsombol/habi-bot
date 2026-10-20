@@ -47,6 +47,10 @@ export function isSha(value) {
   return typeof value === "string" && /^[0-9a-f]{40}$/i.test(value)
 }
 
+export function isLowerSha(value) {
+  return typeof value === "string" && /^[0-9a-f]{40}$/.test(value)
+}
+
 export function isRepo(value) {
   return typeof value === "string" && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value)
 }
@@ -298,9 +302,9 @@ export function parseOpenCodeJsonl(raw, exitCode = 0) {
   return { status: "reviewed", text: cut.text, truncated: cut.truncated }
 }
 
-export function renderCoverage(coverage = {}) {
+export function renderCoverage(coverage = {}, trustedSource) {
   const count = (value) => (Number.isInteger(value) && value >= 0 ? value : 0)
-  return [
+  const lines = [
     `- Changed files: ${count(coverage.filesChanged)}`,
     `- File list truncated by GitHub API: ${coverage.fileListTruncated === true ? "yes" : "no"}`,
     `- Files included in prompt: ${count(coverage.filesIncluded)}`,
@@ -310,6 +314,14 @@ export function renderCoverage(coverage = {}) {
     `- Complete diff included: ${coverage.complete === true ? "yes" : "no"}`,
     `- Prompt bytes: ${count(coverage.inputBytes)} / ${count(coverage.inputLimitBytes)}`,
   ]
+  if (trustedSource && isSha(trustedSource.sha)) {
+    lines.push(
+      trustedSource.bootstrap === true
+        ? `- Trusted review source: approved bootstrap commit \`${trustedSource.sha}\``
+        : "- Trusted review source: event base commit",
+    )
+  }
+  return lines
 }
 
 export function validateOutcome(outcome) {
@@ -323,6 +335,18 @@ export function validateOutcome(outcome) {
   } else if (!outcome.diagnostic || typeof outcome.diagnostic.code !== "string") {
     fail("invalid-outcome")
   }
+  if (outcome.trustedSource !== undefined) {
+    if (
+      !outcome.trustedSource ||
+      !isLowerSha(outcome.trustedSource.sha) ||
+      typeof outcome.trustedSource.bootstrap !== "boolean"
+    ) {
+      fail("invalid-outcome")
+    }
+    if (outcome.trustedSource.bootstrap === false && outcome.trustedSource.sha !== outcome.baseSha) {
+      fail("invalid-outcome")
+    }
+  }
 }
 
 export function renderComment(outcome) {
@@ -333,7 +357,7 @@ export function renderComment(outcome) {
     "",
     "Review scope is limited to the provided diff; omitted or unavailable changes cannot be assessed.",
     "",
-    ...renderCoverage(outcome.coverage),
+    ...renderCoverage(outcome.coverage, outcome.trustedSource),
     "",
     "</details>",
     "",
