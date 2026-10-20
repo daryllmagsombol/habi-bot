@@ -92,6 +92,7 @@ jobs:
             '.github/review/security.md',
             '.github/review/bugs.md',
             '.github/scripts/review-lib.mjs',
+            '.github/scripts/review-markdown.mjs',
             '.github/scripts/review-prepare.mjs',
             '.github/scripts/review-model.mjs',
             '.github/scripts/review-publish.mjs',
@@ -176,6 +177,7 @@ jobs:
           missing=0
           for rel in \
             .github/scripts/review-lib.mjs \
+            .github/scripts/review-markdown.mjs \
             .github/scripts/review-prepare.mjs \
             .github/scripts/review-model.mjs \
             .github/scripts/review-publish.mjs \
@@ -388,11 +390,15 @@ jobs:
             --cli "$RUNNER_TEMP/opencode-bin/opencode" \
             --outcome "$RUNNER_TEMP/review-outcome/$batch.json"
 
-      - name: Record reviewed head SHA in outcome
+      - name: Verify outcome identity
         if: always()
         shell: bash
         env:
+          REVIEW_REPO: ${{ github.repository }}
+          REVIEW_PR: ${{ github.event.pull_request.number }}
+          REVIEW_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           REVIEW_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REVIEW_BATCH: ${{ matrix.batch }}
           OUTCOME_PATH: ${{ runner.temp }}/review-outcome/${{ matrix.batch }}.json
         run: |
           set -euo pipefail
@@ -402,26 +408,40 @@ jobs:
           node - <<'NODE'
           const fs = require('node:fs');
 
-          const headSha = process.env.REVIEW_HEAD_SHA ?? '';
-          if (!/^[0-9a-f]{40}$/.test(headSha)) {
-            console.error('::error::Reviewed head SHA is not an exact commit SHA.');
+          const fail = (message) => {
+            console.error(`::error::${message}`);
             process.exit(1);
-          }
+          };
+          const repo = process.env.REVIEW_REPO ?? '';
+          const pr = Number(process.env.REVIEW_PR);
+          const baseSha = process.env.REVIEW_BASE_SHA ?? '';
+          const headSha = process.env.REVIEW_HEAD_SHA ?? '';
+          const batch = process.env.REVIEW_BATCH ?? '';
+          if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) fail('Reviewed repository is invalid.');
+          if (!Number.isInteger(pr) || pr < 1) fail('Reviewed PR number is invalid.');
+          if (!/^[0-9a-f]{40}$/.test(baseSha)) fail('Reviewed base SHA is not an exact commit SHA.');
+          if (!/^[0-9a-f]{40}$/.test(headSha)) fail('Reviewed head SHA is not an exact commit SHA.');
+          if (!/^b[0-9]{4}$/.test(batch)) fail('Reviewed batch ID is invalid.');
 
-          const outcomePath = process.env.OUTCOME_PATH;
-          const outcome = JSON.parse(fs.readFileSync(outcomePath, 'utf8'));
-          if (outcome.status !== 'reviewed' || !outcome.review || typeof outcome.review.markdown !== 'string') {
-            process.exit(0);
+          let outcome;
+          try {
+            outcome = JSON.parse(fs.readFileSync(process.env.OUTCOME_PATH, 'utf8'));
+          } catch {
+            fail('Outcome is not valid JSON.');
           }
-
-          const marker = `Reviewed head SHA: ${headSha}`;
-          let markdown = outcome.review.markdown;
-          if (!markdown.includes(marker)) {
-            markdown = `${marker}\n\n${markdown}`;
+          if (!outcome || typeof outcome !== 'object' || Array.isArray(outcome)) fail('Outcome is not an object.');
+          if (
+            outcome.version !== 1 ||
+            String(outcome.repo).toLowerCase() !== repo.toLowerCase() ||
+            Number(outcome.pr) !== pr ||
+            String(outcome.baseSha).toLowerCase() !== baseSha ||
+            String(outcome.headSha).toLowerCase() !== headSha ||
+            outcome.batchId !== batch
+          ) {
+            fail('Outcome identity does not match the workflow event.');
           }
-          outcome.review.markdown = markdown;
-          outcome.review.bytes = Buffer.byteLength(markdown);
-          fs.writeFileSync(outcomePath, `${JSON.stringify(outcome, null, 2)}\n`);
+          // Attribution stays in trusted outcome metadata and the report header;
+          // the model review body is never modified here.
           NODE
 
       - name: Upload bounded review outcome
@@ -605,13 +625,14 @@ jobs:
             --artifacts "$RUNNER_TEMP/review-artifacts/artifacts.json" \
             --outcomes "$RUNNER_TEMP/review-outcomes" \
             --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-            --aggregate "$RUNNER_TEMP/review-aggregate/aggregate.json"
+            --aggregate "$RUNNER_TEMP/review-aggregate/aggregate.json" \
+            --markdown "$RUNNER_TEMP/review-aggregate/review.md"
 
-      - name: Upload aggregate review JSON
+      - name: Upload aggregate review report
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: review-aggregate
-          path: ${{ runner.temp }}/review-aggregate/aggregate.json
+          path: ${{ runner.temp }}/review-aggregate
           if-no-files-found: warn
           retention-days: 3

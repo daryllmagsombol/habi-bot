@@ -22,6 +22,7 @@ const PROMPT_FILES = [
 ]
 const TRUSTED_HELPERS = [
   "review-lib.mjs",
+  "review-markdown.mjs",
   "review-batches.mjs",
   "review-prepare.mjs",
   "review-model.mjs",

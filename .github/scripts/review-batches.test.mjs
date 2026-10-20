@@ -15,6 +15,7 @@ const HEAD = "b".repeat(40)
 const PINNED = "0123456789abcdef0123456789abcdef01234567"
 const HELPERS = [
   "review-lib.mjs",
+  "review-markdown.mjs",
   "review-batches.mjs",
   "review-prepare.mjs",
   "review-model.mjs",

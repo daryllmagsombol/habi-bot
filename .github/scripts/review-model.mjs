@@ -27,6 +27,7 @@ import {
   truncateUtf8,
   validateIdentity,
   validateReviewManifest,
+  validateTimedOutOpenCodeJsonl,
 } from "./review-lib.mjs"
 import { buildContainedConfig, runContainedCli } from "./review-container.mjs"
 
@@ -299,7 +300,32 @@ export async function runReview({
       if (runtimeCancelled(signal)) throw cancellationFailure(attempts, invocation)
 
       if (result?.error?.code === "ETIMEDOUT") {
+        // Validate all captured stdout before any retry. A timed-out attempt
+        // may be a clean non-terminal partial stream, but malformed events,
+        // tool requests, and fatal completion reasons must never be discarded
+        // and retried. Captured review text is never accepted.
+        let guard
+        try {
+          guard = validateTimedOutOpenCodeJsonl(result.stdout)
+        } catch (error) {
+          if (!(error instanceof ReviewFailure)) throw error
+          setAttempt(
+            attempts,
+            attemptEntry(invocation, "error", error.code, {
+              finishReason: error.details?.finishReason,
+              tokens: error.details?.tokens,
+              providerStatus: error.details?.httpStatus,
+            }),
+          )
+          throw withAttempts(error, attempts)
+        }
         setAttempt(attempts, attemptEntry(invocation, "unavailable", "cli-timeout"))
+        // A captured structured transient provider error may still be retried
+        // normally; a non-retryable structured error is not retried.
+        if (guard.retryable === true && invocation < maxAttempts) {
+          if (runtimeCancelled(signal)) throw cancellationFailure(attempts, invocation)
+          continue
+        }
         outcome = unavailableOutcome(input, "cli-timeout", { attempts })
         break
       }

@@ -389,6 +389,12 @@ function writeAggregate(filePath, aggregate) {
   fs.writeFileSync(filePath, `${JSON.stringify(aggregate, null, 2)}\n`)
 }
 
+function writeMarkdown(filePath, body) {
+  if (typeof filePath !== "string" || filePath.length === 0) return
+  fs.mkdirSync(path.dirname(filePath), { recursive: true })
+  fs.writeFileSync(filePath, body)
+}
+
 export async function publishAggregate({
   token,
   apiUrl = "https://api.github.com",
@@ -402,6 +408,7 @@ export async function publishAggregate({
   runId,
   runUrl,
   aggregatePath,
+  markdownPath,
   fetchImpl = fetch,
   log = console.log,
 } = {}) {
@@ -418,6 +425,9 @@ export async function publishAggregate({
   )
   if (aggregatePath) writeAggregate(aggregatePath, { ...aggregate, runUrl })
   const body = renderAggregateComment(aggregate, { runUrl })
+  // Persist exactly the bytes handed to the comment API. The path is supplied
+  // by trusted workflow context, never by model text or artifact filenames.
+  writeMarkdown(markdownPath, body)
   const result = await publishBody({
     token,
     apiUrl,
@@ -460,6 +470,7 @@ export async function main(env = process.env) {
         runId: env.GITHUB_RUN_ID,
         runUrl: option("--run-url"),
         aggregatePath: option("--aggregate"),
+        markdownPath: option("--markdown"),
       })
       if (result.status === "posted" || result.status === "updated") {
         console.log(`opencode-review-publish: ${result.aggregate.status} (${result.status})`)

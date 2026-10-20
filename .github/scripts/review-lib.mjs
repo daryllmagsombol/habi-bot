@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer"
 import { createHash } from "node:crypto"
 import { fileURLToPath } from "node:url"
 import path from "node:path"
+import { renderReviewMarkdown } from "./review-markdown.mjs"
 
 export const MODEL = "opencode/deepseek-v4.1-flash-free"
 export const REVIEW_MARKER = "<!-- habi-opencode-review:v1 -->"
@@ -638,96 +639,14 @@ export function aggregateReview(manifest, outcomes = []) {
 export function renderAggregateComment(aggregate, { runUrl } = {}) {
   if (!aggregate || aggregate.version !== 1) fail("invalid-aggregate")
   if (!isRunUrl(runUrl, aggregate.identity?.repo)) fail("invalid-run-url")
-  const coverage = aggregate.coverage
-  const complete = aggregate.status === "complete" && coverage.complete === true
-  const statusLine = complete
-    ? "Complete coverage: yes"
-    : "Complete coverage: no — this report is incomplete and is not evidence that the diff is clean."
-  const lines = [
-    REVIEW_MARKER,
-    "## OpenCode review (batched)",
-    "",
-    `Reviewed head SHA: \`${aggregate.identity.headSha}\``,
-    `Trusted review source: ${aggregate.trustedSource.bootstrap ? "approved bootstrap commit" : "event base commit"} \`${aggregate.trustedSource.sha}\``,
-    "",
-    statusLine,
-    "",
-    "<details><summary>Review coverage</summary>",
-    "",
-    `- Changed files: ${aggregate.fileList.expectedCount} expected, ${aggregate.fileList.receivedCount} received; file list complete: ${aggregate.fileList.complete ? "yes" : "no"}`,
-    `- Reviewed files: ${coverage.filesReviewed} / ${coverage.filesTotal}`,
-    `- Reviewed text segments: ${coverage.segmentsReviewed} / ${coverage.segmentsTotal}`,
-    `- Batches: ${coverage.batchesReviewed} reviewed, ${coverage.batchesMissing} missing, ${coverage.batchesUnavailable} unavailable, ${coverage.batchesFailed} failed/invalid`,
-    `- Unreviewable patches (binary, empty, or too large): ${coverage.unreviewableFiles}`,
-    "",
-    "</details>",
-    "",
-  ]
-
-  if (aggregate.issues.length > 0 || aggregate.unexpected.length > 0) {
-    lines.push("Incomplete coverage details:")
-    lines.push("")
-    const counts = new Map()
-    for (const issue of aggregate.issues) counts.set(issue.code, (counts.get(issue.code) ?? 0) + 1)
-    for (const [code, count] of counts) lines.push(`- ${safeCode(code)}: ${count}`)
-    if (aggregate.unexpected.length > 0) {
-      lines.push(`- unexpected outcome artifacts excluded: ${aggregate.unexpected.length}`)
-    }
-    lines.push("")
+  try {
+    return renderReviewMarkdown(aggregate, {
+      runUrl,
+      limitBytes: AGGREGATE_COMMENT_LIMIT_BYTES,
+    })
+  } catch (error) {
+    fail(error instanceof RangeError ? "aggregate-budget" : "invalid-aggregate")
   }
-
-  const findingsBody = aggregate.findings
-    .map((finding) => `### Batch ${finding.batchId}\n\n${finding.markdown}`)
-    .join("\n\n")
-  const truncatedBatchIds = aggregate.findings
-    .filter((finding) => finding.truncated === true)
-    .map((finding) => finding.batchId)
-  const noFindings =
-    coverage.segmentsTotal === 0
-      ? "No reviewable text was available in this run. This does not establish that changed files are clean."
-      : complete
-        ? "No high-confidence findings in the provided diff."
-        : "No high-confidence findings in the reviewed batches. Missing, unavailable, or failed batches were not reviewed."
-
-  const tail = [
-    "",
-    "<details><summary>Full results</summary>",
-    "",
-    `Full bounded per-batch outcomes: [workflow run ${runUrl.split("/").pop()}](${runUrl}) (artifacts \`review-outcome-*\` and \`review-aggregate\`).`,
-    "",
-    "</details>",
-    "",
-    `<sub>Automated review. Informational only; not an approval, merge instruction, or required status check.${coverage.complete ? "" : " Coverage is incomplete as disclosed above."}</sub>`,
-  ]
-
-  const assemble = (markdown, truncated) => {
-    const bodyLines = [...lines]
-    if (truncated) bodyLines.push(AGGREGATE_TRUNCATION_NOTICE, "")
-    if (truncatedBatchIds.length > 0) {
-      bodyLines.push(`${BATCH_TRUNCATION_NOTICE} Affected batches: ${truncatedBatchIds.join(", ")}.`, "")
-    }
-    if (markdown.length > 0) bodyLines.push(renderInertFence(markdown))
-    else bodyLines.push(noFindings)
-    bodyLines.push(...tail)
-    return bodyLines.join("\n")
-  }
-
-  if (findingsBody.length === 0) {
-    return truncateUtf8(assemble("", false), AGGREGATE_COMMENT_LIMIT_BYTES).text
-  }
-
-  let markdown = findingsBody
-  let truncated = false
-  let body = assemble(markdown, truncated)
-  while (Buffer.byteLength(body) > AGGREGATE_COMMENT_LIMIT_BYTES && markdown.length > 0) {
-    truncated = true
-    const currentBytes = Buffer.byteLength(markdown)
-    const nextLimit = Math.max(0, currentBytes - Math.max(1, Math.ceil(currentBytes * 0.2)))
-    markdown = truncateUtf8(markdown, nextLimit).text
-    body = assemble(markdown, true)
-  }
-  if (truncated) body = assemble(markdown, true)
-  return truncateUtf8(body, AGGREGATE_COMMENT_LIMIT_BYTES).text
 }
 
 export function truncateUtf8(value, limitBytes) {
@@ -881,12 +800,17 @@ export function classifyStructuredProviderError(error) {
   return legacy ? providerFailure(legacy, false, extra) : null
 }
 
-export function parseOpenCodeJsonl(raw, exitCode = 0) {
+/**
+ * Validate and scan structured JSONL events. This is the shared validation
+ * path for the strict full parser and the timed-out partial-stream guard, so
+ * malformed events and tool requests cannot be interpreted differently.
+ */
+function scanOpenCodeJsonl(raw) {
   const lines = String(raw ?? "").split(/\r?\n/)
   let sawStepFinish = false
   let stepReason
   let stepTokens
-  let errorEvent
+  let providerError = null
   const texts = []
 
   for (const line of lines) {
@@ -906,12 +830,17 @@ export function parseOpenCodeJsonl(raw, exitCode = 0) {
         break
       case "step_finish": {
         if (!event.part || typeof event.part.reason !== "string") fail("invalid-step-finish")
-        // A tool-calls finish is a security-relevant tool request. Reject it at
-        // the event itself so a provider error event in the same JSONL stream
-        // can never mask it or downgrade it to a retryable unavailable result.
-        if (event.part.reason === "tool-calls") fail("tool-use")
+        const reason = event.part.reason
+        // Security/fatal completion evidence must never be overwritten by a
+        // later benign finish or transient provider error. Tool requests and
+        // fatal finish reasons fail immediately; `length` remains a normal
+        // retryable result and a later `stop` may still complete a clean stream.
+        if (reason === "tool-calls") fail("tool-use")
+        if (reason === "content-filter") fail("content-filter")
+        if (reason === "error") fail("step-error")
+        if (reason !== "stop" && reason !== "length") fail("step-not-stop")
         sawStepFinish = true
-        stepReason = event.part.reason
+        stepReason = reason
         stepTokens = safeTokenCounts(event.part.tokens ?? event.part.usage)
         break
       }
@@ -926,30 +855,69 @@ export function parseOpenCodeJsonl(raw, exitCode = 0) {
       case "tool_use":
         fail("tool-use")
         break
-      case "error":
-        errorEvent = event.error ?? event.properties?.error ?? {}
+      case "error": {
+        const rawError = event.error ?? event.properties?.error ?? {}
+        const failure = classifyStructuredProviderError(rawError)
+        if (!failure) {
+          // Unknown/non-retryable structured errors (for example 401 or a
+          // non-free-tier 403) are fatal immediately and cannot be masked by
+          // a later transient error.
+          const httpStatus = firstHttpStatus(rawError)
+          const errorName = safeErrorName(rawError?.name)
+          fail("cli-error", {
+            ...(httpStatus !== undefined ? { httpStatus } : {}),
+            ...(errorName !== undefined ? { errorName } : {}),
+          })
+        }
+        providerError = failure
         break
+      }
       default:
         fail("unexpected-event")
     }
   }
 
-  if (errorEvent) {
-    const failure = classifyStructuredProviderError(errorEvent)
-    if (failure) {
-      return {
-        status: "unavailable",
-        code: failure.code,
-        retryable: failure.retryable,
-        diagnostic: failure.diagnostic,
-      }
+  return { texts, sawStepFinish, stepReason, stepTokens, providerError }
+}
+
+function partialStepFailure(stepReason) {
+  if (stepReason === "content-filter") return "content-filter"
+  if (stepReason === "error") return "step-error"
+  if (stepReason === "tool-calls") return "tool-use"
+  if (stepReason === undefined || stepReason === "stop" || stepReason === "length") return null
+  return "step-not-stop"
+}
+
+/**
+ * Conservative validation for captured stdout from a timed-out invocation.
+ * A valid non-terminal partial stream may be retried; any malformed/trailing
+ * JSON, invalid event, tool marker, fatal completion reason, or unknown
+ * structured error is fatal. This never accepts review text.
+ */
+export function validateTimedOutOpenCodeJsonl(raw) {
+  if (typeof raw !== "string") fail("malformed-jsonl")
+  const { stepReason, providerError } = scanOpenCodeJsonl(raw)
+
+  const stepFailure = partialStepFailure(stepReason)
+  if (stepFailure) fail(stepFailure)
+
+  return {
+    valid: true,
+    retryable: providerError ? providerError.retryable === true : true,
+    ...(providerError ? { diagnostic: providerError.diagnostic } : {}),
+  }
+}
+
+export function parseOpenCodeJsonl(raw, exitCode = 0) {
+  const { texts, sawStepFinish, stepReason, stepTokens, providerError } = scanOpenCodeJsonl(raw)
+
+  if (providerError) {
+    return {
+      status: "unavailable",
+      code: providerError.code,
+      retryable: providerError.retryable,
+      diagnostic: providerError.diagnostic,
     }
-    const httpStatus = firstHttpStatus(errorEvent)
-    const errorName = safeErrorName(errorEvent?.name)
-    fail("cli-error", {
-      ...(httpStatus !== undefined ? { httpStatus } : {}),
-      ...(errorName !== undefined ? { errorName } : {}),
-    })
   }
   if (exitCode !== 0) fail("cli-exit")
   if (!sawStepFinish) fail("missing-step-finish")
