@@ -806,17 +806,27 @@ async function findOwnedContainer({ run, name, owner }) {
     const result = await run("docker", ["inspect", name])
     stdout = result.stdout
   } catch (error) {
+    // Only a definitive "no such object" answer proves the container is absent.
+    // Any other inspect failure (transient daemon error, timeout, permission,
+    // or malformed reply) cannot establish absence, so fail closed instead of
+    // guessing and reporting an ambiguous create as recoverable/absent.
     if (resourceAbsent(error)) return null
-    return null
+    fail(CONTAINER_CREATE_AMBIGUOUS, error)
   }
   let parsed
   try {
     parsed = JSON.parse(stdout)
-  } catch {
-    return null
+  } catch (error) {
+    fail(CONTAINER_CREATE_AMBIGUOUS, error)
   }
   const info = Array.isArray(parsed) ? parsed[0] : parsed
-  if (!info || typeof info.Id !== "string") return null
+  // Unparseable/malformed inspect output is indistinguishable from an inspect
+  // failure: without an exact id there is no ownership evidence to adopt.
+  if (!info || typeof info !== "object" || typeof info.Id !== "string") {
+    fail(CONTAINER_CREATE_AMBIGUOUS)
+  }
+  // A genuine container is adopted only when both the exact name and the
+  // ownership label match; a different container is never adopted.
   const inspectedName = String(info.Name ?? "").replace(/^\//, "")
   if (inspectedName !== name) return null
   if (info.Config?.Labels?.[OWNER_LABEL] !== owner) return null

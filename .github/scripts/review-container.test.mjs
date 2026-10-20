@@ -142,6 +142,8 @@ function makeHarness({
   incrementDrop = true,
   createAmbiguous = false,
   ambiguousLabelMatches = true,
+  ambiguityInspectError = null,
+  ambiguityInspectStdout = null,
   counterReadFails = false,
   imageCleanupFails = false,
   selftestStatus = 0,
@@ -253,6 +255,13 @@ function makeHarness({
       const target = args[1]
       const record = created.find((entry) => entry.name === target || entry.id === target)
       if (!record || removedContainers.has(record.id)) throw absent(`Error: No such object: ${target}`)
+      if (/^habi-review-[0-9a-f]{8}$/.test(record.name)) {
+        if (ambiguityInspectError) {
+          const error = ambiguityInspectError(record)
+          if (error) throw error
+        }
+        if (ambiguityInspectStdout) return { stdout: ambiguityInspectStdout(record), stderr: "" }
+      }
       const info = inspectInfo(network.name, record)
       if (selftestRunning && record.name.includes("selftest")) info.State.Running = true
       return { stdout: JSON.stringify([info]), stderr: "" }
@@ -340,6 +349,23 @@ function baseOptions(cliPath, harness, overrides = {}) {
     verifyCli: async () => {},
     ...overrides,
   }
+}
+
+// A create-classification test intentionally does not adopt the ambiguous
+// container, so the harness network cleanup would otherwise report its
+// leftover endpoint and mask the primary failure with `cleanup-failed`. This
+// keeps the classification under test visible without claiming whether the
+// container was leaked.
+function createClassificationOptions(cliPath, harness) {
+  return baseOptions(cliPath, harness, {
+    networkModule: {
+      ...harness.networkModule,
+      createIsolatedNetwork: async () => ({
+        ...harness.network,
+        cleanup: async () => ({ ok: true, errors: [] }),
+      }),
+    },
+  })
 }
 
 test("buildContainedConfig passes the container config policy", () => {
@@ -951,6 +977,86 @@ test("ambiguous docker create never adopts an unrelated same-name container", as
       ),
       false,
     )
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("an inconclusive ownership inspect fails closed as an ambiguous create", async () => {
+  const { dir, file } = tempFile()
+  const harness = makeHarness({
+    createAmbiguous: true,
+    // A transient daemon/permission/timeout failure proves nothing about
+    // absence, so it must not be treated as "no such object".
+    ambiguityInspectError: () => {
+      const error = new Error("Cannot connect to the Docker daemon")
+      error.stderr = "Cannot connect to the Docker daemon at unix:///var/run/docker.sock"
+      return error
+    },
+  })
+  try {
+    await assert.rejects(
+      () => runContainedCli(createClassificationOptions(file, harness)),
+      (error) =>
+        error instanceof ContainerFailure &&
+        error.code === "container-create-ambiguous" &&
+        isRetryableIsolationFailure(error) === false,
+    )
+    const review = harness.created.find((entry) => /^habi-review-[0-9a-f]{8}$/.test(entry.name))
+    assert.ok(review)
+    // No adoption: the unprovable container is never added to the owned set and
+    // therefore never target of an ownership-based removal.
+    assert.equal(
+      harness.commands.some(
+        (entry) => entry.args[0] === "rm" && entry.args[1] === "-f" && entry.args[2] === review.id,
+      ),
+      false,
+    )
+    assert.equal(harness.spawns.length, 1)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a definitive absent ownership inspect keeps the create failure classification", async () => {
+  const { dir, file } = tempFile()
+  const harness = makeHarness({
+    createAmbiguous: true,
+    ambiguityInspectError: () => {
+      const error = new Error("Error: No such object: habi-review")
+      error.stderr = "Error: No such object: habi-review"
+      return error
+    },
+  })
+  try {
+    await assert.rejects(
+      () => runContainedCli(createClassificationOptions(file, harness)),
+      (error) =>
+        error instanceof ContainerFailure &&
+        error.code === "container-create-failed" &&
+        isRetryableIsolationFailure(error) === false,
+    )
+    assert.equal(harness.spawns.length, 1)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("malformed ownership inspect output fails closed as an ambiguous create", async () => {
+  const { dir, file } = tempFile()
+  const harness = makeHarness({
+    createAmbiguous: true,
+    ambiguityInspectStdout: () => '{"not":"a container"',
+  })
+  try {
+    await assert.rejects(
+      () => runContainedCli(createClassificationOptions(file, harness)),
+      (error) =>
+        error instanceof ContainerFailure &&
+        error.code === "container-create-ambiguous" &&
+        isRetryableIsolationFailure(error) === false,
+    )
+    assert.equal(harness.spawns.length, 1)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }

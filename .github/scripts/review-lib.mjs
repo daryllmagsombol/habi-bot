@@ -43,7 +43,6 @@ const TOKEN_KEYS = [
   ["reasoning", ["reasoning", "reasoningTokens"]],
 ]
 const RETRYABLE_HTTP_STATUSES = new Set([429, 500, 502, 503, 504])
-const FREE_TIER_ADMISSION_ID = "free-tier-admission"
 
 const UNSAFE_CONTROLS =
   /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g
@@ -744,20 +743,6 @@ function firstHttpStatus(error) {
   return statusesFrom(error)[0]
 }
 
-function isFreeTierAdmission(error) {
-  return [
-    error?.code,
-    error?.type,
-    error?.message,
-    error?.data?.code,
-    error?.data?.type,
-    error?.data?.message,
-    error?.data?.errorCode,
-    error?.data?.error,
-    error?.data?.error?.code,
-  ].some((value) => value === FREE_TIER_ADMISSION_ID)
-}
-
 function providerFailure(code, retryable, extra) {
   return {
     code,
@@ -768,9 +753,12 @@ function providerFailure(code, retryable, extra) {
 
 /**
  * Classify a structured OpenCode `error` event using only explicit numeric
- * statuses and a small sanitized error-name/error-code surface. Arbitrary 403s
- * and 401s stay fatal; only the exact free-tier admission identifier is mapped
- * to an informational (single-retry) outcome.
+ * statuses and a small sanitized error-name/error-code surface. A structured
+ * 403 is retryable-informational: the keyless free-tier gate returns 403 in
+ * several message shapes, so every explicit numeric 403 gets the same single
+ * bounded retry. No credential, header, user-agent, provider, model, or prompt
+ * change is made by that retry. A 403 without a numeric status, every 401, and
+ * unstructured/text-only signals stay fatal.
  */
 export function classifyStructuredProviderError(error) {
   const httpStatus = firstHttpStatus(error)
@@ -789,9 +777,7 @@ export function classifyStructuredProviderError(error) {
       return providerFailure("provider-unavailable", true, extra)
     }
     if (httpStatus === 529) return providerFailure("provider-unavailable", false, extra)
-    if (httpStatus === 403 && isFreeTierAdmission(error)) {
-      return providerFailure("provider-free-tier-rejected", true, extra)
-    }
+    if (httpStatus === 403) return providerFailure("provider-forbidden", true, extra)
     return null
   }
   // Text-only fallbacks remain informational but are never retried: retries
@@ -859,13 +845,22 @@ function scanOpenCodeJsonl(raw) {
         const rawError = event.error ?? event.properties?.error ?? {}
         const failure = classifyStructuredProviderError(rawError)
         if (!failure) {
-          // Unknown/non-retryable structured errors (for example 401 or a
-          // non-free-tier 403) are fatal immediately and cannot be masked by
-          // a later transient error.
+          // Unknown/non-retryable structured errors (for example 401 or a 403
+          // without a numeric status) are fatal immediately and cannot be
+          // masked by a later transient error.
           const httpStatus = firstHttpStatus(rawError)
           const errorName = safeErrorName(rawError?.name)
           fail("cli-error", {
             ...(httpStatus !== undefined ? { httpStatus } : {}),
+            ...(errorName !== undefined ? { errorName } : {}),
+          })
+        }
+        // A structured 403 observed after accepted text remains fatal: text
+        // from a rejected attempt is never discarded and retried away.
+        if (failure.diagnostic?.httpStatus === 403 && texts.length > 0) {
+          const errorName = safeErrorName(rawError?.name)
+          fail("cli-error", {
+            httpStatus: 403,
             ...(errorName !== undefined ? { errorName } : {}),
           })
         }

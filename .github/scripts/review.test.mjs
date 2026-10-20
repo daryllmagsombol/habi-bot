@@ -925,19 +925,21 @@ test("structured provider 429 and 503 retry once and accept the later clean stop
   }
 })
 
-test("only the exact structured free-tier 403 is retried as informational", async () => {
+test("a generic structured 403 retries once and accepts a later clean stop", async () => {
   const fixture = modelFixture()
   let calls = 0
+  const invocations = []
   const result = await runReview({
     ...fixture,
     cliPath: "/fake/opencode",
     expected: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
-    execute: async () => {
+    execute: async ({ prompt, config }) => {
       calls += 1
+      invocations.push({ prompt, config: JSON.parse(JSON.stringify(config)) })
       if (calls === 1) {
         return spawnResult({
           status: 1,
-          stdout: providerErrorJsonl({ status: 403, name: "APIError", code: "free-tier-admission" }),
+          stdout: providerErrorJsonl({ status: 403, name: "APIError", code: "forbidden" }),
         })
       }
       return spawnResult({ stdout: VALID_JSONL })
@@ -947,11 +949,18 @@ test("only the exact structured free-tier 403 is retried as informational", asyn
   assert.equal(calls, 2)
   const written = JSON.parse(fs.readFileSync(fixture.outcomePath, "utf8"))
   assert.equal(written.attempts[0].status, "unavailable")
-  assert.equal(written.attempts[0].code, "provider-free-tier-rejected")
+  assert.equal(written.attempts[0].code, "provider-forbidden")
   assert.equal(written.attempts[0].providerStatus, 403)
+  // The retry reuses the identical validated prompt bytes and fixed keyless
+  // configuration; no provider/model/header/credential change occurs.
+  assert.equal(invocations.length, 2)
+  assert.equal(invocations[0].prompt, invocations[1].prompt)
+  assert.equal(sha256(invocations[0].prompt), sha256(PROMPT))
+  assert.deepEqual(invocations[0].config, invocations[1].config)
+  assert.deepEqual(invocations[1].config, buildContainedConfig())
 })
 
-test("an arbitrary structured 403 stays fatal and is never retried", async () => {
+test("two structured 403s stop as terminal unavailable after the bounded retry", async () => {
   const fixture = modelFixture()
   let calls = 0
   const result = await runReview({
@@ -966,20 +975,44 @@ test("an arbitrary structured 403 stays fatal and is never retried", async () =>
       })
     },
   })
-  assert.equal(result.exitCode, 1)
-  assert.equal(result.status, "error")
-  assert.equal(result.code, "cli-error")
-  assert.equal(calls, 1)
+  assert.equal(calls, 2)
+  assert.equal(result.exitCode, 0)
+  assert.equal(result.status, "unavailable")
+  assert.equal(result.code, "provider-forbidden")
   const written = JSON.parse(fs.readFileSync(fixture.outcomePath, "utf8"))
-  assert.equal(written.status, "error")
-  assert.equal(written.diagnostic.code, "cli-error")
-  assert.equal(written.diagnostic.httpStatus, 403)
-  assert.equal(written.diagnostic.errorName, "apierror")
-  assert.equal(written.attempts.length, 1)
-  assert.equal(written.attempts[0].code, "cli-error")
-  assert.equal(written.attempts[0].providerStatus, 403)
-  assert.equal(JSON.stringify(written).includes("provider detail"), false)
-  assert.equal(JSON.stringify(written).includes("forbidden"), false)
+  assert.equal(written.status, "unavailable")
+  assert.equal(written.diagnostic.code, "provider-forbidden")
+  assert.deepEqual(
+    written.attempts.map((attempt) => [attempt.status, attempt.code, attempt.providerStatus]),
+    [
+      ["unavailable", "provider-forbidden", 403],
+      ["unavailable", "provider-forbidden", 403],
+    ],
+  )
+})
+
+test("403 without a numeric status, 401, and 403 after accepted text stay fatal", async () => {
+  const noStatus = modelFixture()
+  let noStatusCalls = 0
+  const noStatusResult = await runReview({
+    ...noStatus,
+    cliPath: "/fake/opencode",
+    expected: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
+    execute: async () => {
+      noStatusCalls += 1
+      return spawnResult({
+        status: 1,
+        stdout: providerErrorJsonl({ name: "APIError", code: "forbidden" }),
+      })
+    },
+  })
+  assert.equal(noStatusResult.exitCode, 1)
+  assert.equal(noStatusResult.status, "error")
+  assert.equal(noStatusResult.code, "cli-error")
+  assert.equal(noStatusCalls, 1)
+  const noStatusOutcome = JSON.parse(fs.readFileSync(noStatus.outcomePath, "utf8"))
+  assert.equal(noStatusOutcome.attempts.length, 1)
+  assert.equal(noStatusOutcome.diagnostic.httpStatus, undefined)
 
   const unauthorized = modelFixture()
   let unauthorizedCalls = 0
@@ -996,11 +1029,59 @@ test("an arbitrary structured 403 stays fatal and is never retried", async () =>
     },
   })
   assert.equal(unauthorizedResult.exitCode, 1)
+  assert.equal(unauthorizedResult.status, "error")
   assert.equal(unauthorizedResult.code, "cli-error")
   assert.equal(unauthorizedCalls, 1)
   const unauthorizedOutcome = JSON.parse(fs.readFileSync(unauthorized.outcomePath, "utf8"))
+  assert.equal(unauthorizedOutcome.attempts.length, 1)
   assert.equal(unauthorizedOutcome.diagnostic.httpStatus, 401)
   assert.equal(unauthorizedOutcome.diagnostic.errorName, "autherror")
+
+  const afterText = modelFixture()
+  let afterTextCalls = 0
+  const afterTextResult = await runReview({
+    ...afterText,
+    cliPath: "/fake/opencode",
+    expected: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
+    execute: async () => {
+      afterTextCalls += 1
+      return spawnResult({
+        status: 1,
+        stdout: jsonl([
+          { type: "text", part: { type: "text", text: "accepted review text", time: { end: 1 } } },
+          { type: "error", error: { name: "APIError", data: { statusCode: 403, message: "forbidden" } } },
+        ]),
+      })
+    },
+  })
+  assert.equal(afterTextResult.exitCode, 1)
+  assert.equal(afterTextResult.status, "error")
+  assert.equal(afterTextResult.code, "cli-error")
+  assert.equal(afterTextCalls, 1)
+  const afterTextOutcome = JSON.parse(fs.readFileSync(afterText.outcomePath, "utf8"))
+  assert.equal(afterTextOutcome.review, null)
+  assert.equal(afterTextOutcome.attempts.length, 1)
+  assert.equal(afterTextOutcome.attempts[0].code, "cli-error")
+  assert.equal(afterTextOutcome.attempts[0].providerStatus, 403)
+  assert.equal(JSON.stringify(afterTextOutcome).includes("provider detail"), false)
+})
+
+test("unstructured stderr is never trusted as a provider signal", async () => {
+  const fixture = modelFixture()
+  let calls = 0
+  const result = await runReview({
+    ...fixture,
+    cliPath: "/fake/opencode",
+    expected: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
+    execute: async () => {
+      calls += 1
+      return spawnResult({ status: 1, stderr: "Error: 403 Forbidden\nprovider rate limit" })
+    },
+  })
+  assert.equal(calls, 1)
+  assert.equal(result.exitCode, 1)
+  assert.equal(result.status, "error")
+  assert.equal(result.code, "cli-exit")
 })
 
 test("two output-length results remain a bounded fatal error, not a review", async () => {
@@ -1795,24 +1876,26 @@ test("timed-out structured errors retry only when transient", async () => {
   assert.equal(nonTransientResult.status, "unavailable")
   assert.equal(nonTransientResult.code, "cli-timeout")
 
-  const unknown = jsonl([
+  const forbidden = jsonl([
     { type: "error", error: { name: "APIError", data: { statusCode: 403, message: "forbidden" } } },
   ])
-  const unknownFixture = modelFixture()
-  let unknownCalls = 0
-  const unknownResult = await runReview({
-    ...unknownFixture,
+  const forbiddenFixture = modelFixture()
+  let forbiddenCalls = 0
+  const forbiddenResult = await runReview({
+    ...forbiddenFixture,
     cliPath: "/fake/opencode",
     expected: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
     execute: async () => {
-      unknownCalls += 1
-      return spawnResult({ status: null, error: { code: "ETIMEDOUT" }, stdout: unknown })
+      forbiddenCalls += 1
+      return spawnResult({ status: null, error: { code: "ETIMEDOUT" }, stdout: forbidden })
     },
   })
-  assert.equal(unknownCalls, 1)
-  assert.equal(unknownResult.exitCode, 1)
-  assert.equal(unknownResult.status, "error")
-  assert.equal(unknownResult.code, "cli-error")
+  // A structured 403 is retryable-informational, so the shared two-attempt cap
+  // is used and the second 403 leaves the batch terminal unavailable.
+  assert.equal(forbiddenCalls, 2)
+  assert.equal(forbiddenResult.exitCode, 0)
+  assert.equal(forbiddenResult.status, "unavailable")
+  assert.equal(forbiddenResult.code, "cli-timeout")
 })
 
 test("a timeout guard failure replaces the invocation with one terminal error entry", async () => {
