@@ -8,6 +8,8 @@ import {
   RAW_LIMIT_BYTES,
   ReviewFailure,
   fail,
+  findManifestBatch,
+  isBatchId,
   isMain,
   isPr,
   isLowerSha,
@@ -15,9 +17,12 @@ import {
   isSha,
   parseOpenCodeJsonl,
   safeCode,
+  sameTrustedSource,
   sanitizeReview,
+  sha256,
   truncateUtf8,
   validateIdentity,
+  validateReviewManifest,
 } from "./review-lib.mjs"
 import { buildContainedConfig, runContainedCli } from "./review-container.mjs"
 
@@ -48,6 +53,10 @@ function validateInput(input, expected) {
     fail("invalid-input")
   }
   if (input.model !== MODEL) fail("model-mismatch")
+  if (!isBatchId(input.batchId)) fail("invalid-batch")
+  if (typeof input.promptSha256 !== "string" || !/^[0-9a-f]{64}$/.test(input.promptSha256)) {
+    fail("invalid-input")
+  }
   if (!Array.isArray(input.files)) fail("invalid-input")
   if (!input.coverage || typeof input.coverage !== "object") fail("invalid-coverage")
   if (input.trustedSource !== undefined) {
@@ -82,6 +91,8 @@ function baseOutcome(input, status) {
     baseSha: input.baseSha,
     headSha: input.headSha,
     model: MODEL,
+    batchId: input.batchId,
+    promptSha256: input.promptSha256,
     coverage: input.coverage,
     trustedSource: input.trustedSource ?? { sha: input.baseSha, bootstrap: false },
   }
@@ -116,6 +127,8 @@ export async function runReview({
   inputPath,
   promptPath,
   outcomePath,
+  manifestPath,
+  batchId,
   cliPath,
   expected,
   execute = runContainedCli,
@@ -124,12 +137,31 @@ export async function runReview({
   signal,
 } = {}) {
   let input
+  let manifest
+  let batch
   let result
   try {
+    if (typeof manifestPath !== "string" || manifestPath.length === 0) fail("missing-manifest")
+    manifest = readJson(manifestPath)
+    validateReviewManifest(manifest)
+    if (expected) validateIdentity(expected, manifest.identity, "manifest")
+    batch = findManifestBatch(manifest, batchId)
+
     input = readJson(inputPath)
     validateInput(input, expected)
+    if (input.batchId !== batch.id) fail("batch-mismatch")
+    if (input.promptSha256 !== batch.promptSha256) fail("prompt-hash-mismatch")
+    const inputTrusted = input.trustedSource ?? { sha: input.baseSha, bootstrap: false }
+    if (!sameTrustedSource(inputTrusted, manifest.trustedSource)) fail("trusted-source-mismatch")
+
     const prompt = fs.readFileSync(promptPath, "utf8")
     validatePrompt(prompt)
+    // The actual prompt bytes must match both the untrusted batch input and the
+    // trusted preparation manifest before any container execution.
+    const actualPromptSha256 = sha256(prompt)
+    if (actualPromptSha256 !== input.promptSha256 || actualPromptSha256 !== batch.promptSha256) {
+      fail("prompt-hash-mismatch")
+    }
 
     if (typeof cliPath !== "string" || cliPath.length === 0) fail("missing-cli")
 
@@ -173,9 +205,28 @@ export async function runReview({
     return { exitCode: 0, status: outcome.status, code: outcome.diagnostic?.code ?? null }
   } catch (error) {
     const code = safeCode(error instanceof ReviewFailure ? error.code : "review-failure")
-    const outcome = input
-      ? { ...baseOutcome(input, "error"), review: null, diagnostic: { code } }
-      : { version: 1, status: "error", review: null, diagnostic: { code } }
+    let outcome
+    if (input) {
+      outcome = { ...baseOutcome(input, "error"), review: null, diagnostic: { code } }
+    } else if (manifest && batch) {
+      outcome = {
+        version: 1,
+        status: "error",
+        repo: manifest.identity.repo,
+        pr: manifest.identity.pr,
+        baseSha: manifest.identity.baseSha,
+        headSha: manifest.identity.headSha,
+        model: MODEL,
+        batchId: batch.id,
+        promptSha256: batch.promptSha256,
+        coverage: null,
+        trustedSource: manifest.trustedSource,
+        review: null,
+        diagnostic: { code },
+      }
+    } else {
+      outcome = { version: 1, status: "error", review: null, diagnostic: { code } }
+    }
     try {
       writeOutcome(outcomePath, outcome)
     } catch {
@@ -202,6 +253,8 @@ export async function main(env = process.env) {
     inputPath: option("--input"),
     promptPath: option("--prompt"),
     outcomePath: option("--outcome"),
+    manifestPath: option("--manifest"),
+    batchId: option("--batch"),
     cliPath: option("--cli"),
     expected,
   })

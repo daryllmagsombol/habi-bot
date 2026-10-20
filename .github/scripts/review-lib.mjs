@@ -9,6 +9,7 @@ export const INPUT_LIMIT_BYTES = 120_000
 export const OUTPUT_LIMIT_BYTES = 24_000
 export const RAW_LIMIT_BYTES = 2 * 1024 * 1024
 export const COMMENT_LIMIT_BYTES = 60_000
+export const AGGREGATE_COMMENT_LIMIT_BYTES = 28 * 1024
 export const CLI_TIMEOUT_MS = 8 * 60 * 1000
 export const GITHUB_ACTIONS_BOT_LOGIN = "github-actions[bot]"
 export const GITHUB_ACTIONS_BOT_ID = 41898282
@@ -70,6 +71,528 @@ export function validateIdentity(expected, actual, label = "artifact") {
   if (String(actual.headSha).toLowerCase() !== String(expected.headSha).toLowerCase()) fail("identity-mismatch")
 }
 
+export const MANIFEST_VERSION = 2
+export const MAX_BATCHES = 256
+export const MAX_OUTCOME_FILE_BYTES = 64 * 1024
+export const AGGREGATE_TRUNCATION_NOTICE =
+  "> **Aggregate review truncated:** the collected findings exceeded the comment budget. The full bounded per-batch outcomes remain available in the linked workflow run artifacts; trailing findings may be omitted here."
+export const BATCH_TRUNCATION_NOTICE =
+  "> **Batch review text truncated:** input coverage can be complete while one or more model outputs were clipped at the review output limit, so later findings in those batches may be missing. The linked workflow artifacts contain the collected bounded outcomes, not the complete model response."
+
+const HEX64 = /^[0-9a-f]{64}$/
+const FILE_ID = /^f[0-9]{4,}$/
+const SEGMENT_ID = /^s[0-9]{6,}$/
+
+export function isBatchId(value) {
+  return typeof value === "string" && /^b[0-9]{4}$/.test(value)
+}
+
+function isFileId(value) {
+  return typeof value === "string" && FILE_ID.test(value)
+}
+
+function isSegmentId(value) {
+  return typeof value === "string" && SEGMENT_ID.test(value)
+}
+
+function isNonEmptyString(value) {
+  return typeof value === "string" && value.length > 0
+}
+
+function isHex64(value) {
+  return typeof value === "string" && HEX64.test(value)
+}
+
+function isOptionalPosition(value) {
+  return value === null || (Number.isInteger(value) && value >= 0)
+}
+
+export function isRunUrl(value, repo) {
+  if (typeof value !== "string" || !isRepo(repo)) return false
+  const escaped = repo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  return new RegExp(`^https://github\\.com/${escaped}/actions/runs/[0-9]+$`).test(value)
+}
+
+export function sameIdentity(left, right) {
+  return (
+    normalizedRepo(left?.repo) === normalizedRepo(right?.repo) &&
+    Number(left?.pr) === Number(right?.pr) &&
+    String(left?.baseSha).toLowerCase() === String(right?.baseSha).toLowerCase() &&
+    String(left?.headSha).toLowerCase() === String(right?.headSha).toLowerCase()
+  )
+}
+
+export function sameTrustedSource(left, right) {
+  return (
+    Boolean(left) &&
+    Boolean(right) &&
+    isLowerSha(left.sha) &&
+    isLowerSha(right.sha) &&
+    left.sha === right.sha &&
+    left.bootstrap === right.bootstrap
+  )
+}
+
+/**
+ * Validate the trusted preparation manifest v2 shape and internal ID
+ * cross-references. The manifest is a same-run trusted artifact; this is a
+ * strict schema/identity check, not an independent security signature.
+ */
+export function validateReviewManifest(manifest) {
+  if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) fail("invalid-manifest")
+  if (manifest.version !== MANIFEST_VERSION) fail("invalid-manifest")
+  const identity = manifest.identity
+  if (
+    !identity ||
+    !isRepo(identity.repo) ||
+    !isPr(identity.pr) ||
+    !isSha(identity.baseSha) ||
+    !isSha(identity.headSha)
+  ) {
+    fail("invalid-manifest")
+  }
+  const trusted = manifest.trustedSource
+  if (!trusted || !isLowerSha(trusted.sha) || typeof trusted.bootstrap !== "boolean") {
+    fail("invalid-manifest")
+  }
+  if (trusted.bootstrap === false && trusted.sha !== String(identity.baseSha).toLowerCase()) {
+    fail("invalid-manifest")
+  }
+  const list = manifest.fileList
+  if (
+    !list ||
+    !Number.isInteger(list.expectedCount) ||
+    list.expectedCount < 0 ||
+    !Number.isInteger(list.receivedCount) ||
+    list.receivedCount < 0 ||
+    typeof list.complete !== "boolean"
+  ) {
+    fail("invalid-manifest")
+  }
+  if (list.complete === true && list.expectedCount !== list.receivedCount) fail("invalid-manifest")
+  if (
+    !Array.isArray(manifest.files) ||
+    !Array.isArray(manifest.unreviewableFiles) ||
+    !Array.isArray(manifest.batches)
+  ) {
+    fail("invalid-manifest")
+  }
+  if (manifest.batches.length > MAX_BATCHES) fail("too-many-batches")
+
+  const files = new Map()
+  for (const file of manifest.files) {
+    if (
+      !file ||
+      !isFileId(file.id) ||
+      !isNonEmptyString(file.filename) ||
+      !isNonEmptyString(file.status) ||
+      !Number.isInteger(file.patchBytes) ||
+      file.patchBytes < 0 ||
+      !isHex64(file.patchSha256) ||
+      !Number.isInteger(file.segmentCount) ||
+      file.segmentCount < 0
+    ) {
+      fail("invalid-manifest")
+    }
+    if (files.has(file.id)) fail("invalid-manifest")
+    files.set(file.id, file)
+  }
+
+  const unreviewable = new Set()
+  for (const file of manifest.unreviewableFiles) {
+    if (
+      !file ||
+      !isFileId(file.fileId) ||
+      !isNonEmptyString(file.filename) ||
+      !isNonEmptyString(file.reason)
+    ) {
+      fail("invalid-manifest")
+    }
+    if (unreviewable.has(file.fileId)) fail("invalid-manifest")
+    unreviewable.add(file.fileId)
+    const known = files.get(file.fileId)
+    if (known) {
+      if (known.segmentCount !== 0) fail("invalid-manifest")
+      if (known.filename !== file.filename) fail("invalid-manifest")
+    }
+  }
+  for (const file of manifest.files) {
+    if (file.segmentCount === 0 && !unreviewable.has(file.id)) fail("invalid-manifest")
+    if (file.segmentCount > 0 && unreviewable.has(file.id)) fail("invalid-manifest")
+  }
+  const allFileIds = new Set([...files.keys(), ...unreviewable])
+  if (list.receivedCount !== allFileIds.size) fail("invalid-manifest")
+
+  const batchIds = new Set()
+  const segmentIds = new Set()
+  const segmentCounts = new Map()
+  for (const batch of manifest.batches) {
+    if (
+      !batch ||
+      !isBatchId(batch.id) ||
+      !isHex64(batch.promptSha256) ||
+      !Number.isInteger(batch.inputBytes) ||
+      batch.inputBytes < 0 ||
+      batch.inputBytes > INPUT_LIMIT_BYTES ||
+      !Array.isArray(batch.segments)
+    ) {
+      fail("invalid-manifest")
+    }
+    if (batchIds.has(batch.id)) fail("invalid-manifest")
+    batchIds.add(batch.id)
+    for (const segment of batch.segments) {
+      if (
+        !segment ||
+        !isSegmentId(segment.id) ||
+        !isFileId(segment.fileId) ||
+        !isNonEmptyString(segment.filename) ||
+        (segment.hunkId !== null && !isNonEmptyString(segment.hunkId)) ||
+        !Number.isInteger(segment.fragmentIndex) ||
+        !Number.isInteger(segment.fragmentCount) ||
+        segment.fragmentIndex < 1 ||
+        segment.fragmentIndex > segment.fragmentCount ||
+        !isOptionalPosition(segment.oldStart) ||
+        !isOptionalPosition(segment.newStart) ||
+        !isHex64(segment.textSha256) ||
+        !Number.isInteger(segment.textBytes) ||
+        segment.textBytes < 0
+      ) {
+        fail("invalid-manifest")
+      }
+      if (segmentIds.has(segment.id)) fail("invalid-manifest")
+      segmentIds.add(segment.id)
+      const file = files.get(segment.fileId)
+      if (!file || file.filename !== segment.filename) fail("invalid-manifest")
+      segmentCounts.set(segment.fileId, (segmentCounts.get(segment.fileId) ?? 0) + 1)
+    }
+  }
+  for (const file of manifest.files) {
+    if ((segmentCounts.get(file.id) ?? 0) !== file.segmentCount) fail("invalid-manifest")
+  }
+  return manifest
+}
+
+export function findManifestBatch(manifest, batchId) {
+  if (!isBatchId(batchId)) fail("invalid-batch")
+  const matches = manifest.batches.filter((batch) => batch.id === batchId)
+  if (matches.length === 0) fail("batch-not-found")
+  if (matches.length > 1) fail("batch-duplicate")
+  return matches[0]
+}
+
+function validOutcomeForBatch(outcome, batch, manifest) {
+  if (!outcome || typeof outcome !== "object" || Array.isArray(outcome)) {
+    return { ok: false, code: "invalid-outcome" }
+  }
+  if (outcome.version !== 1) return { ok: false, code: "invalid-outcome" }
+  if (outcome.batchId !== batch.id) return { ok: false, code: "batch-mismatch" }
+  if (outcome.promptSha256 !== batch.promptSha256) return { ok: false, code: "prompt-hash-mismatch" }
+  if (!sameIdentity(outcome, manifest.identity)) return { ok: false, code: "identity-mismatch" }
+  if (!sameTrustedSource(outcome.trustedSource, manifest.trustedSource)) {
+    return { ok: false, code: "trusted-source-mismatch" }
+  }
+  if (outcome.model !== MODEL) return { ok: false, code: "model-mismatch" }
+  if (outcome.status === "reviewed") {
+    if (
+      !outcome.review ||
+      typeof outcome.review.markdown !== "string" ||
+      outcome.review.markdown.trim().length === 0 ||
+      !Number.isInteger(outcome.review.bytes) ||
+      typeof outcome.review.truncated !== "boolean"
+    ) {
+      return { ok: false, code: "invalid-outcome" }
+    }
+    return { ok: true, status: "reviewed" }
+  }
+  if (outcome.status === "unavailable" || outcome.status === "error") {
+    if (!outcome.diagnostic || typeof outcome.diagnostic.code !== "string") {
+      return { ok: false, code: "invalid-outcome" }
+    }
+    return { ok: true, status: outcome.status, diagnostic: outcome.diagnostic }
+  }
+  return { ok: false, code: "invalid-outcome" }
+}
+
+function aggregateIssue(issues, code, batchId, extra = {}) {
+  issues.push({ code: safeCode(code), ...(batchId ? { batchId } : {}), ...extra })
+}
+
+/**
+ * Deterministically aggregate bounded per-batch outcomes against the trusted
+ * preparation manifest. Outcomes are untrusted data and never define expected
+ * coverage, identity, hashes, or completeness.
+ */
+export function aggregateReview(manifest, outcomes = []) {
+  validateReviewManifest(manifest)
+  const expected = new Map(manifest.batches.map((batch) => [batch.id, batch]))
+  const byBatch = new Map()
+  const unexpected = []
+  const issues = []
+
+  for (const entry of Array.isArray(outcomes) ? outcomes : []) {
+    if (entry && entry.malformed === true) {
+      const batchId = isBatchId(entry.batchId) ? entry.batchId : null
+      if (batchId && expected.has(batchId)) {
+        if (!byBatch.has(batchId)) byBatch.set(batchId, [])
+        byBatch.get(batchId).push(entry)
+      } else {
+        unexpected.push({ source: entry.source ?? null, code: safeCode(entry.code ?? "malformed-outcome") })
+      }
+      continue
+    }
+    const batchId = entry?.batchId
+    if (!isBatchId(batchId) || !expected.has(batchId)) {
+      unexpected.push({
+        source: typeof entry?.source === "string" ? entry.source : null,
+        batchId: typeof batchId === "string" ? safeCode(batchId) : null,
+        code: "unexpected-batch",
+      })
+      continue
+    }
+    if (!byBatch.has(batchId)) byBatch.set(batchId, [])
+    byBatch.get(batchId).push(entry)
+  }
+
+  const batches = []
+  const findings = []
+  let reviewed = 0
+  let unavailable = 0
+  let failed = 0
+  let missing = 0
+  for (const expectedBatch of manifest.batches) {
+    const entries = byBatch.get(expectedBatch.id) ?? []
+    if (entries.length === 0) {
+      missing += 1
+      batches.push({ id: expectedBatch.id, status: "missing", promptSha256: expectedBatch.promptSha256 })
+      aggregateIssue(issues, "missing-batch", expectedBatch.id)
+      continue
+    }
+    if (entries.length > 1) {
+      failed += 1
+      batches.push({ id: expectedBatch.id, status: "invalid", promptSha256: expectedBatch.promptSha256 })
+      aggregateIssue(issues, "duplicate-batch", expectedBatch.id, { count: entries.length })
+      continue
+    }
+    const entry = entries[0]
+    if (entry.malformed === true) {
+      failed += 1
+      batches.push({ id: expectedBatch.id, status: "invalid", promptSha256: expectedBatch.promptSha256 })
+      aggregateIssue(issues, entry.code ?? "malformed-outcome", expectedBatch.id)
+      continue
+    }
+    const valid = validOutcomeForBatch(entry, expectedBatch, manifest)
+    if (!valid.ok) {
+      failed += 1
+      batches.push({ id: expectedBatch.id, status: "invalid", promptSha256: expectedBatch.promptSha256 })
+      aggregateIssue(issues, valid.code, expectedBatch.id)
+      continue
+    }
+    if (valid.status === "reviewed") {
+      reviewed += 1
+      batches.push({ id: expectedBatch.id, status: "reviewed", promptSha256: expectedBatch.promptSha256 })
+      findings.push({
+        batchId: expectedBatch.id,
+        promptSha256: expectedBatch.promptSha256,
+        markdown: entry.review.markdown,
+        truncated: entry.review.truncated === true,
+      })
+      continue
+    }
+    if (valid.status === "unavailable") {
+      unavailable += 1
+      batches.push({
+        id: expectedBatch.id,
+        status: "unavailable",
+        promptSha256: expectedBatch.promptSha256,
+        diagnostic: valid.diagnostic,
+      })
+      aggregateIssue(issues, "unavailable-batch", expectedBatch.id, {
+        diagnostic: safeCode(valid.diagnostic.code),
+      })
+      continue
+    }
+    failed += 1
+    batches.push({
+      id: expectedBatch.id,
+      status: "error",
+      promptSha256: expectedBatch.promptSha256,
+      diagnostic: valid.diagnostic,
+    })
+    aggregateIssue(issues, "error-batch", expectedBatch.id, { diagnostic: safeCode(valid.diagnostic.code) })
+  }
+
+  const reviewedBatchIds = new Set(batches.filter((batch) => batch.status === "reviewed").map((batch) => batch.id))
+  const reviewedSegmentIds = new Set()
+  for (const batch of manifest.batches) {
+    if (reviewedBatchIds.has(batch.id)) {
+      for (const segment of batch.segments) reviewedSegmentIds.add(segment.id)
+    }
+  }
+
+  const fileSegmentIds = new Map()
+  for (const batch of manifest.batches) {
+    for (const segment of batch.segments) {
+      if (!fileSegmentIds.has(segment.fileId)) fileSegmentIds.set(segment.fileId, [])
+      fileSegmentIds.get(segment.fileId).push(segment.id)
+    }
+  }
+
+  const files = manifest.files.map((file) => {
+    const segmentIds = fileSegmentIds.get(file.id) ?? []
+    const fileReviewed =
+      file.segmentCount > 0 &&
+      segmentIds.length === file.segmentCount &&
+      segmentIds.every((id) => reviewedSegmentIds.has(id))
+    return {
+      id: file.id,
+      filename: file.filename,
+      status: file.status,
+      segmentCount: file.segmentCount,
+      reviewed: fileReviewed,
+    }
+  })
+  const filesReviewed = files.filter((file) => file.reviewed).length
+  const segmentsTotal = manifest.batches.reduce((total, batch) => total + batch.segments.length, 0)
+  const segmentsReviewed = reviewedSegmentIds.size
+  const fileListComplete =
+    manifest.fileList.complete === true && manifest.fileList.expectedCount === manifest.fileList.receivedCount
+  const complete =
+    fileListComplete &&
+    manifest.unreviewableFiles.length === 0 &&
+    unexpected.length === 0 &&
+    issues.length === 0 &&
+    manifest.batches.length === reviewed &&
+    segmentsReviewed === segmentsTotal &&
+    filesReviewed === manifest.files.length &&
+    manifest.files.every((file) => file.segmentCount > 0)
+
+  return {
+    version: 1,
+    status: complete ? "complete" : "incomplete",
+    identity: manifest.identity,
+    trustedSource: manifest.trustedSource,
+    fileList: manifest.fileList,
+    files,
+    batches,
+    findings,
+    issues,
+    unexpected,
+    coverage: {
+      filesTotal: manifest.files.length + manifest.unreviewableFiles.filter((file) => !manifest.files.some((known) => known.id === file.fileId)).length,
+      filesReviewed,
+      filesUnreviewed:
+        manifest.files.length +
+        manifest.unreviewableFiles.filter((file) => !manifest.files.some((known) => known.id === file.fileId)).length -
+        filesReviewed,
+      segmentsTotal,
+      segmentsReviewed,
+      segmentsUnreviewed: segmentsTotal - segmentsReviewed,
+      unreviewableFiles: manifest.unreviewableFiles.length,
+      batchesTotal: manifest.batches.length,
+      batchesReviewed: reviewed,
+      batchesUnavailable: unavailable,
+      batchesFailed: failed,
+      batchesMissing: missing,
+      complete,
+    },
+  }
+}
+
+export function renderAggregateComment(aggregate, { runUrl } = {}) {
+  if (!aggregate || aggregate.version !== 1) fail("invalid-aggregate")
+  if (!isRunUrl(runUrl, aggregate.identity?.repo)) fail("invalid-run-url")
+  const coverage = aggregate.coverage
+  const complete = aggregate.status === "complete" && coverage.complete === true
+  const statusLine = complete
+    ? "Complete coverage: yes"
+    : "Complete coverage: no — this report is incomplete and is not evidence that the diff is clean."
+  const lines = [
+    REVIEW_MARKER,
+    "## OpenCode review (batched)",
+    "",
+    `Reviewed head SHA: \`${aggregate.identity.headSha}\``,
+    `Trusted review source: ${aggregate.trustedSource.bootstrap ? "approved bootstrap commit" : "event base commit"} \`${aggregate.trustedSource.sha}\``,
+    "",
+    statusLine,
+    "",
+    "<details><summary>Review coverage</summary>",
+    "",
+    `- Changed files: ${aggregate.fileList.expectedCount} expected, ${aggregate.fileList.receivedCount} received; file list complete: ${aggregate.fileList.complete ? "yes" : "no"}`,
+    `- Reviewed files: ${coverage.filesReviewed} / ${coverage.filesTotal}`,
+    `- Reviewed text segments: ${coverage.segmentsReviewed} / ${coverage.segmentsTotal}`,
+    `- Batches: ${coverage.batchesReviewed} reviewed, ${coverage.batchesMissing} missing, ${coverage.batchesUnavailable} unavailable, ${coverage.batchesFailed} failed/invalid`,
+    `- Unreviewable patches (binary, empty, or too large): ${coverage.unreviewableFiles}`,
+    "",
+    "</details>",
+    "",
+  ]
+
+  if (aggregate.issues.length > 0 || aggregate.unexpected.length > 0) {
+    lines.push("Incomplete coverage details:")
+    lines.push("")
+    const counts = new Map()
+    for (const issue of aggregate.issues) counts.set(issue.code, (counts.get(issue.code) ?? 0) + 1)
+    for (const [code, count] of counts) lines.push(`- ${safeCode(code)}: ${count}`)
+    if (aggregate.unexpected.length > 0) {
+      lines.push(`- unexpected outcome artifacts excluded: ${aggregate.unexpected.length}`)
+    }
+    lines.push("")
+  }
+
+  const findingsBody = aggregate.findings
+    .map((finding) => `### Batch ${finding.batchId}\n\n${finding.markdown}`)
+    .join("\n\n")
+  const truncatedBatchIds = aggregate.findings
+    .filter((finding) => finding.truncated === true)
+    .map((finding) => finding.batchId)
+  const noFindings =
+    coverage.segmentsTotal === 0
+      ? "No reviewable text was available in this run. This does not establish that changed files are clean."
+      : complete
+        ? "No high-confidence findings in the provided diff."
+        : "No high-confidence findings in the reviewed batches. Missing, unavailable, or failed batches were not reviewed."
+
+  const tail = [
+    "",
+    "<details><summary>Full results</summary>",
+    "",
+    `Full bounded per-batch outcomes: [workflow run ${runUrl.split("/").pop()}](${runUrl}) (artifacts \`review-outcome-*\` and \`review-aggregate\`).`,
+    "",
+    "</details>",
+    "",
+    `<sub>Automated review. Informational only; not an approval, merge instruction, or required status check.${coverage.complete ? "" : " Coverage is incomplete as disclosed above."}</sub>`,
+  ]
+
+  const assemble = (markdown, truncated) => {
+    const bodyLines = [...lines]
+    if (truncated) bodyLines.push(AGGREGATE_TRUNCATION_NOTICE, "")
+    if (truncatedBatchIds.length > 0) {
+      bodyLines.push(`${BATCH_TRUNCATION_NOTICE} Affected batches: ${truncatedBatchIds.join(", ")}.`, "")
+    }
+    if (markdown.length > 0) bodyLines.push(renderInertFence(markdown))
+    else bodyLines.push(noFindings)
+    bodyLines.push(...tail)
+    return bodyLines.join("\n")
+  }
+
+  if (findingsBody.length === 0) {
+    return truncateUtf8(assemble("", false), AGGREGATE_COMMENT_LIMIT_BYTES).text
+  }
+
+  let markdown = findingsBody
+  let truncated = false
+  let body = assemble(markdown, truncated)
+  while (Buffer.byteLength(body) > AGGREGATE_COMMENT_LIMIT_BYTES && markdown.length > 0) {
+    truncated = true
+    const currentBytes = Buffer.byteLength(markdown)
+    const nextLimit = Math.max(0, currentBytes - Math.max(1, Math.ceil(currentBytes * 0.2)))
+    markdown = truncateUtf8(markdown, nextLimit).text
+    body = assemble(markdown, true)
+  }
+  if (truncated) body = assemble(markdown, true)
+  return truncateUtf8(body, AGGREGATE_COMMENT_LIMIT_BYTES).text
+}
+
 export function truncateUtf8(value, limitBytes) {
   const input = String(value ?? "")
   const limit = Math.max(0, Number(limitBytes) || 0)
@@ -99,8 +622,11 @@ export function escapeMentions(value) {
 
 export function renderInertFence(value) {
   const text = escapeMentions(sanitizeReview(value))
-  const runs = [...text.matchAll(/`+/g)].map((match) => match[0].length)
-  const fence = "`".repeat(Math.max(3, ...runs.map((length) => length + 1)))
+  let longestRun = 0
+  for (const match of text.matchAll(/`+/g)) {
+    if (match[0].length > longestRun) longestRun = match[0].length
+  }
+  const fence = "`".repeat(Math.max(3, longestRun + 1))
   return `${fence}text\n${text}\n${fence}`
 }
 

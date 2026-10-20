@@ -2,21 +2,21 @@
 
 This lane runs an automated, informational review on internal pull requests through a hardened container runtime. It is deliberately separate from CI and Sonar: the review is not a required status check, approval, or merge instruction.
 
-Status: the contained source/runtime hardening is in progress. No successful production comment or live pass is claimed yet. Acceptance requires a real GitHub Actions run that completes the in-container network self-test and publishes a `reviewed` outcome.
+Status: batched review is implemented. A head is fully reviewed only when an actual current batched GitHub Actions run completes every trusted batch, passes the in-container self-test, publishes an aggregate report, and reports complete manifest coverage for that reviewed SHA. Prior single-batch comments and helper tests are not that evidence.
 
 ## Trigger and jobs
 
 `.github/workflows/opencode-review.yml` runs on `pull_request` events `opened`, `synchronize`, `reopened`, and `ready_for_review`.
 
-- **prepare** — checks out the pull request's immutable base SHA, or a separately verified approved bootstrap commit when base review assets are absent. It fetches PR metadata and file patches through the GitHub API and builds a bounded input from that trusted source. It never checks out, installs, or executes files from the PR checkout.
-- **review** — has no repository checkout and `permissions: {}`. It downloads the trusted input artifact with the Actions runtime token, verifies Linux/Docker/iptables/passwordless-sudo prerequisites, verifies the pinned OpenCode CLI, and runs the review through the container runtime. The runtime builds its own fixed build context from the verified CLI and entry point; no PR artifact or PR code is used as build context.
-- **publish** — has only `pull-requests: write`. It rechecks that the PR is open and still at the same base/head SHAs, then creates or updates one marker comment. The publisher is unchanged from the security-reviewed implementation.
+- **prepare** — checks out the pull request's immutable base SHA, or a separately verified approved bootstrap commit when base review assets are absent. It fetches PR metadata and file patches through the GitHub API and builds a version 2 manifest plus bounded per-batch prompts from that trusted source. It emits a matrix containing only generated batch IDs and count. It never checks out, installs, or executes files from the PR checkout.
+- **review** — is a matrix job with `max-parallel: 4` and `fail-fast: false`, so up to four isolated VMs review batches concurrently. Each job has no repository checkout and `permissions: {}`, downloads the trusted artifact, verifies Linux/Docker/iptables/passwordless-sudo prerequisites, verifies the pinned OpenCode CLI, and runs only its own generated batch ID through the unchanged container runtime. The model validates the manifest entry, batch ID, input prompt hash, and actual prompt bytes before execution.
+- **publish** — has `pull-requests: write` and `actions: read`. It lists this run's artifacts as the authority for which outcome artifacts exist, downloads `review-outcome-*` without flattening, validates artifact-name/batch/filename relationships and each bounded outcome against the trusted manifest, rechecks that the PR is open at the same base/head SHAs, and creates or updates one owned aggregate comment. It runs after matrix success or ordinary matrix failure when preparation succeeded; cancellation may prevent publication.
 
 Concurrency is per PR and cancels older runs. Fork PRs are skipped with a workflow notice. Draft PRs are skipped until `ready_for_review`.
 
 ## Bootstrap
 
-The default trusted source is the immutable event base SHA. All review helpers, runtime modules, and the three prompts come from that source, never from the PR head or a working tree.
+The default trusted source is the immutable event base SHA. All review helpers, the batch planner, runtime modules, and the three prompts come from that source, never from the PR head or a working tree. Both the base probe and the post-checkout verification require the planner alongside the other trusted helpers.
 
 If the base lacks any trusted asset, the prepare job may use one administrator-controlled repository variable:
 
@@ -26,7 +26,7 @@ OPENCODE_REVIEW_BOOTSTRAP_SHA=<full 40-character lowercase commit SHA>
 
 The value must be an exact, immutable, same-repository commit SHA approved by maintainers. It is read only from repository variables, never from PR content, the PR head, a branch, tag, or prefix. The workflow checks out that SHA into a separate directory, verifies the checked-out HEAD equals the pin, verifies every trusted asset, and only then runs the prepare helper. A missing pin produces an explicit skip; a malformed pin fails. If the event base already contains all assets, the base wins and the variable is ignored automatically.
 
-The previously discussed rollout pin is not a current recommendation. That commit predates the container runtime modules and cannot provide them; it is intentionally not repeated here. After the runtime/security review is accepted, maintainers must set a new reviewed full SHA that contains all trusted assets. This branch neither commits nor repins that variable. The workflow's bootstrap logic is otherwise unchanged and does not substitute the PR head.
+A bootstrap pin must be a full commit that contains the planner, helpers, runtime modules, and prompts. Historical pins that predate those assets cannot provide them and are intentionally not repeated here. Maintainers point the variable at a reviewed full SHA containing all trusted assets; the value belongs to repository configuration rather than this document. Remove or repoint it after the event base contains those assets. The workflow's bootstrap logic is otherwise unchanged and does not substitute the PR head.
 
 The trusted source SHA and whether bootstrap was used are recorded in the workflow log and artifact metadata. The diff base and head remain the event's original values; the bootstrap SHA never replaces them, and the trusted-source metadata is immutable for the run.
 
@@ -57,31 +57,38 @@ The review job runs on GitHub-hosted `ubuntu-latest` only, with `permissions: {}
 
 The self-test is mandatory inside `runContainedCli` before any model call; the workflow does not duplicate it. Network-module errors are fatal. The 15-minute job timeout covers image pull/build, the self-test, and the model run.
 
-## Input, output, and privacy
+## Input, batching, and privacy
 
-The model input is capped at approximately 120 KB. The outcome review text is capped at approximately 24 KB, raw CLI stdout is capped at 2 MB, and the model process has an 8-minute timeout inside a 15-minute job. Files beyond the input limit, patches truncated by the limit, and files GitHub reports without a patch (binary, empty, or too large) are listed explicitly in the coverage summary. The lane never claims a complete review of such a diff.
+The prepare step covers all available changed text from the GitHub files API (up to its 3,000-file window) and splits it deterministically into at most 256 batches. Each batch is capped at approximately 120 KB including framing, and may split a large patch across hunks or line-aligned fragments; oversized single lines are split at UTF-8 boundaries with explicit continuation metadata. The manifest is the coverage authority: it records expected and received file counts, per-file patch hashes and segment counts, generated batch IDs and prompt hashes, and unreviewable files. It is trusted by same-run artifact provenance, not by a consumer-side hash check, and is never read from PR content.
+
+The model job runs each batch independently at up to four-way parallelism. Batch IDs are generated (`b0001`...) and validated before any path is used; PR filenames never enter artifact paths or matrix values. Every batch prompt includes all three trusted guides. Raw CLI stdout is capped at 2 MB; each outcome review text is capped at approximately 24 KB; the model process has an 8-minute timeout inside a 15-minute job.
+
+Binary, empty, or oversized patches are explicitly unreviewable, not reviewed. Enumeration mismatch, the GitHub 3,000-file API limit, and more than 256 batches fail or report incomplete explicitly; there is no smaller silent batch cap. A diff is complete only when every supplied text segment was reviewed, the file list was complete, and there were no unreviewable patch gaps. A zero-batch run reports that no reviewable text was available rather than assuming the files are clean.
 
 The PR title and description are not sent. Only changed-file metadata and provided patches are sent to the configured OpenCode Zen model. Reviewing a diff sends that content to the provider under OpenCode Zen's current terms and data-handling policy; this document makes no claim of zero retention. Keep secrets, customer data, and private keys out of pull-request diffs.
 
-The prepare artifact contains only the bounded input, prompts, trusted helpers, and producer-side hash metadata. Test files, PR code, secrets, and PR-controlled build-context files are not copied into the inference path. The model job writes only a bounded outcome containing identity, status, coverage, the final review text, and a fixed diagnostic code when needed. Raw JSONL events, stdout, stderr, sessions, and API bodies are not uploaded or published.
+The prepare artifact contains the manifest, per-batch input and prompt files, prompts, trusted helpers, and producer-side bookkeeping. Test files, PR code, secrets, and PR-controlled build-context files are not copied into inference. Each model job writes only a bounded outcome containing identity, batch ID, prompt hash, status, coverage, final review text, and a fixed diagnostic code. Raw JSONL events, stdout, stderr, sessions, and API bodies are not uploaded or published.
 
 ## Output and reliability
 
-The published comment starts with `<!-- habi-opencode-review:v1 -->` and is updated in place rather than duplicated. Review text is sanitized: unsafe controls and bidi characters are removed, mentions are escaped, and the text is rendered inside a dynamic inert code fence so HTML and image syntax cannot execute. A reviewed outcome is stamped with the event head SHA before upload, and the published comment includes that reviewed SHA; the publisher still rechecks that the PR is open at the same base and head before posting.
+The published comment starts with `<!-- habi-opencode-review:v1 -->` and is updated in place rather than duplicated. It aggregates only outcomes that match the trusted manifest's expected batch IDs, prompt hashes, identity, and trusted source. The trusted run artifact listing, not downloaded filenames, decides which outcome artifacts exist; duplicates, mismatched names, and extra files cannot silently complete coverage. It reports reviewed files and text segments, reviewed/missing/unavailable/failed batches, unreviewable patches, and enumeration completeness. The aggregate status is `complete` only when every expected batch was reviewed, every supplied segment is covered, the file list is complete, and there are no unreviewable patch gaps. Missing, duplicate, swapped, stale, malformed, unexpected, unavailable, or error outcomes make the report `incomplete`; unexpected artifacts never contribute findings and are counted explicitly.
 
-The publisher inspects up to 500 existing comments. If the owned marker is not found and that window is incomplete, it skips with a warning instead of creating a duplicate. Review text truncated by the model output cap or the comment-size budget is disclosed by a fixed notice outside the inert fence.
+Review text is sanitized: unsafe controls and bidi characters are removed, mentions are escaped, and each batch's findings are rendered inside a dynamic inert code fence with batch attribution. A reviewed outcome is stamped with the event head SHA before upload, and the aggregate comment includes that reviewed SHA; the publisher still rechecks that the PR is open at the same base and head before posting. The publisher inspects up to 500 existing comments. If the owned marker is not found and that window is incomplete, it skips with a warning instead of creating a duplicate.
 
-Provider quota, rate-limit, model-unavailable, and CLI timeout outcomes are informational and do not fail required CI, but they are not review evidence. Container, network, isolation, and self-test failures are fatal error outcomes, never provider-unavailable outcomes. Malformed JSONL, missing stop/final text, tool use, identity mismatch, invalid schema, prompt corruption, and publish failures also fail this workflow. No blanket `continue-on-error` is used.
+Full bounded per-batch outcomes remain available as `review-outcome-*` artifacts, and the aggregate comment always links the workflow run. The aggregate comment budget is approximately 28 KB; if the collected findings cannot fit, it discloses truncation outside the inert fence and links to the full artifacts, so trailing findings are not silently dropped. An aggregate JSON artifact (`review-aggregate`) records the full collected findings plus missing/failed/unavailable counts.
+
+The aggregate publisher runs after matrix success or ordinary matrix failure when preparation succeeded, so partial coverage is reported while the failed matrix job remains red. Cancellation may prevent publication and is not described as guaranteed partial publication. Provider quota, rate-limit, model-unavailable, and CLI timeout outcomes are informational and do not fail required CI, but they cannot establish completeness. Container, network, isolation, and self-test failures are fatal error outcomes, never provider-unavailable outcomes. Malformed JSONL, missing stop/final text, tool use, identity mismatch, invalid schema, prompt corruption, and publish failures also fail this workflow. No blanket `continue-on-error` is used.
 
 ## Security boundaries and limitations
 
 - The workflow assumes trusted repository writers. On an internal PR, the workflow file itself is part of the PR and could be modified; helpers and prompts are still taken from the event base or an administrator-approved bootstrap SHA, but a malicious workflow edit is outside the protection this lane can provide.
+- Each matrix job is a separate GitHub-hosted VM with its own contained runtime, network policy, and mandatory self-test. Batches share no process, container, or network state.
 - The review job has no GitHub API permissions and no repository checkout. Its artifact actions use the Actions runtime token. The container receives no GitHub token, Actions runtime variables, or provider key, and has no host mounts, Docker socket, host network, or PR checkout.
 - Native tool permissions inside the container are `read`/`bash` only; every other tool is denied. The OS container, not the tool permission list, is the isolation boundary. The trusted prompt asks the model to produce review text without taking external actions, and tool-use output is never accepted as review evidence: the parser rejects any `tool_use` event as fatal.
 - The container permits public HTTPS and DNS; endpoint-level restrictions are not claimed. Public content in the input can therefore be sent to the public provider, and a compromised model response could attempt exfiltration through that allowed path. This residual risk was reviewed and accepted for public-diff input with no GitHub or provider credentials and no container-host access.
-- The publish token is limited to `pull-requests: write`; there is no `contents` write, `id-token`, or Actions cache permission.
+- The publish token is limited to `pull-requests: write` and `actions: read` for this run's artifact listing; there is no `contents` write, `id-token`, or Actions cache permission.
 - Comment ownership requires the exact GitHub.com Actions bot login `github-actions[bot]`, type `Bot`, and the official id when present. A GHES installation uses a different bot identity; this lane targets GitHub.com.
-- No raw audit artifact is retained by design, because raw model events and stderr can contain sensitive prompt or provider data.
+- No raw model-event, CLI stream, or session audit artifact is retained by design, because those can contain sensitive prompt or provider data. Only bounded per-batch outcomes and the aggregate JSON are kept for the current run.
 - The lane is not a substitute for independent security review, tests, or human approval. It reviews only the provided diff and cannot establish behavior outside that scope.
 - The CI review container is not product Bot capability. The product Bot POC's no-shell/no-browser boundary is unchanged.
 
@@ -93,7 +100,10 @@ The focused helper tests use only Node built-ins and stub fetch/CLI/container ca
 node --test .github/scripts/review.test.mjs
 node --test .github/scripts/review-container.test.mjs
 node --test .github/scripts/review-network.test.mjs
+node --test .github/scripts/review-batches.test.mjs
 actionlint .github/workflows/opencode-review.yml .github/workflows/ci.yml .github/workflows/sonarqube.yml
 ```
 
-CI runs the three review helper suites in one step after `pnpm verify:foundation`; SonarQube checks remain a separate step.
+The planner suite includes lossless patch reconstruction, CRLF and no-final-newline text, oversized single-line continuation metadata, hunk grouping at PR scale, unreviewable patches, the 256-batch failure, and deterministic generated IDs/hashes. A planner dry run is source-level validation only; only a live current batched run establishes review coverage.
+
+CI runs the four review suites in one step after `pnpm verify:foundation`; SonarQube checks remain a separate step.

@@ -6,25 +6,32 @@ import os from "node:os"
 import path from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import {
+  AGGREGATE_COMMENT_LIMIT_BYTES,
+  AGGREGATE_TRUNCATION_NOTICE,
+  BATCH_TRUNCATION_NOTICE,
   GITHUB_ACTIONS_BOT_ID,
   GITHUB_ACTIONS_BOT_LOGIN,
   INPUT_LIMIT_BYTES,
+  MAX_BATCHES,
   MODEL,
   OUTPUT_TRUNCATION_NOTICE,
   REVIEW_MARKER,
+  aggregateReview,
   classifyProviderError,
   escapeMentions,
   findBotComment,
   parseOpenCodeJsonl,
+  renderAggregateComment,
   renderComment,
   renderInertFence,
   sanitizeReview,
   sha256,
   truncateUtf8,
+  validateReviewManifest,
 } from "./review-lib.mjs"
-import { buildPrompt, fetchFiles, loadTrustedPrompts, prepareReview } from "./review-prepare.mjs"
 import { runReview } from "./review-model.mjs"
-import { publishOutcome } from "./review-publish.mjs"
+import { publishAggregate, publishOutcome, readOutcomeEntries } from "./review-publish.mjs"
+import { buildReviewBatches } from "./review-batches.mjs"
 import { ContainerFailure, buildContainedConfig } from "./review-container.mjs"
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..")
@@ -42,11 +49,13 @@ const TRUSTED_HELPERS = [
   "review-container-entry.mjs",
   "review-network.mjs",
 ]
+const PLANNER_HELPER = "review-batches.mjs"
 const TRUSTED_ASSET_PATHS = [
   ".github/review/system.md",
   ".github/review/security.md",
   ".github/review/bugs.md",
   ...TRUSTED_HELPERS.map((helper) => `.github/scripts/${helper}`),
+  `.github/scripts/${PLANNER_HELPER}`,
 ]
 const OPENCODE_WORKFLOW = fs.readFileSync(
   path.join(REPO_ROOT, ".github/workflows/opencode-review.yml"),
@@ -82,17 +91,6 @@ function writeFile(filePath, content) {
   fs.writeFileSync(filePath, content)
 }
 
-function baseFixture(prompts = REAL_PROMPTS) {
-  const root = tempDir("habi-review-base-")
-  for (const [name, content] of Object.entries(prompts)) {
-    writeFile(path.join(root, ".github", "review", `${name}.md`), content)
-  }
-  for (const helper of TRUSTED_HELPERS) {
-    writeFile(path.join(root, ".github", "scripts", helper), `// fixture ${helper}\n`)
-  }
-  return root
-}
-
 function response(data, status = 200) {
   return { ok: status >= 200 && status < 300, status, json: async () => data }
 }
@@ -105,17 +103,6 @@ function prData({ base = BASE, head = HEAD, draft = false, state = "open" } = {}
     base: { sha: base, repo: { full_name: REPO } },
     head: { sha: head, repo: { full_name: REPO } },
   }
-}
-
-function prepareFetch({ files, pr = prData() }) {
-  const calls = []
-  const fetchImpl = async (url, options = {}) => {
-    calls.push({ url, options })
-    if (url.includes("/files?")) return response(files)
-    if (url.includes("/pulls/")) return response(pr)
-    throw new Error("unexpected fetch")
-  }
-  return { fetchImpl, calls }
 }
 
 function coverage(overrides = {}) {
@@ -142,9 +129,12 @@ function inputFixture(overrides = {}) {
     baseSha: BASE,
     headSha: HEAD,
     model: MODEL,
+    batchId: "b0001",
+    promptSha256: sha256(PROMPT),
     prompts: REAL_PROMPTS,
     files: [],
     coverage: coverage(),
+    trustedSource: { sha: BASE, bootstrap: false },
     promptFile: "prompt.txt",
     ...overrides,
   }
@@ -159,24 +149,230 @@ function outcomeFixture(overrides = {}) {
     baseSha: BASE,
     headSha: HEAD,
     model: MODEL,
+    batchId: "b0001",
+    promptSha256: sha256(PROMPT),
     coverage: coverage(),
+    trustedSource: { sha: BASE, bootstrap: false },
     review: { markdown: "No high-confidence findings in the provided diff.", bytes: 51, truncated: false },
     diagnostic: null,
     ...overrides,
   }
 }
 
-function modelFixture({ input = inputFixture(), prompt = PROMPT } = {}) {
+function manifestFixture({ input = inputFixture(), prompt = PROMPT } = {}) {
+  const text = "+new\n"
+  const batchId = input.batchId ?? "b0001"
+  return {
+    version: 2,
+    identity: { repo: input.repo, pr: input.pr, baseSha: input.baseSha, headSha: input.headSha },
+    trustedSource: input.trustedSource ?? { sha: input.baseSha, bootstrap: false },
+    fileList: { expectedCount: 1, receivedCount: 1, complete: true },
+    files: [
+      {
+        id: "f0001",
+        filename: "apps/web/page.tsx",
+        status: "modified",
+        sha: "c".repeat(40),
+        patchBytes: Buffer.byteLength(text),
+        patchSha256: sha256(text),
+        segmentCount: 1,
+      },
+    ],
+    unreviewableFiles: [],
+    batches: [
+      {
+        id: batchId,
+        promptSha256: sha256(prompt),
+        inputBytes: Buffer.byteLength(prompt),
+        segments: [
+          {
+            id: "s000001",
+            fileId: "f0001",
+            filename: "apps/web/page.tsx",
+            hunkId: "h0001",
+            fragmentIndex: 1,
+            fragmentCount: 1,
+            oldStart: 1,
+            newStart: 1,
+            textSha256: sha256(text),
+            textBytes: Buffer.byteLength(text),
+          },
+        ],
+      },
+    ],
+  }
+}
+
+function modelFixture({ input = inputFixture(), prompt = PROMPT, manifest } = {}) {
   const root = tempDir("habi-review-model-")
   const inputPath = path.join(root, "input.json")
   const promptPath = path.join(root, "prompt.txt")
+  const manifestPath = path.join(root, "manifest.json")
+  const batchId = input.batchId ?? "b0001"
   writeFile(inputPath, JSON.stringify(input))
   writeFile(promptPath, prompt)
+  writeFile(manifestPath, JSON.stringify(manifest ?? manifestFixture({ input, prompt })))
   return {
     root,
     inputPath,
     promptPath,
-    outcomePath: path.join(root, "outcome.json"),
+    manifestPath,
+    batchId,
+    outcomePath: path.join(root, `${batchId}.json`),
+  }
+}
+
+function twoBatchManifest({ fileList = { expectedCount: 2, receivedCount: 2, complete: true }, unreviewableFiles = [] } = {}) {
+  const text1 = "@@ -1 +1 @@\n-old\n+new\n"
+  const text2 = "@@ -2 +2 @@\n-old2\n+new2\n"
+  const prompt1 = `${PROMPT}\n\nBatch b0001`
+  const prompt2 = `${PROMPT}\n\nBatch b0002`
+  return {
+    version: 2,
+    identity: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
+    trustedSource: { sha: BASE, bootstrap: false },
+    fileList,
+    files: [
+      {
+        id: "f0001",
+        filename: "apps/web/a.ts",
+        status: "modified",
+        sha: "c".repeat(40),
+        patchBytes: Buffer.byteLength(text1),
+        patchSha256: sha256(text1),
+        segmentCount: 1,
+      },
+      {
+        id: "f0002",
+        filename: "apps/web/b.ts",
+        status: "modified",
+        sha: "d".repeat(40),
+        patchBytes: Buffer.byteLength(text2),
+        patchSha256: sha256(text2),
+        segmentCount: 1,
+      },
+    ],
+    unreviewableFiles,
+    batches: [
+      {
+        id: "b0001",
+        promptSha256: sha256(prompt1),
+        inputBytes: Buffer.byteLength(prompt1),
+        segments: [
+          {
+            id: "s000001",
+            fileId: "f0001",
+            filename: "apps/web/a.ts",
+            hunkId: "h0001",
+            fragmentIndex: 1,
+            fragmentCount: 1,
+            oldStart: 1,
+            newStart: 1,
+            textSha256: sha256(text1),
+            textBytes: Buffer.byteLength(text1),
+          },
+        ],
+      },
+      {
+        id: "b0002",
+        promptSha256: sha256(prompt2),
+        inputBytes: Buffer.byteLength(prompt2),
+        segments: [
+          {
+            id: "s000002",
+            fileId: "f0002",
+            filename: "apps/web/b.ts",
+            hunkId: "h0002",
+            fragmentIndex: 1,
+            fragmentCount: 1,
+            oldStart: 2,
+            newStart: 2,
+            textSha256: sha256(text2),
+            textBytes: Buffer.byteLength(text2),
+          },
+        ],
+      },
+    ],
+  }
+}
+
+function manyBatchManifest(count) {
+  const files = []
+  const batches = []
+  for (let index = 1; index <= count; index += 1) {
+    const batchId = `b${String(index).padStart(4, "0")}`
+    const fileId = `f${String(index).padStart(4, "0")}`
+    const segmentId = `s${String(index).padStart(6, "0")}`
+    const text = `@@ -${index} +${index} @@\n-old${index}\n+new${index}\n`
+    const prompt = `${PROMPT}\n\nBatch ${batchId}`
+    const filename = `apps/web/file-${index}.ts`
+    files.push({
+      id: fileId,
+      filename,
+      status: "modified",
+      sha: "c".repeat(40),
+      patchBytes: Buffer.byteLength(text),
+      patchSha256: sha256(text),
+      segmentCount: 1,
+    })
+    batches.push({
+      id: batchId,
+      promptSha256: sha256(prompt),
+      inputBytes: Buffer.byteLength(prompt),
+      segments: [
+        {
+          id: segmentId,
+          fileId,
+          filename,
+          hunkId: `h${String(index).padStart(4, "0")}`,
+          fragmentIndex: 1,
+          fragmentCount: 1,
+          oldStart: index,
+          newStart: index,
+          textSha256: sha256(text),
+          textBytes: Buffer.byteLength(text),
+        },
+      ],
+    })
+  }
+  return {
+    version: 2,
+    identity: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
+    trustedSource: { sha: BASE, bootstrap: false },
+    fileList: { expectedCount: count, receivedCount: count, complete: true },
+    files,
+    unreviewableFiles: [],
+    batches,
+  }
+}
+
+function batchOutcome(batchId, manifest, overrides = {}) {
+  const batch = manifest.batches.find((entry) => entry.id === batchId)
+  assert.ok(batch, `missing fixture batch ${batchId}`)
+  const markdown = overrides.review?.markdown ?? `Finding for ${batchId}`
+  return outcomeFixture({
+    batchId,
+    promptSha256: batch.promptSha256,
+    review: { markdown, bytes: Buffer.byteLength(markdown), truncated: false },
+    ...overrides,
+  })
+}
+
+const RUN_ID = "12345"
+
+function artifactFixture(name, id) {
+  return { id, name, sizeInBytes: 256, expired: false }
+}
+
+function artifactMetadataFixture(artifacts, overrides = {}) {
+  return {
+    version: 1,
+    runId: RUN_ID,
+    repository: REPO,
+    complete: true,
+    artifactCount: artifacts.length,
+    artifacts,
+    ...overrides,
   }
 }
 
@@ -240,6 +436,31 @@ function runBootstrapSelector({
   return { result, outputs }
 }
 
+function runBatchMatrix(matrix) {
+  const root = tempDir("habi-review-matrix-")
+  const scriptPath = path.join(root, "matrix.cjs")
+  const outputPath = path.join(root, "output")
+  const matrixPath = path.join(root, "matrix.json")
+  writeFile(scriptPath, workflowStepScript("Build batch matrix"))
+  writeFile(matrixPath, JSON.stringify(matrix))
+  writeFile(outputPath, "")
+  const result = spawnSync(process.execPath, [scriptPath], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      GITHUB_OUTPUT: outputPath,
+      MATRIX_PATH: matrixPath,
+    },
+  })
+  const outputs = {}
+  for (const line of fs.readFileSync(outputPath, "utf8").split("\n")) {
+    if (line.length === 0) continue
+    const separator = line.indexOf("=")
+    outputs[line.slice(0, separator)] = line.slice(separator + 1)
+  }
+  return { result, outputs }
+}
+
 function jsonl(events) {
   return events.map((event) => JSON.stringify(event)).join("\n")
 }
@@ -284,260 +505,6 @@ test("contained config is keyless, single-model, and limits tools to the contain
   assert.deepEqual(config.agent.compaction, { disable: true })
   assert.equal(JSON.stringify(config).includes("apiKey"), false)
   assert.equal(JSON.stringify(config).includes("OPENCODE_API_KEY"), false)
-})
-
-test("trusted prompts are loaded from the base root, not a changed PR copy", async () => {
-  const base = baseFixture()
-  const changed = baseFixture({ ...REAL_PROMPTS, system: "ALTERED PR SYSTEM" })
-  const outputDir = tempDir("habi-review-output-")
-  const { fetchImpl } = prepareFetch({
-    files: [
-      {
-        filename: "apps/web/page.tsx",
-        status: "modified",
-        additions: 1,
-        deletions: 1,
-        changes: 2,
-        sha: "c".repeat(40),
-        patch: "@@ -1 +1 @@\n-old\n+new\n",
-      },
-    ],
-  })
-
-  const result = await prepareReview({
-    repo: REPO,
-    pr: 7,
-    baseSha: BASE,
-    headSha: HEAD,
-    baseRoot: base,
-    outputDir,
-    token: "token",
-    fetchImpl,
-  })
-
-  assert.equal(result.input.prompts.system, REAL_PROMPTS.system)
-  assert.equal(result.input.prompts.system.includes("ALTERED PR SYSTEM"), false)
-  assert.equal(result.prompt.includes("ALTERED PR SYSTEM"), false)
-  assert.equal(fs.readFileSync(path.join(outputDir, "prompts", "system.md"), "utf8"), REAL_PROMPTS.system)
-  assert.equal(loadTrustedPrompts(changed).system, "ALTERED PR SYSTEM")
-})
-
-test("prompt construction caps input and makes missing patches explicit", () => {
-  const files = [
-    {
-      filename: "apps/web/a.ts",
-      status: "modified",
-      additions: 1,
-      deletions: 1,
-      changes: 2,
-      sha: "c".repeat(40),
-      patch: "@@ -1 +1 @@\n-a\n+b\n",
-    },
-    {
-      filename: "assets/logo.png",
-      status: "added",
-      additions: 0,
-      deletions: 0,
-      changes: 0,
-      sha: "d".repeat(40),
-      patch: null,
-    },
-    {
-      filename: "apps/web/huge.ts",
-      status: "modified",
-      additions: 999,
-      deletions: 999,
-      changes: 1998,
-      sha: "e".repeat(40),
-      patch: "x".repeat(5_000),
-    },
-  ]
-  const built = buildPrompt({
-    repo: REPO,
-    pr: 7,
-    baseSha: BASE,
-    headSha: HEAD,
-    prompts: { system: "S", security: "SEC", bugs: "BUG" },
-    files,
-    limitBytes: 2_400,
-  })
-
-  assert.ok(Buffer.byteLength(built.prompt) <= 2_400)
-  assert.equal(built.coverage.complete, false)
-  assert.equal(built.coverage.patchesUnavailable, 1)
-  assert.ok(built.coverage.filesOmitted >= 1 || built.coverage.truncatedFiles >= 1)
-  assert.match(built.prompt, /PATCH UNAVAILABLE/)
-  assert.ok(built.coverage.inputBytes <= 2_400)
-})
-
-test("prepare records missing patches and bounds API file reads", async () => {
-  const base = baseFixture()
-  const outputDir = tempDir("habi-review-output-")
-  const { fetchImpl, calls } = prepareFetch({
-    files: [
-      {
-        filename: "assets/logo.png",
-        status: "added",
-        additions: 0,
-        deletions: 0,
-        changes: 0,
-        sha: "d".repeat(40),
-      },
-    ],
-  })
-
-  const result = await prepareReview({
-    repo: REPO,
-    pr: 7,
-    baseSha: BASE,
-    headSha: HEAD,
-    baseRoot: base,
-    outputDir,
-    token: "token",
-    fetchImpl,
-  })
-
-  assert.equal(result.input.coverage.patchesUnavailable, 1)
-  assert.equal(result.input.coverage.complete, false)
-  assert.match(result.prompt, /PATCH UNAVAILABLE/)
-  assert.match(result.prompt, /binary, empty, or too large/)
-  assert.ok(calls.some((call) => call.url.includes("/files?")))
-  // Producer bookkeeping check; the consumer trusts same-run artifact provenance instead.
-  const manifest = JSON.parse(fs.readFileSync(path.join(outputDir, "manifest.json"), "utf8"))
-  assert.equal(manifest.baseSha, BASE)
-  for (const [file, digest] of Object.entries(manifest.files)) {
-    assert.equal(sha256(fs.readFileSync(path.join(outputDir, file))), digest)
-  }
-})
-
-test("prepare copies the container runtime modules into the trusted asset set", async () => {
-  const base = baseFixture()
-  const outputDir = tempDir("habi-review-output-")
-  const { fetchImpl } = prepareFetch({ files: [] })
-  await prepareReview({
-    repo: REPO,
-    pr: 7,
-    baseSha: BASE,
-    headSha: HEAD,
-    baseRoot: base,
-    outputDir,
-    token: "token",
-    fetchImpl,
-  })
-
-  const manifest = JSON.parse(fs.readFileSync(path.join(outputDir, "manifest.json"), "utf8"))
-  for (const helper of ["review-container.mjs", "review-container-entry.mjs", "review-network.mjs"]) {
-    const relative = `trusted/${helper}`
-    assert.ok(fs.existsSync(path.join(outputDir, relative)), relative)
-    assert.equal(manifest.files[relative], sha256(fs.readFileSync(path.join(outputDir, relative))))
-  }
-  assert.deepEqual(
-    Object.keys(manifest.files).filter((file) => file.startsWith("trusted/")).sort(),
-    [...TRUSTED_HELPERS].sort().map((helper) => `trusted/${helper}`),
-  )
-})
-
-test("prepare rejects stale PR identity before writing input", async () => {
-  const base = baseFixture()
-  const outputDir = tempDir("habi-review-output-")
-  const { fetchImpl } = prepareFetch({ files: [], pr: prData({ head: "f".repeat(40) }) })
-
-  await assert.rejects(
-    prepareReview({
-      repo: REPO,
-      pr: 7,
-      baseSha: BASE,
-      headSha: HEAD,
-      baseRoot: base,
-      outputDir,
-      token: "token",
-      fetchImpl,
-    }),
-    (error) => error.code === "identity-mismatch",
-  )
-  assert.equal(fs.existsSync(path.join(outputDir, "input.json")), false)
-})
-
-test("prepare permits no changed files but reports complete scope", async () => {
-  const base = baseFixture()
-  const outputDir = tempDir("habi-review-output-")
-  const { fetchImpl } = prepareFetch({ files: [] })
-  const result = await prepareReview({
-    repo: REPO,
-    pr: 7,
-    baseSha: BASE,
-    headSha: HEAD,
-    baseRoot: base,
-    outputDir,
-    token: "token",
-    fetchImpl,
-  })
-  assert.equal(result.input.coverage.filesChanged, 0)
-  assert.equal(result.input.coverage.complete, true)
-})
-
-test("bootstrap trusted source is metadata only and leaves event identity unchanged", async () => {
-  const base = baseFixture()
-  const outputDir = tempDir("habi-review-output-")
-  const { fetchImpl } = prepareFetch({ files: [] })
-  const result = await prepareReview({
-    repo: REPO,
-    pr: 7,
-    baseSha: BASE,
-    headSha: HEAD,
-    baseRoot: base,
-    outputDir,
-    token: "token",
-    trustedSourceSha: PINNED_SOURCE,
-    bootstrap: true,
-    fetchImpl,
-  })
-
-  assert.equal(result.input.baseSha, BASE)
-  assert.equal(result.input.headSha, HEAD)
-  assert.deepEqual(result.input.trustedSource, { sha: PINNED_SOURCE, bootstrap: true })
-  assert.deepEqual(result.manifest.trustedSource, { sha: PINNED_SOURCE, bootstrap: true })
-  assert.match(result.prompt, /approved immutable bootstrap commit/)
-  assert.match(
-    result.prompt,
-    new RegExp(`Trusted instructions source: approved bootstrap commit ${PINNED_SOURCE}`),
-  )
-  assert.match(result.prompt, new RegExp(`Base SHA: ${BASE}`))
-  assert.match(result.prompt, new RegExp(`Head SHA: ${HEAD}`))
-  assert.doesNotMatch(result.prompt, new RegExp(`Base SHA: ${PINNED_SOURCE}`))
-})
-
-test("trusted bootstrap source must be exact and cannot masquerade as base", async () => {
-  const base = baseFixture()
-  const fetchImpl = async () => {
-    throw new Error("trusted source validation must happen before fetching")
-  }
-
-  for (const [trustedSourceSha, bootstrap] of [
-    ["main", true],
-    ["17b90ac", true],
-    ["refs/heads/main", true],
-    [PINNED_SOURCE.toUpperCase(), true],
-    [PINNED_SOURCE, false],
-    ["", true],
-  ]) {
-    await assert.rejects(
-      prepareReview({
-        repo: REPO,
-        pr: 7,
-        baseSha: BASE,
-        headSha: HEAD,
-        baseRoot: base,
-        outputDir: tempDir("habi-review-output-"),
-        token: "token",
-        trustedSourceSha,
-        bootstrap,
-        fetchImpl,
-      }),
-      (error) => error.code === "invalid-trusted-source",
-      `${trustedSourceSha}/${bootstrap}`,
-    )
-  }
 })
 
 test("JSONL parser accepts only a clean stop with final text", () => {
@@ -638,7 +605,74 @@ test("runReview delegates to the contained runtime with the fixed keyless config
   assert.equal(Object.keys(captured).some((key) => /^(GITHUB|ACTIONS)_/.test(key)), false)
   assert.ok(Number.isInteger(captured.timeoutMs) && captured.timeoutMs > 0)
   assert.ok(Number.isInteger(captured.maxBuffer) && captured.maxBuffer > 0)
-  assert.equal(JSON.parse(fs.readFileSync(fixture.outcomePath, "utf8")).status, "reviewed")
+  assert.equal(Object.hasOwn(captured, "manifestPath"), false)
+  assert.equal(Object.hasOwn(captured, "batchId"), false)
+  const written = JSON.parse(fs.readFileSync(fixture.outcomePath, "utf8"))
+  assert.equal(written.status, "reviewed")
+  assert.equal(written.batchId, "b0001")
+  assert.equal(written.promptSha256, sha256(PROMPT))
+})
+
+test("runReview validates the trusted manifest batch and prompt hash before executing the container", async () => {
+  const expected = { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD }
+  const cases = []
+
+  {
+    const fixture = modelFixture({
+      input: inputFixture(),
+      prompt: `${PROMPT}\nchanged after hashing`,
+      manifest: manifestFixture(),
+    })
+    cases.push({ fixture, code: "prompt-hash-mismatch" })
+  }
+  {
+    const input = inputFixture({ batchId: "b0002" })
+    const fixture = modelFixture({ input, manifest: manifestFixture({ input: inputFixture() }) })
+    cases.push({ fixture, code: "batch-not-found" })
+  }
+  {
+    const manifest = manifestFixture()
+    manifest.identity.headSha = "f".repeat(40)
+    cases.push({ fixture: modelFixture({ manifest }), code: "identity-mismatch" })
+  }
+  {
+    const manifest = manifestFixture({ input: inputFixture() })
+    const input = inputFixture({ trustedSource: { sha: BASE, bootstrap: true } })
+    cases.push({ fixture: modelFixture({ input, manifest }), code: "trusted-source-mismatch" })
+  }
+
+  for (const { fixture, code } of cases) {
+    let executed = false
+    const result = await runReview({
+      ...fixture,
+      cliPath: "/fake/opencode",
+      expected,
+      execute: async () => {
+        executed = true
+        return spawnResult({ stdout: VALID_JSONL })
+      },
+    })
+    assert.equal(executed, false, code)
+    assert.equal(result.exitCode, 1, code)
+    assert.equal(result.code, code, code)
+    const written = JSON.parse(fs.readFileSync(fixture.outcomePath, "utf8"))
+    assert.equal(written.status, "error", code)
+    assert.equal(written.diagnostic.code, code, code)
+  }
+
+  const noManifest = await runReview({
+    inputPath: "/missing/input.json",
+    promptPath: "/missing/prompt.txt",
+    outcomePath: path.join(tempDir("habi-review-no-manifest-"), "outcome.json"),
+    cliPath: "/fake/opencode",
+    batchId: "b0001",
+    expected,
+    execute: async () => {
+      throw new Error("must not execute")
+    },
+  })
+  assert.equal(noManifest.exitCode, 1)
+  assert.equal(noManifest.code, "missing-manifest")
 })
 
 test("structured provider 429 and 503 events are informational while parser defects fail", async () => {
@@ -783,6 +817,645 @@ test("every ContainerFailure is fatal and never classified unavailable", async (
   assert.equal(brokenResult.exitCode, 1)
   assert.equal(brokenResult.status, "error")
   assert.equal(brokenResult.code, "container-failure")
+})
+
+test("aggregateReview completes only when every trusted batch and segment is reviewed", () => {
+  const manifest = twoBatchManifest()
+  validateReviewManifest(manifest)
+  const aggregate = aggregateReview(manifest, [
+    batchOutcome("b0001", manifest),
+    batchOutcome("b0002", manifest),
+  ])
+  assert.equal(aggregate.status, "complete")
+  assert.equal(aggregate.coverage.complete, true)
+  assert.equal(aggregate.coverage.batchesReviewed, 2)
+  assert.equal(aggregate.coverage.filesReviewed, 2)
+  assert.equal(aggregate.coverage.segmentsReviewed, 2)
+  assert.equal(aggregate.coverage.segmentsTotal, 2)
+  assert.equal(aggregate.findings.length, 2)
+  assert.deepEqual(aggregate.findings.map((finding) => finding.batchId), ["b0001", "b0002"])
+  assert.deepEqual(aggregate.files.map((file) => [file.id, file.reviewed]), [
+    ["f0001", true],
+    ["f0002", true],
+  ])
+})
+
+test("aggregate accepts the actual planner manifest shape and reports patch gaps honestly", () => {
+  const identity = { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD }
+  const trustedSource = { sha: BASE, bootstrap: false }
+  const codeFile = {
+    filename: "apps/web/page.tsx",
+    status: "modified",
+    additions: 1,
+    deletions: 1,
+    changes: 2,
+    sha: "c".repeat(40),
+    patch: "@@ -1 +1 @@\n-old\n+new\n",
+  }
+  const built = buildReviewBatches({
+    identity,
+    trustedSource,
+    prompts: REAL_PROMPTS,
+    files: [codeFile],
+    expectedFileCount: 1,
+  })
+  validateReviewManifest(built.manifest)
+  const outcomes = built.manifest.batches.map((batch) =>
+    outcomeFixture({
+      batchId: batch.id,
+      promptSha256: batch.promptSha256,
+      review: { markdown: `Reviewed ${batch.id}`, bytes: 12, truncated: false },
+    }),
+  )
+  assert.equal(aggregateReview(built.manifest, outcomes).status, "complete")
+
+  const withBinary = buildReviewBatches({
+    identity,
+    trustedSource,
+    prompts: REAL_PROMPTS,
+    files: [
+      codeFile,
+      {
+        filename: "assets/logo.png",
+        status: "added",
+        additions: 0,
+        deletions: 0,
+        changes: 0,
+        sha: null,
+        patch: null,
+      },
+    ],
+    expectedFileCount: 2,
+  })
+  validateReviewManifest(withBinary.manifest)
+  const binaryOutcomes = withBinary.manifest.batches.map((batch) =>
+    outcomeFixture({
+      batchId: batch.id,
+      promptSha256: batch.promptSha256,
+      review: { markdown: `Reviewed ${batch.id}`, bytes: 12, truncated: false },
+    }),
+  )
+  const gapAggregate = aggregateReview(withBinary.manifest, binaryOutcomes)
+  assert.equal(gapAggregate.status, "incomplete")
+  assert.equal(gapAggregate.coverage.unreviewableFiles, 1)
+})
+
+test("missing, duplicate, swapped, stale, unavailable, error, and malformed outcomes never complete", () => {
+  const manifest = twoBatchManifest()
+  const good1 = batchOutcome("b0001", manifest)
+  const good2 = batchOutcome("b0002", manifest)
+  const variants = [
+    { name: "missing", outcomes: [good1], code: "missing-batch" },
+    { name: "duplicate", outcomes: [good1, good1, good2], code: "duplicate-batch" },
+    {
+      name: "swapped hash",
+      outcomes: [good1, batchOutcome("b0002", manifest, { promptSha256: manifest.batches[0].promptSha256 })],
+      code: "prompt-hash-mismatch",
+    },
+    {
+      name: "stale identity",
+      outcomes: [good1, batchOutcome("b0002", manifest, { headSha: "f".repeat(40) })],
+      code: "identity-mismatch",
+    },
+    {
+      name: "stale trusted source",
+      outcomes: [good1, batchOutcome("b0002", manifest, { trustedSource: { sha: BASE, bootstrap: true } })],
+      code: "trusted-source-mismatch",
+    },
+    {
+      name: "unavailable",
+      outcomes: [
+        good1,
+        batchOutcome("b0002", manifest, {
+          status: "unavailable",
+          review: null,
+          diagnostic: { code: "provider-rate-limited" },
+        }),
+      ],
+      code: "unavailable-batch",
+    },
+    {
+      name: "error",
+      outcomes: [
+        good1,
+        batchOutcome("b0002", manifest, { status: "error", review: null, diagnostic: { code: "cli-exit" } }),
+      ],
+      code: "error-batch",
+    },
+    {
+      name: "malformed",
+      outcomes: [good1, { malformed: true, batchId: "b0002", source: "b0002.json", code: "invalid-outcome-json" }],
+      code: "invalid-outcome-json",
+    },
+    {
+      name: "wrong model",
+      outcomes: [good1, batchOutcome("b0002", manifest, { model: "other/model" })],
+      code: "model-mismatch",
+    },
+  ]
+
+  for (const variant of variants) {
+    const aggregate = aggregateReview(manifest, variant.outcomes)
+    assert.equal(aggregate.status, "incomplete", variant.name)
+    assert.equal(aggregate.coverage.complete, false, variant.name)
+    assert.ok(
+      aggregate.issues.some((issue) => issue.code === variant.code),
+      `${variant.name}: ${JSON.stringify(aggregate.issues)}`,
+    )
+  }
+})
+
+test("aggregateReview excludes unexpected artifacts and reports enumeration and patch gaps", () => {
+  const manifest = twoBatchManifest()
+  const good1 = batchOutcome("b0001", manifest)
+  const good2 = batchOutcome("b0002", manifest)
+  const unexpectedOutcome = {
+    ...good2,
+    batchId: "b9999",
+    review: { markdown: "UNEXPECTED FINDING", bytes: 18, truncated: false },
+  }
+  const withUnexpected = aggregateReview(manifest, [good1, good2, unexpectedOutcome])
+  assert.equal(withUnexpected.status, "incomplete")
+  assert.equal(withUnexpected.unexpected.length, 1)
+  assert.equal(
+    withUnexpected.findings.some((finding) => finding.markdown.includes("UNEXPECTED FINDING")),
+    false,
+  )
+  assert.equal(withUnexpected.findings.length, 2)
+
+  const truncatedList = twoBatchManifest({ fileList: { expectedCount: 3, receivedCount: 2, complete: false } })
+  const truncatedAggregate = aggregateReview(truncatedList, [good1, good2])
+  assert.equal(truncatedAggregate.status, "incomplete")
+  assert.equal(truncatedAggregate.coverage.filesReviewed, 2)
+
+  const gapManifest = twoBatchManifest({
+    fileList: { expectedCount: 3, receivedCount: 3, complete: true },
+    unreviewableFiles: [{ fileId: "f0003", filename: "assets/logo.png", reason: "patch-unavailable" }],
+  })
+  const gapAggregate = aggregateReview(gapManifest, [good1, good2])
+  assert.equal(gapAggregate.status, "incomplete")
+  assert.equal(gapAggregate.coverage.unreviewableFiles, 1)
+  assert.equal(gapAggregate.coverage.filesTotal, 3)
+  assert.equal(gapAggregate.coverage.filesReviewed, 2)
+
+  const emptyManifest = {
+    ...twoBatchManifest(),
+    fileList: { expectedCount: 0, receivedCount: 0, complete: true },
+    files: [],
+    unreviewableFiles: [],
+    batches: [],
+  }
+  assert.equal(aggregateReview(emptyManifest, []).status, "complete")
+
+  const binaryOnly = {
+    ...twoBatchManifest(),
+    fileList: { expectedCount: 1, receivedCount: 1, complete: true },
+    files: [],
+    unreviewableFiles: [{ fileId: "f0001", filename: "assets/logo.png", reason: "patch-unavailable" }],
+    batches: [],
+  }
+  assert.equal(aggregateReview(binaryOnly, []).status, "incomplete")
+
+  const tooMany = {
+    ...twoBatchManifest(),
+    batches: Array.from({ length: MAX_BATCHES + 1 }, (_value, index) => ({
+      ...twoBatchManifest().batches[0],
+      id: `b${String(index + 1).padStart(4, "0")}`,
+    })),
+  }
+  assert.throws(() => validateReviewManifest(tooMany), (error) => error.code === "too-many-batches")
+})
+
+test("aggregate comment is inert, discloses incomplete coverage, and links full artifacts", () => {
+  const manifest = twoBatchManifest()
+  const runUrl = `https://github.com/${REPO}/actions/runs/12345`
+  const complete = aggregateReview(manifest, [
+    batchOutcome("b0001", manifest),
+    batchOutcome("b0002", manifest),
+  ])
+  const body = renderAggregateComment(complete, { runUrl })
+  assert.ok(body.startsWith(REVIEW_MARKER))
+  assert.match(body, /Complete coverage: yes/)
+  assert.ok(body.includes(runUrl))
+  assert.ok(body.includes("```text"))
+  assert.ok(body.includes("review-outcome-*"))
+
+  const hostile = aggregateReview(manifest, [
+    batchOutcome("b0001", manifest, {
+      review: { markdown: "@octocat\n````\n<script>alert(1)</script>", bytes: 40, truncated: false },
+    }),
+    batchOutcome("b0002", manifest),
+  ])
+  const hostileBody = renderAggregateComment(hostile, { runUrl })
+  assert.ok(hostileBody.includes("@\u200boctocat"))
+  assert.ok(hostileBody.includes("`````text"))
+
+  const incomplete = aggregateReview(manifest, [batchOutcome("b0001", manifest)])
+  const incompleteBody = renderAggregateComment(incomplete, { runUrl })
+  assert.match(incompleteBody, /Complete coverage: no/)
+  assert.match(incompleteBody, /missing-batch/)
+  assert.ok(incompleteBody.includes(runUrl))
+
+  const zeroManifest = {
+    ...twoBatchManifest(),
+    fileList: { expectedCount: 0, receivedCount: 0, complete: true },
+    files: [],
+    unreviewableFiles: [],
+    batches: [],
+  }
+  const zeroBody = renderAggregateComment(aggregateReview(zeroManifest, []), { runUrl })
+  assert.match(zeroBody, /No reviewable text was available/)
+  assert.match(zeroBody, /does not establish that changed files are clean/)
+
+  const huge = aggregateReview(manifest, [
+    batchOutcome("b0001", manifest, {
+      review: { markdown: "y".repeat(40_000), bytes: 40_000, truncated: false },
+    }),
+    batchOutcome("b0002", manifest, {
+      review: { markdown: "z".repeat(40_000), bytes: 40_000, truncated: false },
+    }),
+  ])
+  const hugeBody = renderAggregateComment(huge, { runUrl })
+  assert.ok(Buffer.byteLength(hugeBody) <= AGGREGATE_COMMENT_LIMIT_BYTES)
+  assert.ok(hugeBody.includes(AGGREGATE_TRUNCATION_NOTICE))
+  assert.ok(hugeBody.includes(runUrl))
+
+  assert.throws(
+    () => renderAggregateComment(complete, { runUrl: "https://evil.test/actions/runs/1" }),
+    (error) => error.code === "invalid-run-url",
+  )
+})
+
+test("publishAggregate posts partial reports, preserves ownership/stale guards, and saves bounded aggregate JSON", async () => {
+  const manifest = twoBatchManifest()
+  const outcomesDir = tempDir("habi-review-outcomes-")
+  writeFile(path.join(outcomesDir, "b0001.json"), JSON.stringify(batchOutcome("b0001", manifest)))
+  const artifactMetadata = artifactMetadataFixture([artifactFixture("review-outcome-b0001", 1)])
+  const runUrl = `https://github.com/${REPO}/actions/runs/${RUN_ID}`
+  const token = "token"
+
+  const calls = []
+  const fetchImpl = async (url, options = {}) => {
+    const method = options.method ?? "GET"
+    calls.push({ url, method, body: options.body })
+    if (method === "GET" && url.includes("/pulls/")) return response(prData())
+    if (method === "GET" && url.includes("/comments")) return response([])
+    if (method === "POST") return response({ id: 20 }, 201)
+    throw new Error("unexpected mutation")
+  }
+  const aggregatePath = path.join(tempDir("habi-review-aggregate-"), "aggregate.json")
+  const posted = await publishAggregate({
+    token,
+    repo: REPO,
+    pr: 7,
+    baseSha: BASE,
+    headSha: HEAD,
+    manifest,
+    outcomesDir,
+    artifactMetadata,
+    runId: RUN_ID,
+    runUrl,
+    aggregatePath,
+    fetchImpl,
+  })
+  assert.equal(posted.status, "posted")
+  assert.equal(posted.aggregate.status, "incomplete")
+  const post = calls.find((call) => call.method === "POST")
+  assert.match(post.body, /Complete coverage: no/)
+  assert.match(post.body, /missing-batch/)
+  assert.ok(post.body.includes(runUrl))
+  const saved = JSON.parse(fs.readFileSync(aggregatePath, "utf8"))
+  assert.equal(saved.status, "incomplete")
+  assert.equal(saved.coverage.batchesMissing, 1)
+  assert.equal(saved.findings.length, 1)
+  assert.equal(saved.runUrl, runUrl)
+
+  const updateCalls = []
+  const updateFetchImpl = async (url, options = {}) => {
+    const method = options.method ?? "GET"
+    updateCalls.push({ url, method })
+    if (method === "GET" && url.includes("/pulls/")) return response(prData())
+    if (method === "GET" && url.includes("/comments")) {
+      return response([{ id: 9, body: `${REVIEW_MARKER}\nold`, user: ACTIONS_BOT }])
+    }
+    if (method === "PATCH") return response({ id: 9 })
+    throw new Error("unexpected mutation")
+  }
+  const updated = await publishAggregate({
+    token,
+    repo: REPO,
+    pr: 7,
+    baseSha: BASE,
+    headSha: HEAD,
+    manifest,
+    outcomesDir,
+    artifactMetadata,
+    runId: RUN_ID,
+    runUrl,
+    fetchImpl: updateFetchImpl,
+  })
+  assert.equal(updated.status, "updated")
+  assert.equal(updateCalls.filter((call) => call.method !== "GET").length, 1)
+  assert.match(updateCalls.find((call) => call.method === "PATCH").url, /\/issues\/comments\/9$/)
+
+  const staleCalls = []
+  const staleFetchImpl = async (url, options = {}) => {
+    const method = options.method ?? "GET"
+    staleCalls.push(method)
+    if (method === "GET" && url.includes("/pulls/")) return response(prData({ head: "f".repeat(40) }))
+    throw new Error("unexpected fetch")
+  }
+  const stale = await publishAggregate({
+    token,
+    repo: REPO,
+    pr: 7,
+    baseSha: BASE,
+    headSha: HEAD,
+    manifest,
+    outcomesDir,
+    artifactMetadata,
+    runId: RUN_ID,
+    runUrl,
+    fetchImpl: staleFetchImpl,
+  })
+  assert.equal(stale.status, "stale")
+  assert.equal(staleCalls.some((method) => method !== "GET"), false)
+
+  const malformedDir = tempDir("habi-review-outcomes-malformed-")
+  writeFile(path.join(malformedDir, "b0002.json"), "{not-json")
+  const malformed = await publishAggregate({
+    token,
+    repo: REPO,
+    pr: 7,
+    baseSha: BASE,
+    headSha: HEAD,
+    manifest,
+    outcomesDir: malformedDir,
+    artifactMetadata: artifactMetadataFixture([artifactFixture("review-outcome-b0002", 2)]),
+    runId: RUN_ID,
+    runUrl,
+    fetchImpl,
+  })
+  assert.equal(malformed.aggregate.status, "incomplete")
+  assert.ok(malformed.aggregate.issues.some((issue) => issue.code === "invalid-outcome-json"))
+})
+
+test("aggregate rendering discloses per-batch output truncation even when the comment fits", () => {
+  const manifest = manifestFixture()
+  const markdown = "x".repeat(24_000)
+  const aggregate = aggregateReview(manifest, [
+    batchOutcome("b0001", manifest, {
+      review: { markdown, bytes: Buffer.byteLength(markdown), truncated: true },
+    }),
+  ])
+  assert.equal(aggregate.status, "complete")
+  const runUrl = `https://github.com/${REPO}/actions/runs/${RUN_ID}`
+  const body = renderAggregateComment(aggregate, { runUrl })
+  assert.ok(Buffer.byteLength(body) <= AGGREGATE_COMMENT_LIMIT_BYTES)
+  assert.match(body, /Complete coverage: yes/)
+  assert.ok(body.includes(BATCH_TRUNCATION_NOTICE))
+  assert.match(body, /Affected batches: b0001/)
+  assert.ok(body.indexOf(BATCH_TRUNCATION_NOTICE) < body.indexOf("```text"))
+  assert.equal(body.includes(AGGREGATE_TRUNCATION_NOTICE), false)
+  assert.ok(body.includes(runUrl))
+})
+
+test("aggregate rendering handles 32 large tick-heavy batches without argument spreading", () => {
+  const manifest = manyBatchManifest(32)
+  const outcomes = manifest.batches.map((batch) =>
+    batchOutcome(batch.id, manifest, {
+      review: { markdown: "`x".repeat(12_000), bytes: 24_000, truncated: false },
+    }),
+  )
+  const aggregate = aggregateReview(manifest, outcomes)
+  assert.equal(aggregate.status, "complete")
+  const runUrl = `https://github.com/${REPO}/actions/runs/${RUN_ID}`
+  const body = renderAggregateComment(aggregate, { runUrl })
+  assert.ok(Buffer.byteLength(body) <= AGGREGATE_COMMENT_LIMIT_BYTES)
+  assert.ok(body.includes(AGGREGATE_TRUNCATION_NOTICE))
+  assert.ok(body.includes(runUrl))
+  assert.ok(body.includes("review-outcome-*"))
+  assert.equal(body.includes("\ufffd"), false)
+
+  const fenced = renderInertFence("`x".repeat(400_000))
+  assert.ok(fenced.startsWith("```text\n"))
+})
+
+test("outcome ingestion trusts actual single-artifact metadata for the flat download layout", () => {
+  const manifest = twoBatchManifest()
+  const outcomesDir = tempDir("habi-review-flat-")
+  writeFile(path.join(outcomesDir, "b0001.json"), JSON.stringify(batchOutcome("b0001", manifest)))
+  const metadata = artifactMetadataFixture([artifactFixture("review-outcome-b0001", 1)])
+  const entries = readOutcomeEntries(outcomesDir, metadata, { runId: RUN_ID, repo: REPO })
+  assert.equal(entries.length, 1)
+  assert.equal(entries[0].batchId, "b0001")
+  assert.equal(aggregateReview(manifest, entries).findings[0].batchId, "b0001")
+
+  assert.throws(
+    () => readOutcomeEntries(outcomesDir, { ...metadata, runId: "999" }, { runId: RUN_ID, repo: REPO }),
+    (error) => error.code === "artifacts-run-mismatch",
+  )
+  assert.throws(
+    () =>
+      readOutcomeEntries(
+        outcomesDir,
+        { ...metadata, repository: "other/repo" },
+        { runId: RUN_ID, repo: REPO },
+      ),
+    (error) => error.code === "artifacts-repo-mismatch",
+  )
+
+  const wrongNameDir = tempDir("habi-review-flat-wrong-")
+  writeFile(path.join(wrongNameDir, "b0002.json"), JSON.stringify(batchOutcome("b0002", manifest)))
+  const wrongEntries = readOutcomeEntries(wrongNameDir, metadata, { runId: RUN_ID, repo: REPO })
+  assert.equal(wrongEntries.length, 1)
+  assert.equal(wrongEntries[0].malformed, true)
+  assert.equal(wrongEntries[0].code, "artifact-filename-mismatch")
+  const wrongAggregate = aggregateReview(manifest, wrongEntries)
+  assert.equal(wrongAggregate.status, "incomplete")
+  assert.equal(wrongAggregate.findings.length, 0)
+})
+
+test("outcome ingestion rejects extra files even when they carry an expected batch id", () => {
+  const manifest = twoBatchManifest()
+  const outcomesDir = tempDir("habi-review-extra-")
+  writeFile(path.join(outcomesDir, "b0001.json"), JSON.stringify(batchOutcome("b0001", manifest)))
+  writeFile(
+    path.join(outcomesDir, "extra.json"),
+    JSON.stringify(
+      batchOutcome("b0001", manifest, {
+        review: { markdown: "EXTRA FINDING", bytes: 13, truncated: false },
+      }),
+    ),
+  )
+  const metadata = artifactMetadataFixture([artifactFixture("review-outcome-b0001", 1)])
+  const entries = readOutcomeEntries(outcomesDir, metadata, { runId: RUN_ID, repo: REPO })
+  assert.ok(entries.some((entry) => entry.malformed === true && entry.code === "unexpected-artifact"))
+  const aggregate = aggregateReview(manifest, entries)
+  assert.equal(aggregate.status, "incomplete")
+  assert.equal(
+    aggregate.findings.some((finding) => finding.markdown.includes("EXTRA FINDING")),
+    false,
+  )
+})
+
+test("outcome ingestion never reads an unexpected artifact that carries an expected id", () => {
+  const manifest = twoBatchManifest()
+  const outcomesDir = tempDir("habi-review-unexpected-artifact-")
+  writeFile(
+    path.join(outcomesDir, "review-outcome-b0001", "b0001.json"),
+    JSON.stringify(batchOutcome("b0001", manifest)),
+  )
+  writeFile(
+    path.join(outcomesDir, "review-outcome-b0001-extra", "b0001.json"),
+    JSON.stringify(
+      batchOutcome("b0001", manifest, {
+        review: { markdown: "UNEXPECTED FINDING", bytes: 18, truncated: false },
+      }),
+    ),
+  )
+  const metadata = artifactMetadataFixture([
+    artifactFixture("review-outcome-b0001", 1),
+    artifactFixture("review-outcome-b0001-extra", 2),
+  ])
+  const entries = readOutcomeEntries(outcomesDir, metadata, { runId: RUN_ID, repo: REPO })
+  assert.ok(
+    entries.some(
+      (entry) =>
+        entry.malformed === true &&
+        entry.code === "unexpected-artifact" &&
+        entry.source === "review-outcome-b0001-extra",
+    ),
+  )
+  const aggregate = aggregateReview(manifest, entries)
+  assert.equal(aggregate.status, "incomplete")
+  assert.equal(
+    aggregate.findings.some((finding) => finding.markdown.includes("UNEXPECTED FINDING")),
+    false,
+  )
+})
+
+test("duplicate outcome filenames across artifact directories stay visible and incomplete", () => {
+  const manifest = twoBatchManifest()
+  const outcomesDir = tempDir("habi-review-duplicate-files-")
+  writeFile(
+    path.join(outcomesDir, "review-outcome-b0001", "b0001.json"),
+    JSON.stringify(batchOutcome("b0001", manifest)),
+  )
+  writeFile(
+    path.join(outcomesDir, "review-outcome-b0002", "b0001.json"),
+    JSON.stringify(batchOutcome("b0001", manifest)),
+  )
+  const metadata = artifactMetadataFixture([
+    artifactFixture("review-outcome-b0001", 1),
+    artifactFixture("review-outcome-b0002", 2),
+  ])
+  const entries = readOutcomeEntries(outcomesDir, metadata, { runId: RUN_ID, repo: REPO })
+  assert.equal(entries.length, 2)
+  const aggregate = aggregateReview(manifest, entries)
+  assert.equal(aggregate.status, "incomplete")
+  assert.equal(aggregate.findings.length, 0)
+  assert.ok(aggregate.issues.some((issue) => issue.code === "duplicate-batch" && issue.batchId === "b0001"))
+  assert.ok(aggregate.issues.some((issue) => issue.code === "missing-batch" && issue.batchId === "b0002"))
+})
+
+test("zero outcome artifacts aggregate as missing batches instead of a clean report", () => {
+  const manifest = twoBatchManifest()
+  const outcomesDir = path.join(tempDir("habi-review-zero-artifacts-"), "review-outcomes")
+  const metadata = artifactMetadataFixture([])
+  const entries = readOutcomeEntries(outcomesDir, metadata, { runId: RUN_ID, repo: REPO })
+  assert.deepEqual(entries, [])
+  const aggregate = aggregateReview(manifest, entries)
+  assert.equal(aggregate.status, "incomplete")
+  assert.equal(aggregate.coverage.batchesMissing, 2)
+  const body = renderAggregateComment(aggregate, {
+    runUrl: `https://github.com/${REPO}/actions/runs/${RUN_ID}`,
+  })
+  assert.match(body, /Complete coverage: no/)
+  assert.match(body, /missing-batch/)
+})
+
+test("workflow artifact listing is run-scoped, paginated, and fails closed without context", () => {
+  const script = workflowStepScript("List review outcome artifacts")
+  assert.match(script, /actions\/runs\/\$\{runId\}\/artifacts/)
+  assert.match(script, /per_page=100/)
+  assert.match(script, /maxArtifacts = 288/)
+  assert.match(script, /complete: true/)
+  assert.match(script, /Artifact listing did not complete/)
+  assert.match(script, /process\.exit\(1\)/)
+
+  const root = tempDir("habi-review-artifact-listing-")
+  const scriptPath = path.join(root, "listing.cjs")
+  writeFile(scriptPath, script)
+  const result = spawnSync(process.execPath, [scriptPath], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      GITHUB_TOKEN: "",
+      REVIEW_REPO: "",
+      REVIEW_RUN_ID: "",
+      ARTIFACT_METADATA_PATH: "",
+    },
+  })
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /Artifact listing context is incomplete/)
+})
+
+test("batched workflow uses a trusted generated matrix with bounded parallelism and always publishes", () => {
+  assert.match(OPENCODE_WORKFLOW, /fail-fast: false/)
+  assert.match(OPENCODE_WORKFLOW, /max-parallel: 4/)
+  assert.match(OPENCODE_WORKFLOW, /batch: \$\{\{ fromJSON\(needs\.prepare\.outputs\.batches\) \}\}/)
+  assert.match(OPENCODE_WORKFLOW, /needs\.prepare\.outputs\.batch_count != '0'/)
+  assert.match(OPENCODE_WORKFLOW, /name: review-outcome-\$\{\{ matrix\.batch \}\}/)
+  assert.match(OPENCODE_WORKFLOW, /pattern: review-outcome-\*/)
+  assert.match(OPENCODE_WORKFLOW, /merge-multiple: false/)
+  assert.match(OPENCODE_WORKFLOW, /List review outcome artifacts/)
+  assert.match(OPENCODE_WORKFLOW, /--artifacts/)
+  assert.match(OPENCODE_WORKFLOW, /actions: read/)
+  assert.match(OPENCODE_WORKFLOW, /--manifest/)
+  assert.match(OPENCODE_WORKFLOW, /--batch/)
+  assert.match(OPENCODE_WORKFLOW, /--outcomes/)
+  assert.match(OPENCODE_WORKFLOW, /--run-url/)
+  assert.match(OPENCODE_WORKFLOW, /always\(\) && needs\.prepare\.result == 'success'/)
+  assert.doesNotMatch(OPENCODE_WORKFLOW, /continue-on-error/)
+  assert.doesNotMatch(OPENCODE_WORKFLOW, /OPENCODE_API_KEY/)
+  assert.ok(OPENCODE_WORKFLOW.split("review-batches.mjs").length - 1 >= 2)
+
+  const matrixScript = workflowStepScript("Build batch matrix")
+  assert.match(matrixScript, /b\[0-9\]\{4\}/)
+  assert.match(matrixScript, /256/)
+  assert.doesNotMatch(matrixScript, /filename|pull_request|head\.sha/)
+
+  const ci = fs.readFileSync(path.join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8")
+  assert.match(ci, /review-batches\.test\.mjs/)
+})
+
+test("batch matrix output contains only generated IDs and fails closed above 256", () => {
+  const twoBatches = runBatchMatrix({ batchIds: ["b0001", "b0002"], count: 2 })
+  assert.equal(twoBatches.result.status, 0)
+  assert.equal(twoBatches.outputs.count, "2")
+  assert.deepEqual(JSON.parse(twoBatches.outputs.batches), ["b0001", "b0002"])
+
+  const empty = runBatchMatrix({ batchIds: [], count: 0 })
+  assert.equal(empty.result.status, 0)
+  assert.equal(empty.outputs.count, "0")
+  assert.deepEqual(JSON.parse(empty.outputs.batches), [])
+
+  const manyIds = Array.from({ length: MAX_BATCHES + 1 }, (_value, index) =>
+    `b${String(index + 1).padStart(4, "0")}`,
+  )
+  const over = runBatchMatrix({ batchIds: manyIds, count: manyIds.length })
+  assert.equal(over.result.status, 1)
+  assert.match(over.result.stderr, /256/)
+
+  const invalid = runBatchMatrix({ batchIds: ["batch1"], count: 1 })
+  assert.equal(invalid.result.status, 1)
+
+  const duplicate = runBatchMatrix({ batchIds: ["b0001", "b0001"], count: 2 })
+  assert.equal(duplicate.result.status, 1)
+
+  const mismatch = runBatchMatrix({ batchIds: ["b0001"], count: 2 })
+  assert.equal(mismatch.result.status, 1)
 })
 
 test("model entrypoint preserves SIGINT/SIGTERM cleanup after a valid review result", () => {
@@ -1038,35 +1711,9 @@ test("publisher posts an informational unavailable outcome", async () => {
   assert.equal(post.body.includes("```text"), false)
 })
 
-test("end-to-end prepare, model, and publish are stubbed and never contact providers", async () => {
-  const base = baseFixture()
-  const outputDir = tempDir("habi-review-e2e-input-")
-  const { fetchImpl: prepareFetchImpl } = prepareFetch({
-    files: [
-      {
-        filename: "apps/web/page.tsx",
-        status: "modified",
-        additions: 1,
-        deletions: 1,
-        changes: 2,
-        sha: "c".repeat(40),
-        patch: "@@ -1 +1 @@\n-old\n+new\n",
-      },
-    ],
-  })
-  const prepared = await prepareReview({
-    repo: REPO,
-    pr: 7,
-    baseSha: BASE,
-    headSha: HEAD,
-    baseRoot: base,
-    outputDir,
-    token: "token",
-    fetchImpl: prepareFetchImpl,
-  })
-  assert.equal(prepared.input.coverage.complete, true)
-
-  const fixture = modelFixture({ input: prepared.input, prompt: prepared.prompt })
+test("end-to-end batched model and aggregate publish are stubbed and never contact providers", async () => {
+  const manifest = manifestFixture()
+  const fixture = modelFixture({ manifest })
   const modelResult = await runReview({
     ...fixture,
     cliPath: "/fake/opencode",
@@ -1075,6 +1722,11 @@ test("end-to-end prepare, model, and publish are stubbed and never contact provi
   })
   assert.equal(modelResult.status, "reviewed")
   const outcome = JSON.parse(fs.readFileSync(fixture.outcomePath, "utf8"))
+  assert.equal(outcome.batchId, "b0001")
+  assert.equal(outcome.promptSha256, sha256(PROMPT))
+
+  const outcomesDir = tempDir("habi-review-e2e-outcomes-")
+  writeFile(path.join(outcomesDir, `${outcome.batchId}.json`), JSON.stringify(outcome))
 
   const calls = []
   const publishFetchImpl = async (url, options = {}) => {
@@ -1084,21 +1736,28 @@ test("end-to-end prepare, model, and publish are stubbed and never contact provi
     if (options.method === "POST") return response({ id: 11 }, 201)
     throw new Error("unexpected mutation")
   }
-  const published = await publishOutcome({
+  const runUrl = `https://github.com/${REPO}/actions/runs/12345`
+  const published = await publishAggregate({
     token: "token",
     repo: REPO,
     pr: 7,
     baseSha: BASE,
     headSha: HEAD,
-    input: prepared.input,
-    outcome,
+    manifest,
+    outcomesDir,
+    artifactMetadata: artifactMetadataFixture([artifactFixture("review-outcome-b0001", 1)]),
+    runId: RUN_ID,
+    runUrl,
     fetchImpl: publishFetchImpl,
   })
   assert.equal(published.status, "posted")
+  assert.equal(published.aggregate.status, "complete")
   const mutation = calls.find((call) => call.method !== "GET")
   assert.equal(mutation.method, "POST")
   assert.match(mutation.body, new RegExp(REVIEW_MARKER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")))
+  assert.match(mutation.body, /Complete coverage: yes/)
   assert.match(mutation.body, /final review/)
+  assert.ok(mutation.body.includes(runUrl))
   assert.equal(calls.some((call) => call.method === "DELETE"), false)
 })
 
@@ -1381,31 +2040,4 @@ test("workflow bootstrap path preserves fork and draft gates", () => {
     /REVIEW_BASE_SHA: \$\{\{ steps\.source\.outputs\.source_sha \}\}/,
   )
   assert.match(OPENCODE_WORKFLOW, /trusted-source\.json/)
-})
-
-test("API file pagination is bounded and binary patches remain absent", async () => {
-  const pages = []
-  const fetchImpl = async (url) => {
-    pages.push(url)
-    const page = Number(new URL(url).searchParams.get("page"))
-    if (page === 1) {
-      return response(
-        Array.from({ length: 100 }, (_value, index) => ({
-          filename: `file-${index}.ts`,
-          status: "modified",
-          additions: 1,
-          deletions: 0,
-          changes: 1,
-          sha: "c".repeat(40),
-          patch: "@@ -1 +1 @@\n-a\n+b\n",
-        })),
-      )
-    }
-    return response([{ filename: "binary.png", status: "added", additions: 0, deletions: 0, changes: 0 }])
-  }
-  const result = await fetchFiles({ fetchImpl, apiUrl: "https://api.github.test", repo: REPO, pr: 7, token: "t" })
-  assert.equal(result.files.length, 101)
-  assert.equal(result.truncated, false)
-  assert.equal("patch" in result.files[100], false)
-  assert.equal(pages.length, 2)
 })

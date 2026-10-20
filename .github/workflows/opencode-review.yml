@@ -23,6 +23,8 @@ jobs:
       ready: ${{ steps.source.outputs.ready }}
       trusted_source_sha: ${{ steps.source.outputs.source_sha }}
       bootstrap: ${{ steps.source.outputs.bootstrap }}
+      batches: ${{ steps.batches.outputs.batches }}
+      batch_count: ${{ steps.batches.outputs.count }}
     steps:
       - name: Check review eligibility
         id: gate
@@ -96,6 +98,7 @@ jobs:
             '.github/scripts/review-container.mjs',
             '.github/scripts/review-container-entry.mjs',
             '.github/scripts/review-network.mjs',
+            '.github/scripts/review-batches.mjs',
           ];
           const workspace = process.env.WORKSPACE ?? '';
           const baseSha = process.env.BASE_SHA ?? '';
@@ -179,6 +182,7 @@ jobs:
             .github/scripts/review-container.mjs \
             .github/scripts/review-container-entry.mjs \
             .github/scripts/review-network.mjs \
+            .github/scripts/review-batches.mjs \
             .github/review/system.md \
             .github/review/security.md \
             .github/review/bugs.md; do
@@ -239,6 +243,54 @@ jobs:
           );
           NODE
 
+      - name: Build batch matrix
+        id: batches
+        if: steps.source.outputs.ready == 'true'
+        shell: bash
+        env:
+          MATRIX_PATH: ${{ runner.temp }}/review-input/matrix.json
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const fs = require('node:fs');
+
+          const outputPath = process.env.GITHUB_OUTPUT;
+          if (!outputPath) {
+            console.error('::error::GITHUB_OUTPUT is unavailable.');
+            process.exit(1);
+          }
+          let matrix;
+          try {
+            matrix = JSON.parse(fs.readFileSync(process.env.MATRIX_PATH, 'utf8'));
+          } catch {
+            console.error('::error::Trusted batch matrix is missing or invalid.');
+            process.exit(1);
+          }
+          if (!matrix || !Array.isArray(matrix.batchIds) || !Number.isInteger(matrix.count)) {
+            console.error('::error::Trusted batch matrix does not have the expected shape.');
+            process.exit(1);
+          }
+          if (matrix.count !== matrix.batchIds.length) {
+            console.error('::error::Trusted batch matrix count does not match its batch IDs.');
+            process.exit(1);
+          }
+          if (matrix.count > 256) {
+            console.error('::error::Batch matrix exceeds the 256-job GitHub matrix limit; refusing to truncate.');
+            process.exit(1);
+          }
+          const ids = matrix.batchIds;
+          if (!ids.every((id) => typeof id === 'string' && /^b[0-9]{4}$/.test(id))) {
+            console.error('::error::Batch matrix contains an invalid generated batch ID.');
+            process.exit(1);
+          }
+          if (new Set(ids).size !== ids.length) {
+            console.error('::error::Batch matrix contains duplicate generated batch IDs.');
+            process.exit(1);
+          }
+          fs.appendFileSync(outputPath, `batches=${JSON.stringify(ids)}\ncount=${ids.length}\n`);
+          console.log(`opencode-review: ${ids.length} batch(es) prepared`);
+          NODE
+
       - name: Upload trusted review input
         if: steps.source.outputs.ready == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -251,11 +303,16 @@ jobs:
   review:
     name: Run OpenCode review
     needs: prepare
-    if: needs.prepare.outputs.ready == 'true'
+    if: needs.prepare.outputs.ready == 'true' && needs.prepare.outputs.batch_count != '0'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # Same-run artifact access uses the Actions runtime token, not a job token.
     permissions: {}
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        batch: ${{ fromJSON(needs.prepare.outputs.batches) }}
     steps:
       - name: Set up Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -318,18 +375,25 @@ jobs:
           REVIEW_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
+          batch="${{ matrix.batch }}"
+          if [[ ! "$batch" =~ ^b[0-9]{4}$ ]]; then
+            echo "::error::Unsafe generated batch ID: $batch"
+            exit 1
+          fi
           node "$RUNNER_TEMP/review-input/trusted/review-model.mjs" \
-            --input "$RUNNER_TEMP/review-input/input.json" \
-            --prompt "$RUNNER_TEMP/review-input/prompt.txt" \
+            --manifest "$RUNNER_TEMP/review-input/manifest.json" \
+            --batch "$batch" \
+            --input "$RUNNER_TEMP/review-input/batches/$batch/input.json" \
+            --prompt "$RUNNER_TEMP/review-input/batches/$batch/prompt.txt" \
             --cli "$RUNNER_TEMP/opencode-bin/opencode" \
-            --outcome "$RUNNER_TEMP/review-outcome/outcome.json"
+            --outcome "$RUNNER_TEMP/review-outcome/$batch.json"
 
       - name: Record reviewed head SHA in outcome
         if: always()
         shell: bash
         env:
           REVIEW_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          OUTCOME_PATH: ${{ runner.temp }}/review-outcome/outcome.json
+          OUTCOME_PATH: ${{ runner.temp }}/review-outcome/${{ matrix.batch }}.json
         run: |
           set -euo pipefail
           if [ ! -f "$OUTCOME_PATH" ]; then
@@ -364,20 +428,22 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: review-outcome
-          path: ${{ runner.temp }}/review-outcome
+          name: review-outcome-${{ matrix.batch }}
+          path: ${{ runner.temp }}/review-outcome/${{ matrix.batch }}.json
           if-no-files-found: warn
           retention-days: 3
 
   publish:
     name: Publish review comment
     needs: [prepare, review]
-    if: needs.prepare.outputs.ready == 'true' && needs.review.result == 'success'
+    if: ${{ always() && needs.prepare.result == 'success' && needs.prepare.outputs.ready == 'true' && !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    # Only the PR comment API is needed; artifact access uses the runtime token.
+    # Only the PR comment API and this run's artifact listing are needed;
+    # artifact downloads use the Actions runtime token.
     permissions:
       pull-requests: write
+      actions: read
     steps:
       - name: Set up Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -390,13 +456,140 @@ jobs:
           name: review-input
           path: ${{ runner.temp }}/review-input
 
-      - name: Download bounded review outcome
+      # The trusted listing is the authority for which outcome artifacts exist.
+      # It is stored outside the download directory so downloads cannot replace it.
+      - name: List review outcome artifacts
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          REVIEW_REPO: ${{ github.repository }}
+          REVIEW_RUN_ID: ${{ github.run_id }}
+          ARTIFACT_METADATA_PATH: ${{ runner.temp }}/review-artifacts/artifacts.json
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+
+          async function main() {
+            const apiUrl = (process.env.GITHUB_API_URL ?? 'https://api.github.com').replace(/\/+$/, '');
+            const repo = process.env.REVIEW_REPO ?? '';
+            const runId = process.env.REVIEW_RUN_ID ?? '';
+            const token = process.env.GITHUB_TOKEN ?? '';
+            const outputPath = process.env.ARTIFACT_METADATA_PATH ?? '';
+            if (
+              !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo) ||
+              !/^[0-9]+$/.test(runId) ||
+              token.length === 0 ||
+              outputPath.length === 0
+            ) {
+              console.error('::error::Artifact listing context is incomplete.');
+              process.exit(1);
+            }
+
+            const repoPath = repo.split('/').map(encodeURIComponent).join('/');
+            const maxPages = 3;
+            const maxArtifacts = 288;
+            const artifacts = [];
+            let totalCount = null;
+            for (let page = 1; page <= maxPages; page += 1) {
+              let response;
+              try {
+                response = await fetch(
+                  `${apiUrl}/repos/${repoPath}/actions/runs/${runId}/artifacts?per_page=100&page=${page}`,
+                  {
+                    headers: {
+                      Accept: 'application/vnd.github+json',
+                      Authorization: `Bearer ${token}`,
+                      'X-GitHub-Api-Version': '2022-11-28',
+                      'User-Agent': 'habi-opencode-review',
+                    },
+                  },
+                );
+              } catch {
+                console.error('::error::Could not list review artifacts.');
+                process.exit(1);
+              }
+              if (!response || !response.ok) {
+                console.error(`::error::Artifact listing failed with HTTP ${response ? response.status : 'unknown'}.`);
+                process.exit(1);
+              }
+              let body;
+              try {
+                body = await response.json();
+              } catch {
+                console.error('::error::Artifact listing returned invalid JSON.');
+                process.exit(1);
+              }
+              if (!body || !Array.isArray(body.artifacts) || !Number.isInteger(body.total_count)) {
+                console.error('::error::Artifact listing has an unexpected shape.');
+                process.exit(1);
+              }
+              if (totalCount === null) {
+                totalCount = body.total_count;
+                if (totalCount > maxArtifacts) {
+                  console.error('::error::Artifact listing exceeds the bounded artifact limit.');
+                  process.exit(1);
+                }
+              }
+              for (const artifact of body.artifacts) {
+                if (!artifact || !Number.isInteger(artifact.id) || typeof artifact.name !== 'string') {
+                  console.error('::error::Artifact listing contains an invalid entry.');
+                  process.exit(1);
+                }
+                artifacts.push({
+                  id: artifact.id,
+                  name: artifact.name,
+                  sizeInBytes: Number.isInteger(artifact.size_in_bytes) ? artifact.size_in_bytes : null,
+                  expired: artifact.expired === true,
+                });
+              }
+              if (artifacts.length >= totalCount) break;
+            }
+            if (totalCount === null || artifacts.length !== totalCount) {
+              console.error('::error::Artifact listing did not complete; refusing to publish incomplete evidence.');
+              process.exit(1);
+            }
+            if (new Set(artifacts.map((artifact) => artifact.id)).size !== artifacts.length) {
+              console.error('::error::Artifact listing contains duplicate artifact ids.');
+              process.exit(1);
+            }
+
+            fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+            fs.writeFileSync(
+              outputPath,
+              JSON.stringify(
+                {
+                  version: 1,
+                  runId,
+                  repository: repo,
+                  complete: true,
+                  artifactCount: artifacts.length,
+                  artifacts,
+                },
+                null,
+                2,
+              ) + '\n',
+            );
+            console.log(`opencode-review: listed ${artifacts.length} artifact(s)`);
+          }
+
+          main().catch(() => {
+            console.error('::error::Artifact listing failed.');
+            process.exit(1);
+          });
+          NODE
+
+      # v8 download-artifact treats a pattern with zero matches as success, so a
+      # zero-batch run still reaches the publisher instead of failing here.
+      - name: Download bounded review outcomes
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: review-outcome
-          path: ${{ runner.temp }}/review-outcome
+          pattern: review-outcome-*
+          path: ${{ runner.temp }}/review-outcomes
+          merge-multiple: false
 
-      - name: Publish or update one review comment
+      - name: Publish or update one aggregate review comment
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_API_URL: ${{ github.api_url }}
@@ -404,8 +597,21 @@ jobs:
           REVIEW_PR: ${{ github.event.pull_request.number }}
           REVIEW_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           REVIEW_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REVIEW_RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
           node "$RUNNER_TEMP/review-input/trusted/review-publish.mjs" \
-            --input "$RUNNER_TEMP/review-input/input.json" \
-            --outcome "$RUNNER_TEMP/review-outcome/outcome.json"
+            --manifest "$RUNNER_TEMP/review-input/manifest.json" \
+            --artifacts "$RUNNER_TEMP/review-artifacts/artifacts.json" \
+            --outcomes "$RUNNER_TEMP/review-outcomes" \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --aggregate "$RUNNER_TEMP/review-aggregate/aggregate.json"
+
+      - name: Upload aggregate review JSON
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: review-aggregate
+          path: ${{ runner.temp }}/review-aggregate/aggregate.json
+          if-no-files-found: warn
+          retention-days: 3
