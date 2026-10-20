@@ -1,0 +1,137 @@
+name: SonarQube
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sonarqube-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  sonarqube:
+    name: SonarQube scan
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.draft == false &&
+       vars.SONAR_PR_ANALYSIS_ENABLED == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Preflight SonarQube configuration
+        id: preflight
+        env:
+          SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
+          SONAR_PROJECT_KEY: ${{ vars.SONAR_PROJECT_KEY }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${SONAR_HOST_URL:-}" ] || [ -z "${SONAR_PROJECT_KEY:-}" ] || [ -z "${SONAR_TOKEN:-}" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::SonarQube configuration incomplete; scan skipped."
+            exit 0
+          fi
+
+          node - <<'NODE'
+          const raw = process.env.SONAR_HOST_URL ?? '';
+
+          if (raw.length > 2048) {
+            console.error('::error::SONAR_HOST_URL must be at most 2048 characters.');
+            process.exit(1);
+          }
+          if (/\s/.test(raw) || /[\u0000-\u001F\u007F]/.test(raw)) {
+            console.error('::error::SONAR_HOST_URL must be a single HTTPS URL without whitespace or control characters.');
+            process.exit(1);
+          }
+
+          let parsed;
+          try {
+            parsed = new URL(raw);
+          } catch {
+            console.error('::error::SONAR_HOST_URL must be a valid HTTPS URL.');
+            process.exit(1);
+          }
+          if (parsed.protocol !== 'https:') {
+            console.error('::error::SONAR_HOST_URL must use HTTPS.');
+            process.exit(1);
+          }
+          if (parsed.username || parsed.password) {
+            console.error('::error::SONAR_HOST_URL must not contain credentials.');
+            process.exit(1);
+          }
+          if (parsed.search || parsed.hash) {
+            console.error('::error::SONAR_HOST_URL must not contain a query or fragment.');
+            process.exit(1);
+          }
+          if (parsed.pathname.includes('//')) {
+            console.error('::error::SONAR_HOST_URL must be a canonical URL without redundant slashes.');
+            process.exit(1);
+          }
+
+          const canonical = parsed.href.endsWith('/') ? parsed.href.slice(0, -1) : parsed.href;
+          const supplied = raw.endsWith('/') ? raw.slice(0, -1) : raw;
+          if (supplied !== canonical) {
+            console.error('::error::SONAR_HOST_URL must be a canonical URL without redundant encoding.');
+            process.exit(1);
+          }
+          NODE
+
+          case "$SONAR_PROJECT_KEY" in
+            *[!A-Za-z0-9_.:-]*)
+              echo "::error::SONAR_PROJECT_KEY must use only letters, numbers, dot, underscore, dash, or colon."
+              exit 1
+              ;;
+          esac
+
+          case "$SONAR_PROJECT_KEY" in
+            *[!0-9]*) ;;
+            *)
+              echo "::error::SONAR_PROJECT_KEY must contain at least one non-digit character."
+              exit 1
+              ;;
+          esac
+
+          echo "configured=true" >> "$GITHUB_OUTPUT"
+          echo "::notice::SonarQube configuration present; scan enabled."
+
+      - name: Check out repository
+        if: steps.preflight.outputs.configured == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Set up Node.js baseline
+        if: steps.preflight.outputs.configured == 'true'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+
+      - name: Scan with SonarQube
+        if: steps.preflight.outputs.configured == 'true'
+        uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
+          SONAR_ROOT_CERT: ${{ secrets.SONAR_ROOT_CERT }}
+        with:
+          scannerVersion: 8.2.0.6438
+          args: >-
+            "-Dsonar.projectKey=${{ vars.SONAR_PROJECT_KEY }}"
+            "-Dsonar.qualitygate.wait=true"
+            "-Dsonar.qualitygate.timeout=300"

@@ -1,0 +1,213 @@
+name: OpenCode review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions: {}
+
+concurrency:
+  group: opencode-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  prepare:
+    name: Prepare trusted input
+    if: ${{ github.event.pull_request.draft == false }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      ready: ${{ steps.bootstrap.outputs.ready }}
+    steps:
+      - name: Check review eligibility
+        id: gate
+        env:
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ "$HEAD_REPO" != "$BASE_REPO" ]; then
+            echo "::notice::OpenCode review skipped: fork pull requests are not reviewed."
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "eligible=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out trusted base
+        if: steps.gate.outputs.eligible == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+          persist-credentials: false
+
+      - name: Check trusted base assets
+        id: bootstrap
+        if: steps.gate.outputs.eligible == 'true'
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          base="$GITHUB_WORKSPACE/base"
+          actual_base="$(git -C "$base" rev-parse HEAD)"
+          if [ "$actual_base" != "$BASE_SHA" ]; then
+            echo "::error::Trusted base checkout does not match the event base SHA."
+            exit 1
+          fi
+          missing=0
+          for rel in \
+            .github/scripts/review-lib.mjs \
+            .github/scripts/review-prepare.mjs \
+            .github/scripts/review-model.mjs \
+            .github/scripts/review-publish.mjs \
+            .github/review/system.md \
+            .github/review/security.md \
+            .github/review/bugs.md; do
+            if [ ! -f "$base/$rel" ]; then
+              echo "::warning::Missing trusted base asset: $rel"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "::notice::OpenCode review skipped: trusted review assets are not on the base commit. This lane activates after these files merge to the base branch."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Node.js
+        if: steps.gate.outputs.eligible == 'true' && steps.bootstrap.outputs.ready == 'true'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.20.0
+
+      - name: Build bounded review input
+        if: steps.gate.outputs.eligible == 'true' && steps.bootstrap.outputs.ready == 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          REVIEW_REPO: ${{ github.repository }}
+          REVIEW_PR: ${{ github.event.pull_request.number }}
+          REVIEW_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          REVIEW_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REVIEW_BASE_ROOT: ${{ github.workspace }}/base
+          REVIEW_OUTPUT_DIR: ${{ runner.temp }}/review-input
+        run: node "$GITHUB_WORKSPACE/base/.github/scripts/review-prepare.mjs"
+
+      - name: Upload trusted review input
+        if: steps.gate.outputs.eligible == 'true' && steps.bootstrap.outputs.ready == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: review-input
+          path: ${{ runner.temp }}/review-input
+          if-no-files-found: error
+          retention-days: 3
+
+  review:
+    name: Run OpenCode review
+    needs: prepare
+    if: needs.prepare.outputs.ready == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Same-run artifact access uses the Actions runtime token, not a job token.
+    permissions: {}
+    steps:
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.20.0
+
+      - name: Download trusted review input
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: review-input
+          path: ${{ runner.temp }}/review-input
+
+      - name: Download and verify OpenCode CLI
+        env:
+          OPENCODE_URL: https://github.com/anomalyco/opencode/releases/download/v1.19.3/opencode-linux-x64.tar.gz
+          OPENCODE_SHA256: 13a8fb2978302071b86f9d7e00da9c8895f9cd846978379c3bdc6a5333536c9b
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/opencode.tar.gz"
+          bin="$RUNNER_TEMP/opencode-bin"
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --output "$archive" "$OPENCODE_URL"
+          printf '%s  %s\n' "$OPENCODE_SHA256" "$archive" | sha256sum --check --strict -
+          members="$(tar -tzf "$archive")"
+          if [ "$members" != "opencode" ]; then
+            echo "::error::Unexpected OpenCode archive layout."
+            exit 1
+          fi
+          mkdir -p "$bin"
+          tar -xzf "$archive" -C "$bin"
+          test -x "$bin/opencode"
+
+      - name: Run OpenCode review
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          REVIEW_REPO: ${{ github.repository }}
+          REVIEW_PR: ${{ github.event.pull_request.number }}
+          REVIEW_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          REVIEW_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          node "$RUNNER_TEMP/review-input/trusted/review-model.mjs" \
+            --input "$RUNNER_TEMP/review-input/input.json" \
+            --prompt "$RUNNER_TEMP/review-input/prompt.txt" \
+            --work "$RUNNER_TEMP/opencode-work" \
+            --cli "$RUNNER_TEMP/opencode-bin/opencode" \
+            --outcome "$RUNNER_TEMP/review-outcome/outcome.json"
+
+      - name: Upload bounded review outcome
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: review-outcome
+          path: ${{ runner.temp }}/review-outcome
+          if-no-files-found: warn
+          retention-days: 3
+
+  publish:
+    name: Publish review comment
+    needs: [prepare, review]
+    if: needs.prepare.outputs.ready == 'true' && needs.review.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Only the PR comment API is needed; artifact access uses the runtime token.
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.20.0
+
+      - name: Download trusted review input
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: review-input
+          path: ${{ runner.temp }}/review-input
+
+      - name: Download bounded review outcome
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: review-outcome
+          path: ${{ runner.temp }}/review-outcome
+
+      - name: Publish or update one review comment
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          REVIEW_REPO: ${{ github.repository }}
+          REVIEW_PR: ${{ github.event.pull_request.number }}
+          REVIEW_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          REVIEW_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          node "$RUNNER_TEMP/review-input/trusted/review-publish.mjs" \
+            --input "$RUNNER_TEMP/review-input/input.json" \
+            --outcome "$RUNNER_TEMP/review-outcome/outcome.json"
