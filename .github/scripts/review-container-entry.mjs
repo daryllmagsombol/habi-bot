@@ -82,6 +82,13 @@ function assertNoSecrets(value, depth = 0) {
   }
 }
 
+function assertReviewOptions(value) {
+  if (!isPlainObject(value)) fail("config-agent-options")
+  const keys = Object.keys(value)
+  if (keys.length !== 1 || keys[0] !== "reasoningEffort") fail("config-agent-options")
+  if (value.reasoningEffort !== "low") fail("config-agent-options")
+}
+
 function assertPermission(value, label) {
   if (!isPlainObject(value)) fail(`config-${label}`)
   for (const [tool, mode] of Object.entries(value)) {
@@ -129,6 +136,7 @@ export function validateReviewConfig(config) {
   const agent = config.agent.review
   if (agent.mode !== "primary" || agent.model !== MODEL || agent.steps !== 1) fail("config-agent")
   assertPermission(agent.permission, "agent-permission")
+  assertReviewOptions(agent.options)
   for (const key of Object.keys(config)) {
     if (key === "apiKey" || key === "providers" || key === "provider") fail("config-secret")
   }

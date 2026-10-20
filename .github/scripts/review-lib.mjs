@@ -11,31 +11,167 @@ export const RAW_LIMIT_BYTES = 2 * 1024 * 1024
 export const COMMENT_LIMIT_BYTES = 60_000
 export const AGGREGATE_COMMENT_LIMIT_BYTES = 28 * 1024
 export const CLI_TIMEOUT_MS = 8 * 60 * 1000
+export const MAX_REVIEW_ATTEMPTS = 2
+export const MAX_TOKEN_COUNT = 1_000_000_000
 export const GITHUB_ACTIONS_BOT_LOGIN = "github-actions[bot]"
 export const GITHUB_ACTIONS_BOT_ID = 41898282
 export const OUTPUT_TRUNCATION_NOTICE =
   "> **Review text truncated:** the automated review exceeded the output or comment size limit. This review is incomplete; later findings may be missing."
 
 const PROMPT_RESERVE_BYTES = 800
+const ATTEMPT_STATUSES = new Set(["reviewed", "unavailable", "error"])
+const FINISH_REASONS = new Set(["stop", "length", "tool-calls", "content-filter", "error", "unknown"])
+const ERROR_NAMES = new Set([
+  "apierror",
+  "providererror",
+  "aierror",
+  "autherror",
+  "ratelimiterror",
+  "internalerror",
+  "unavailableerror",
+  "httperror",
+  "fetcherror",
+  "typeerror",
+  "unknown",
+])
+const ATTEMPT_KEYS = new Set(["index", "status", "code", "finishReason", "tokens", "providerStatus"])
+const DIAGNOSTIC_KEYS = new Set(["code", "httpStatus", "errorName", "finishReason", "tokens"])
+const TOKEN_KEYS = [
+  ["input", ["input", "inputTokens", "promptTokens"]],
+  ["output", ["output", "outputTokens", "completionTokens"]],
+  ["reasoning", ["reasoning", "reasoningTokens"]],
+]
+const RETRYABLE_HTTP_STATUSES = new Set([429, 500, 502, 503, 504])
+const FREE_TIER_ADMISSION_ID = "free-tier-admission"
 
 const UNSAFE_CONTROLS =
   /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g
 
 export class ReviewFailure extends Error {
-  constructor(code) {
+  constructor(code, details) {
     super(code)
     this.name = "ReviewFailure"
     this.code = code
+    if (details && typeof details === "object" && !Array.isArray(details)) this.details = details
   }
 }
 
-export function fail(code) {
-  throw new ReviewFailure(code)
+export function fail(code, details) {
+  throw new ReviewFailure(code, details)
 }
 
 export function safeCode(value) {
   const code = typeof value === "string" ? value.toLowerCase() : ""
   return /^[a-z0-9][a-z0-9-]{0,63}$/.test(code) ? code : "unknown"
+}
+
+export function safeFinishReason(value) {
+  return typeof value === "string" && FINISH_REASONS.has(value) ? value : "unknown"
+}
+
+function isFinishReason(value) {
+  return typeof value === "string" && FINISH_REASONS.has(value)
+}
+
+export function safeErrorName(value) {
+  if (typeof value !== "string") return undefined
+  const name = value.toLowerCase()
+  return ERROR_NAMES.has(name) ? name : "unknown"
+}
+
+function isErrorName(value) {
+  return typeof value === "string" && ERROR_NAMES.has(value)
+}
+
+function isBoundedToken(value) {
+  return Number.isInteger(value) && value >= 0 && value <= MAX_TOKEN_COUNT
+}
+
+/**
+ * Extract only bounded token counts from structured JSONL fields. Provider
+ * messages, ids, and arbitrary strings are never copied.
+ */
+export function safeTokenCounts(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined
+  const source = value.tokens ?? value.usage ?? value
+  if (!source || typeof source !== "object" || Array.isArray(source)) return undefined
+  const tokens = {}
+  for (const [key, aliases] of TOKEN_KEYS) {
+    for (const alias of aliases) {
+      if (isBoundedToken(source[alias])) {
+        tokens[key] = source[alias]
+        break
+      }
+    }
+  }
+  return Object.keys(tokens).length > 0 ? tokens : undefined
+}
+
+function isTokenCounts(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false
+  const keys = Object.keys(value)
+  return (
+    keys.length > 0 &&
+    keys.every((key) => ["input", "output", "reasoning"].includes(key)) &&
+    keys.every((key) => isBoundedToken(value[key]))
+  )
+}
+
+export function safeDiagnostic(code, extra = {}) {
+  const diagnostic = { code: safeCode(code) }
+  const source = extra && typeof extra === "object" && !Array.isArray(extra) ? extra : {}
+  if (Number.isInteger(source.httpStatus) && source.httpStatus >= 100 && source.httpStatus <= 599) {
+    diagnostic.httpStatus = source.httpStatus
+  }
+  if (isErrorName(source.errorName)) diagnostic.errorName = source.errorName
+  else if (typeof source.errorName === "string") diagnostic.errorName = "unknown"
+  if (isFinishReason(source.finishReason)) diagnostic.finishReason = source.finishReason
+  const tokens = safeTokenCounts(source.tokens)
+  if (tokens) diagnostic.tokens = tokens
+  return diagnostic
+}
+
+export function isValidDiagnostic(diagnostic) {
+  if (!diagnostic || typeof diagnostic !== "object" || Array.isArray(diagnostic)) return false
+  if (!Object.keys(diagnostic).every((key) => DIAGNOSTIC_KEYS.has(key))) return false
+  if (typeof diagnostic.code !== "string" || safeCode(diagnostic.code) !== diagnostic.code) return false
+  if (
+    diagnostic.httpStatus !== undefined &&
+    !(Number.isInteger(diagnostic.httpStatus) && diagnostic.httpStatus >= 100 && diagnostic.httpStatus <= 599)
+  ) {
+    return false
+  }
+  if (diagnostic.errorName !== undefined && !isErrorName(diagnostic.errorName)) return false
+  if (diagnostic.finishReason !== undefined && !isFinishReason(diagnostic.finishReason)) return false
+  if (diagnostic.tokens !== undefined && !isTokenCounts(diagnostic.tokens)) return false
+  return true
+}
+
+/**
+ * Attempt metadata is optional, bounded, and strictly shaped. It is evidence
+ * for operators only; it never contributes findings or coverage.
+ */
+export function isValidAttempts(attempts, status) {
+  if (attempts === undefined) return true
+  if (!Array.isArray(attempts) || attempts.length < 1 || attempts.length > MAX_REVIEW_ATTEMPTS) return false
+  for (let index = 0; index < attempts.length; index += 1) {
+    const entry = attempts[index]
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false
+    if (!Object.keys(entry).every((key) => ATTEMPT_KEYS.has(key))) return false
+    if (entry.index !== index + 1) return false
+    if (!ATTEMPT_STATUSES.has(entry.status)) return false
+    if (typeof entry.code !== "string" || safeCode(entry.code) !== entry.code) return false
+    if (entry.finishReason !== undefined && !isFinishReason(entry.finishReason)) return false
+    if (entry.tokens !== undefined && !isTokenCounts(entry.tokens)) return false
+    if (
+      entry.providerStatus !== undefined &&
+      !(Number.isInteger(entry.providerStatus) && entry.providerStatus >= 100 && entry.providerStatus <= 599)
+    ) {
+      return false
+    }
+  }
+  if (status !== undefined && attempts[attempts.length - 1].status !== status) return false
+  return true
 }
 
 export function isMain(moduleUrl) {
@@ -285,6 +421,7 @@ function validOutcomeForBatch(outcome, batch, manifest) {
     return { ok: false, code: "invalid-outcome" }
   }
   if (outcome.version !== 1) return { ok: false, code: "invalid-outcome" }
+  if (!isValidAttempts(outcome.attempts, outcome.status)) return { ok: false, code: "invalid-outcome" }
   if (outcome.batchId !== batch.id) return { ok: false, code: "batch-mismatch" }
   if (outcome.promptSha256 !== batch.promptSha256) return { ok: false, code: "prompt-hash-mismatch" }
   if (!sameIdentity(outcome, manifest.identity)) return { ok: false, code: "identity-mismatch" }
@@ -305,7 +442,7 @@ function validOutcomeForBatch(outcome, batch, manifest) {
     return { ok: true, status: "reviewed" }
   }
   if (outcome.status === "unavailable" || outcome.status === "error") {
-    if (!outcome.diagnostic || typeof outcome.diagnostic.code !== "string") {
+    if (!isValidDiagnostic(outcome.diagnostic)) {
       return { ok: false, code: "invalid-outcome" }
     }
     return { ok: true, status: outcome.status, diagnostic: outcome.diagnostic }
@@ -672,10 +809,83 @@ export function classifyProviderError(error) {
   return null
 }
 
+function firstHttpStatus(error) {
+  const candidates = [
+    error?.data?.statusCode,
+    error?.data?.status,
+    error?.statusCode,
+    error?.status,
+    error?.data?.response?.status,
+    error?.response?.status,
+  ]
+  for (const value of candidates) {
+    const status = Number(value)
+    if (Number.isInteger(status) && status >= 100 && status <= 599) return status
+  }
+  return statusesFrom(error)[0]
+}
+
+function isFreeTierAdmission(error) {
+  return [
+    error?.code,
+    error?.type,
+    error?.message,
+    error?.data?.code,
+    error?.data?.type,
+    error?.data?.message,
+    error?.data?.errorCode,
+    error?.data?.error,
+    error?.data?.error?.code,
+  ].some((value) => value === FREE_TIER_ADMISSION_ID)
+}
+
+function providerFailure(code, retryable, extra) {
+  return {
+    code,
+    retryable,
+    diagnostic: safeDiagnostic(code, extra),
+  }
+}
+
+/**
+ * Classify a structured OpenCode `error` event using only explicit numeric
+ * statuses and a small sanitized error-name/error-code surface. Arbitrary 403s
+ * and 401s stay fatal; only the exact free-tier admission identifier is mapped
+ * to an informational (single-retry) outcome.
+ */
+export function classifyStructuredProviderError(error) {
+  const httpStatus = firstHttpStatus(error)
+  const errorName = safeErrorName(error?.name)
+  const finishReason = isFinishReason(error?.data?.finishReason) ? error.data.finishReason : undefined
+  const tokens = safeTokenCounts(error?.data?.tokens ?? error?.tokens)
+  const extra = {
+    ...(httpStatus !== undefined ? { httpStatus } : {}),
+    ...(errorName !== undefined ? { errorName } : {}),
+    ...(finishReason !== undefined ? { finishReason } : {}),
+    ...(tokens ? { tokens } : {}),
+  }
+  if (httpStatus !== undefined) {
+    if (httpStatus === 429) return providerFailure("provider-rate-limited", true, extra)
+    if (RETRYABLE_HTTP_STATUSES.has(httpStatus)) {
+      return providerFailure("provider-unavailable", true, extra)
+    }
+    if (httpStatus === 529) return providerFailure("provider-unavailable", false, extra)
+    if (httpStatus === 403 && isFreeTierAdmission(error)) {
+      return providerFailure("provider-free-tier-rejected", true, extra)
+    }
+    return null
+  }
+  // Text-only fallbacks remain informational but are never retried: retries
+  // require an explicit structured status.
+  const legacy = classifyProviderError(error)
+  return legacy ? providerFailure(legacy, false, extra) : null
+}
+
 export function parseOpenCodeJsonl(raw, exitCode = 0) {
   const lines = String(raw ?? "").split(/\r?\n/)
   let sawStepFinish = false
   let stepReason
+  let stepTokens
   let errorEvent
   const texts = []
 
@@ -696,8 +906,13 @@ export function parseOpenCodeJsonl(raw, exitCode = 0) {
         break
       case "step_finish": {
         if (!event.part || typeof event.part.reason !== "string") fail("invalid-step-finish")
+        // A tool-calls finish is a security-relevant tool request. Reject it at
+        // the event itself so a provider error event in the same JSONL stream
+        // can never mask it or downgrade it to a retryable unavailable result.
+        if (event.part.reason === "tool-calls") fail("tool-use")
         sawStepFinish = true
         stepReason = event.part.reason
+        stepTokens = safeTokenCounts(event.part.tokens ?? event.part.usage)
         break
       }
       case "text": {
@@ -720,14 +935,31 @@ export function parseOpenCodeJsonl(raw, exitCode = 0) {
   }
 
   if (errorEvent) {
-    const code = classifyProviderError(errorEvent)
-    if (code) return { status: "unavailable", code }
-    fail("cli-error")
+    const failure = classifyStructuredProviderError(errorEvent)
+    if (failure) {
+      return {
+        status: "unavailable",
+        code: failure.code,
+        retryable: failure.retryable,
+        diagnostic: failure.diagnostic,
+      }
+    }
+    const httpStatus = firstHttpStatus(errorEvent)
+    const errorName = safeErrorName(errorEvent?.name)
+    fail("cli-error", {
+      ...(httpStatus !== undefined ? { httpStatus } : {}),
+      ...(errorName !== undefined ? { errorName } : {}),
+    })
   }
   if (exitCode !== 0) fail("cli-exit")
   if (!sawStepFinish) fail("missing-step-finish")
   if (stepReason === "tool-calls") fail("tool-use")
-  if (stepReason === "length") fail("output-length")
+  if (stepReason === "length") {
+    fail("output-length", {
+      finishReason: "length",
+      ...(stepTokens ? { tokens: stepTokens } : {}),
+    })
+  }
   if (stepReason === "content-filter") fail("content-filter")
   if (stepReason === "error") fail("step-error")
   if (stepReason !== "stop") fail("step-not-stop")
@@ -735,7 +967,13 @@ export function parseOpenCodeJsonl(raw, exitCode = 0) {
 
   const cut = truncateUtf8(sanitizeReview(texts[texts.length - 1]), OUTPUT_LIMIT_BYTES)
   if (cut.text.length === 0) fail("empty-text")
-  return { status: "reviewed", text: cut.text, truncated: cut.truncated }
+  return {
+    status: "reviewed",
+    text: cut.text,
+    truncated: cut.truncated,
+    finishReason: "stop",
+    ...(stepTokens ? { tokens: stepTokens } : {}),
+  }
 }
 
 export function renderCoverage(coverage = {}, trustedSource) {
@@ -763,12 +1001,13 @@ export function renderCoverage(coverage = {}, trustedSource) {
 export function validateOutcome(outcome) {
   if (!outcome || typeof outcome !== "object") fail("invalid-outcome")
   if (outcome.version !== 1) fail("invalid-outcome")
+  if (!isValidAttempts(outcome.attempts, outcome.status)) fail("invalid-outcome")
   if (outcome.status !== "reviewed" && outcome.status !== "unavailable") fail("invalid-outcome")
   if (outcome.status === "reviewed") {
     if (!outcome.review || typeof outcome.review.markdown !== "string" || outcome.review.markdown.trim().length === 0) {
       fail("invalid-outcome")
     }
-  } else if (!outcome.diagnostic || typeof outcome.diagnostic.code !== "string") {
+  } else if (!isValidDiagnostic(outcome.diagnostic)) {
     fail("invalid-outcome")
   }
   if (outcome.trustedSource !== undefined) {

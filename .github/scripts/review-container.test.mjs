@@ -320,7 +320,41 @@ test("buildContainedConfig passes the container config policy", () => {
   assert.equal(validateReviewConfig(config).model, MODEL)
   assert.deepEqual(config.permission, { "*": "deny", read: "allow", bash: "allow" })
   assert.deepEqual(config.agent.review.permission, { "*": "deny", read: "allow", bash: "allow" })
+  assert.deepEqual(config.agent.review.options, { reasoningEffort: "low" })
   assert.equal(config.share, "disabled")
+})
+
+test("entry accepts only the exact approved low reasoning effort option", () => {
+  const config = buildContainedConfig()
+  assert.deepEqual(validateReviewConfig(config).agent.review.options, { reasoningEffort: "low" })
+
+  const withOptions = (options) => {
+    const next = buildContainedConfig()
+    next.agent.review.options = options
+    return next
+  }
+  for (const options of [
+    { reasoningEffort: "high" },
+    { reasoningEffort: "max" },
+    { reasoningEffort: "none" },
+    {},
+    { reasoningEffort: "low", temperature: 0 },
+    { reasoningEffort: "low", topP: 1 },
+    { reasoningEffort: "low", headers: {} },
+    { reasoningEffort: "low", baseURL: "https://example.invalid" },
+  ]) {
+    assert.throws(() => validateReviewConfig(withOptions(options)), /config-agent-options/)
+  }
+  for (const options of [
+    { reasoningEffort: "low", apiKey: "sk-test" },
+    { reasoningEffort: "low", token: "secret" },
+  ]) {
+    assert.throws(() => validateReviewConfig(withOptions(options)), /config-(agent-options|secret)/)
+  }
+
+  const missing = buildContainedConfig()
+  delete missing.agent.review.options
+  assert.throws(() => validateReviewConfig(missing), /config-agent-options/)
 })
 
 test("entry rejects provider secrets, wrong models, and expanded permissions", () => {

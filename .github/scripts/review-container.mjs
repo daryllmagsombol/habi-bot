@@ -181,6 +181,7 @@ export function buildContainedConfig() {
       review: {
         mode: "primary",
         model: MODEL,
+        options: { reasoningEffort: "low" },
         permission,
         steps: 1,
         description: "Read-only pull request review",

@@ -20,6 +20,7 @@ import {
   classifyProviderError,
   escapeMentions,
   findBotComment,
+  isValidAttempts,
   parseOpenCodeJsonl,
   renderAggregateComment,
   renderComment,
@@ -27,6 +28,7 @@ import {
   sanitizeReview,
   sha256,
   truncateUtf8,
+  validateOutcome,
   validateReviewManifest,
 } from "./review-lib.mjs"
 import { runReview } from "./review-model.mjs"
@@ -472,6 +474,27 @@ const VALID_JSONL = jsonl([
   { type: "step_finish", part: { reason: "stop" } },
 ])
 
+function lengthJsonl(tokens) {
+  return jsonl([
+    { type: "step_start", part: {} },
+    { type: "text", part: { type: "text", text: "partial review", time: { end: 1 } } },
+    { type: "step_finish", part: { reason: "length", ...(tokens ? { tokens } : {}) } },
+  ])
+}
+
+function providerErrorJsonl({ status, name, code }) {
+  return jsonl([
+    {
+      type: "error",
+      error: {
+        ...(name ? { name } : {}),
+        ...(code ? { code } : {}),
+        data: { statusCode: status, message: "provider detail must not leak" },
+      },
+    },
+  ])
+}
+
 function spawnResult({ status = 0, stdout = "", stderr = "", error } = {}) {
   return { status, stdout, stderr, error }
 }
@@ -496,6 +519,7 @@ test("contained config is keyless, single-model, and limits tools to the contain
   assert.deepEqual(config.agent.review, {
     mode: "primary",
     model: MODEL,
+    options: { reasoningEffort: "low" },
     permission,
     steps: 1,
     description: "Read-only pull request review",
@@ -553,12 +577,22 @@ test("JSONL parser separates provider limits from parser failures", () => {
   const limited = jsonl([
     { type: "error", error: { name: "APIError", data: { statusCode: 429, message: "rate limit" } } },
   ])
-  assert.deepEqual(parseOpenCodeJsonl(limited, 1), { status: "unavailable", code: "provider-rate-limited" })
+  assert.deepEqual(parseOpenCodeJsonl(limited, 1), {
+    status: "unavailable",
+    code: "provider-rate-limited",
+    retryable: true,
+    diagnostic: { code: "provider-rate-limited", httpStatus: 429, errorName: "apierror" },
+  })
 
   const unavailable = jsonl([
     { type: "error", error: { data: { status: 503, message: "service unavailable" } } },
   ])
-  assert.deepEqual(parseOpenCodeJsonl(unavailable, 1), { status: "unavailable", code: "provider-unavailable" })
+  assert.deepEqual(parseOpenCodeJsonl(unavailable, 1), {
+    status: "unavailable",
+    code: "provider-unavailable",
+    retryable: true,
+    diagnostic: { code: "provider-unavailable", httpStatus: 503 },
+  })
 
   const fatal = jsonl([{ type: "error", error: { data: { message: "tool schema invalid" } } }])
   assert.throws(() => parseOpenCodeJsonl(fatal, 1), (error) => error.code === "cli-error")
@@ -786,6 +820,601 @@ test("unstructured stderr is never trusted as a provider signal", async () => {
   }
 })
 
+test("output-length retries the identical validated batch and accepts only the final stop", async () => {
+  const fixture = modelFixture()
+  const requests = []
+  const execute = async (request) => {
+    requests.push(request)
+    if (requests.length === 1) {
+      return spawnResult({
+        status: 0,
+        stdout: lengthJsonl({ input: 120, output: 32_000, reasoning: 32_000 }),
+      })
+    }
+    return spawnResult({ stdout: VALID_JSONL })
+  }
+  const result = await runReview({
+    ...fixture,
+    cliPath: "/fake/opencode",
+    expected: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
+    execute,
+  })
+
+  assert.equal(result.exitCode, 0)
+  assert.equal(result.status, "reviewed")
+  assert.equal(requests.length, 2)
+  assert.equal(requests[0].cliPath, requests[1].cliPath)
+  assert.equal(requests[0].prompt, PROMPT)
+  assert.equal(requests[1].prompt, PROMPT)
+  assert.equal(sha256(requests[0].prompt), sha256(requests[1].prompt))
+  assert.deepEqual(requests[0].config, requests[1].config)
+  assert.equal(requests[0].timeoutMs, requests[1].timeoutMs)
+  assert.equal(requests[0].maxBuffer, requests[1].maxBuffer)
+  assert.equal(requests[0].signal, requests[1].signal)
+
+  const written = JSON.parse(fs.readFileSync(fixture.outcomePath, "utf8"))
+  assert.equal(written.status, "reviewed")
+  assert.equal(written.batchId, "b0001")
+  assert.equal(written.promptSha256, sha256(PROMPT))
+  assert.deepEqual(written.attempts, [
+    {
+      index: 1,
+      status: "error",
+      code: "output-length",
+      finishReason: "length",
+      tokens: { input: 120, output: 32_000, reasoning: 32_000 },
+    },
+    { index: 2, status: "reviewed", code: "reviewed", finishReason: "stop" },
+  ])
+})
+
+test("structured provider 429 and 503 retry once and accept the later clean stop", async () => {
+  for (const [status, code] of [
+    [429, "provider-rate-limited"],
+    [503, "provider-unavailable"],
+  ]) {
+    const fixture = modelFixture()
+    let calls = 0
+    const result = await runReview({
+      ...fixture,
+      cliPath: "/fake/opencode",
+      expected: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
+      execute: async () => {
+        calls += 1
+        if (calls === 1) {
+          return spawnResult({
+            status: 1,
+            stdout: providerErrorJsonl({ status, name: "APIError", code: "provider_detail" }),
+          })
+        }
+        return spawnResult({ stdout: VALID_JSONL })
+      },
+    })
+    assert.equal(result.exitCode, 0, code)
+    assert.equal(result.status, "reviewed", code)
+    assert.equal(calls, 2, code)
+    const written = JSON.parse(fs.readFileSync(fixture.outcomePath, "utf8"))
+    assert.equal(written.attempts.length, 2, code)
+    assert.equal(written.attempts[0].status, "unavailable", code)
+    assert.equal(written.attempts[0].code, code, code)
+    assert.equal(written.attempts[0].providerStatus, status, code)
+    assert.equal(written.attempts[1].status, "reviewed", code)
+  }
+})
+
+test("only the exact structured free-tier 403 is retried as informational", async () => {
+  const fixture = modelFixture()
+  let calls = 0
+  const result = await runReview({
+    ...fixture,
+    cliPath: "/fake/opencode",
+    expected: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
+    execute: async () => {
+      calls += 1
+      if (calls === 1) {
+        return spawnResult({
+          status: 1,
+          stdout: providerErrorJsonl({ status: 403, name: "APIError", code: "free-tier-admission" }),
+        })
+      }
+      return spawnResult({ stdout: VALID_JSONL })
+    },
+  })
+  assert.equal(result.status, "reviewed")
+  assert.equal(calls, 2)
+  const written = JSON.parse(fs.readFileSync(fixture.outcomePath, "utf8"))
+  assert.equal(written.attempts[0].status, "unavailable")
+  assert.equal(written.attempts[0].code, "provider-free-tier-rejected")
+  assert.equal(written.attempts[0].providerStatus, 403)
+})
+
+test("an arbitrary structured 403 stays fatal and is never retried", async () => {
+  const fixture = modelFixture()
+  let calls = 0
+  const result = await runReview({
+    ...fixture,
+    cliPath: "/fake/opencode",
+    expected: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
+    execute: async () => {
+      calls += 1
+      return spawnResult({
+        status: 1,
+        stdout: providerErrorJsonl({ status: 403, name: "APIError", code: "forbidden" }),
+      })
+    },
+  })
+  assert.equal(result.exitCode, 1)
+  assert.equal(result.status, "error")
+  assert.equal(result.code, "cli-error")
+  assert.equal(calls, 1)
+  const written = JSON.parse(fs.readFileSync(fixture.outcomePath, "utf8"))
+  assert.equal(written.status, "error")
+  assert.equal(written.diagnostic.code, "cli-error")
+  assert.equal(written.diagnostic.httpStatus, 403)
+  assert.equal(written.diagnostic.errorName, "apierror")
+  assert.equal(written.attempts.length, 1)
+  assert.equal(written.attempts[0].code, "cli-error")
+  assert.equal(written.attempts[0].providerStatus, 403)
+  assert.equal(JSON.stringify(written).includes("provider detail"), false)
+  assert.equal(JSON.stringify(written).includes("forbidden"), false)
+
+  const unauthorized = modelFixture()
+  let unauthorizedCalls = 0
+  const unauthorizedResult = await runReview({
+    ...unauthorized,
+    cliPath: "/fake/opencode",
+    expected: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
+    execute: async () => {
+      unauthorizedCalls += 1
+      return spawnResult({
+        status: 1,
+        stdout: providerErrorJsonl({ status: 401, name: "AuthError", code: "unauthorized" }),
+      })
+    },
+  })
+  assert.equal(unauthorizedResult.exitCode, 1)
+  assert.equal(unauthorizedResult.code, "cli-error")
+  assert.equal(unauthorizedCalls, 1)
+  const unauthorizedOutcome = JSON.parse(fs.readFileSync(unauthorized.outcomePath, "utf8"))
+  assert.equal(unauthorizedOutcome.diagnostic.httpStatus, 401)
+  assert.equal(unauthorizedOutcome.diagnostic.errorName, "autherror")
+})
+
+test("two output-length results remain a bounded fatal error, not a review", async () => {
+  const fixture = modelFixture()
+  let calls = 0
+  const result = await runReview({
+    ...fixture,
+    cliPath: "/fake/opencode",
+    expected: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
+    execute: async () => {
+      calls += 1
+      return spawnResult({
+        status: 0,
+        stdout: lengthJsonl({ input: 50, output: 32_000, reasoning: 32_000 }),
+      })
+    },
+  })
+  assert.equal(result.exitCode, 1)
+  assert.equal(result.status, "error")
+  assert.equal(result.code, "output-length")
+  assert.equal(calls, 2)
+  const written = JSON.parse(fs.readFileSync(fixture.outcomePath, "utf8"))
+  assert.equal(written.status, "error")
+  assert.equal(written.batchId, "b0001")
+  assert.equal(written.promptSha256, sha256(PROMPT))
+  assert.equal(written.diagnostic.code, "output-length")
+  assert.equal(written.diagnostic.finishReason, "length")
+  assert.deepEqual(written.diagnostic.tokens, { input: 50, output: 32_000, reasoning: 32_000 })
+  assert.deepEqual(written.attempts.map((attempt) => attempt.code), ["output-length", "output-length"])
+  assert.deepEqual(written.attempts.map((attempt) => attempt.index), [1, 2])
+})
+
+test("fatal, security, overflow, cancellation, and timeout outcomes are never retried", async () => {
+  const cases = [
+    {
+      name: "tool-use",
+      execute: async () =>
+        spawnResult({
+          stdout: jsonl([
+            { type: "tool_use", part: { tool: "bash", state: { status: "completed" } } },
+            { type: "step_finish", part: { reason: "stop" } },
+          ]),
+        }),
+      code: "tool-use",
+      exitCode: 1,
+    },
+    {
+      name: "malformed-jsonl",
+      execute: async () => spawnResult({ stdout: "not-json\n" }),
+      code: "malformed-jsonl",
+      exitCode: 1,
+    },
+    {
+      name: "isolation",
+      execute: async () => {
+        throw new ContainerFailure("isolation-failed")
+      },
+      code: "isolation-failed",
+      exitCode: 1,
+    },
+    {
+      name: "cleanup",
+      execute: async () => {
+        throw new ContainerFailure("cleanup-failed")
+      },
+      code: "cleanup-failed",
+      exitCode: 1,
+    },
+    {
+      name: "raw-limit",
+      execute: async () => spawnResult({ status: null, error: { code: "ENOBUFS" } }),
+      code: "raw-limit",
+      exitCode: 1,
+    },
+    {
+      name: "cancelled",
+      execute: async () => spawnResult({ status: null, error: { code: "ECANCELED" } }),
+      code: "cli-spawn",
+      exitCode: 1,
+    },
+    {
+      name: "timeout",
+      execute: async () => spawnResult({ status: null, error: { code: "ETIMEDOUT" } }),
+      code: "cli-timeout",
+      exitCode: 0,
+    },
+    {
+      name: "malformed-status",
+      execute: async () => spawnResult({ status: "0" }),
+      code: "cli-signal",
+      exitCode: 1,
+    },
+  ]
+
+  for (const variant of cases) {
+    const fixture = modelFixture()
+    let calls = 0
+    const result = await runReview({
+      ...fixture,
+      cliPath: "/fake/opencode",
+      expected: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
+      execute: async (request) => {
+        calls += 1
+        return variant.execute(request)
+      },
+    })
+    assert.equal(calls, 1, variant.name)
+    assert.equal(result.exitCode, variant.exitCode, variant.name)
+    assert.equal(result.code, variant.code, variant.name)
+  }
+})
+
+test("maxAttempts is bounded to the same two-attempt cap and rejects larger values", async () => {
+  const single = modelFixture()
+  let singleCalls = 0
+  const singleResult = await runReview({
+    ...single,
+    cliPath: "/fake/opencode",
+    expected: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
+    maxAttempts: 1,
+    execute: async () => {
+      singleCalls += 1
+      return spawnResult({ status: 0, stdout: lengthJsonl() })
+    },
+  })
+  assert.equal(singleCalls, 1)
+  assert.equal(singleResult.exitCode, 1)
+  assert.equal(singleResult.code, "output-length")
+
+  const tooMany = modelFixture()
+  let tooManyCalls = 0
+  const tooManyResult = await runReview({
+    ...tooMany,
+    cliPath: "/fake/opencode",
+    expected: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
+    maxAttempts: 3,
+    execute: async () => {
+      tooManyCalls += 1
+      return spawnResult({ stdout: VALID_JSONL })
+    },
+  })
+  assert.equal(tooManyCalls, 0)
+  assert.equal(tooManyResult.exitCode, 1)
+  assert.equal(tooManyResult.code, "invalid-max-attempts")
+  const tooManyOutcome = JSON.parse(fs.readFileSync(tooMany.outcomePath, "utf8"))
+  assert.equal(tooManyOutcome.status, "error")
+  assert.equal(Object.hasOwn(tooManyOutcome, "attempts"), false)
+})
+
+test("tool-calls finish markers are fatal even beside a retryable provider error", async () => {
+  const toolFirst = jsonl([
+    { type: "step_finish", part: { reason: "tool-calls" } },
+    { type: "error", error: { name: "APIError", data: { statusCode: 429, message: "rate limit" } } },
+  ])
+  const providerFirst = jsonl([
+    { type: "error", error: { name: "APIError", data: { statusCode: 429, message: "rate limit" } } },
+    { type: "step_finish", part: { reason: "tool-calls" } },
+  ])
+  for (const stdout of [toolFirst, providerFirst]) {
+    assert.throws(() => parseOpenCodeJsonl(stdout, 1), (error) => error.code === "tool-use")
+  }
+
+  for (const stdout of [toolFirst, providerFirst]) {
+    const fixture = modelFixture()
+    let calls = 0
+    const result = await runReview({
+      ...fixture,
+      cliPath: "/fake/opencode",
+      expected: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
+      execute: async () => {
+        calls += 1
+        return spawnResult({ status: 1, stdout })
+      },
+    })
+    assert.equal(calls, 1)
+    assert.equal(result.exitCode, 1)
+    assert.equal(result.status, "error")
+    assert.equal(result.code, "tool-use")
+    const written = JSON.parse(fs.readFileSync(fixture.outcomePath, "utf8"))
+    assert.equal(written.status, "error")
+    assert.equal(written.review, null)
+    assert.equal(written.diagnostic.code, "tool-use")
+    assert.equal(written.attempts.length, 1)
+    assert.equal(written.attempts[0].status, "error")
+    assert.equal(written.attempts[0].code, "tool-use")
+  }
+})
+
+test("late runtime cancellation during an attempt is not retried or accepted as review", async () => {
+  for (const exitCode of [130, 143]) {
+    const original = process.exitCode
+    try {
+      const fixture = modelFixture()
+      let calls = 0
+      const result = await runReview({
+        ...fixture,
+        cliPath: "/fake/opencode",
+        expected: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
+        execute: async () => {
+          calls += 1
+          process.exitCode = exitCode
+          return spawnResult({ status: 1, stdout: providerErrorJsonl({ status: 429, name: "APIError" }) })
+        },
+      })
+      assert.equal(calls, 1, String(exitCode))
+      assert.equal(result.exitCode, 1, String(exitCode))
+      assert.equal(result.status, "error", String(exitCode))
+      assert.equal(result.code, "cancelled", String(exitCode))
+      assert.equal(process.exitCode, exitCode, String(exitCode))
+      const written = JSON.parse(fs.readFileSync(fixture.outcomePath, "utf8"))
+      assert.equal(written.status, "error", String(exitCode))
+      assert.equal(written.review, null, String(exitCode))
+      assert.equal(written.diagnostic.code, "cancelled", String(exitCode))
+      assert.equal(written.attempts.length, 1, String(exitCode))
+      assert.equal(written.attempts[0].status, "error", String(exitCode))
+      assert.equal(written.attempts[0].code, "cancelled", String(exitCode))
+    } finally {
+      process.exitCode = original
+    }
+  }
+})
+
+test("late runtime cancellation after a clean result cannot become review evidence", async () => {
+  const original = process.exitCode
+  try {
+    const fixture = modelFixture()
+    let calls = 0
+    const result = await runReview({
+      ...fixture,
+      cliPath: "/fake/opencode",
+      expected: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
+      execute: async () => {
+        calls += 1
+        process.exitCode = 143
+        return spawnResult({ stdout: VALID_JSONL })
+      },
+    })
+    assert.equal(calls, 1)
+    assert.equal(result.status, "error")
+    assert.equal(result.code, "cancelled")
+    const written = JSON.parse(fs.readFileSync(fixture.outcomePath, "utf8"))
+    assert.equal(written.status, "error")
+    assert.equal(written.review, null)
+    assert.equal(written.diagnostic.code, "cancelled")
+    assert.equal(written.attempts.length, 1)
+    assert.equal(written.attempts[0].status, "error")
+    assert.equal(written.attempts[0].code, "cancelled")
+    assert.equal(JSON.stringify(written).includes("final review"), false)
+  } finally {
+    process.exitCode = original
+  }
+})
+
+test("cancellation before a retry invocation does not invent a second attempt", async () => {
+  const controller = new AbortController()
+  const fixture = modelFixture()
+  let calls = 0
+  const result = await runReview({
+    ...fixture,
+    cliPath: "/fake/opencode",
+    expected: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
+    signal: controller.signal,
+    execute: async () => {
+      calls += 1
+      queueMicrotask(() => controller.abort())
+      return spawnResult({ status: 1, stdout: providerErrorJsonl({ status: 429, name: "APIError" }) })
+    },
+  })
+  assert.equal(calls, 1)
+  assert.equal(result.exitCode, 1)
+  assert.equal(result.status, "error")
+  assert.equal(result.code, "cancelled")
+  const written = JSON.parse(fs.readFileSync(fixture.outcomePath, "utf8"))
+  assert.equal(written.status, "error")
+  assert.equal(written.review, null)
+  assert.equal(written.attempts.length, 1)
+  assert.equal(written.attempts[0].index, 1)
+  assert.equal(written.attempts[0].status, "error")
+  assert.equal(written.attempts[0].code, "cancelled")
+})
+
+test("a second-attempt exception records both invocations and preserves trusted identity", async () => {
+  const variants = [
+    {
+      name: "container",
+      second: async () => {
+        throw new ContainerFailure("cleanup-failed")
+      },
+      code: "cleanup-failed",
+    },
+    { name: "raw-limit", second: async () => spawnResult({ status: null, error: { code: "ENOBUFS" } }), code: "raw-limit" },
+    { name: "cancel", second: async () => spawnResult({ status: null, error: { code: "ECANCELED" } }), code: "cli-spawn" },
+    { name: "malformed-status", second: async () => spawnResult({ status: "0" }), code: "cli-signal" },
+  ]
+  for (const variant of variants) {
+    const fixture = modelFixture()
+    let calls = 0
+    const result = await runReview({
+      ...fixture,
+      cliPath: "/fake/opencode",
+      expected: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
+      execute: async () => {
+        calls += 1
+        if (calls === 1) {
+          return spawnResult({ status: 1, stdout: providerErrorJsonl({ status: 429, name: "APIError" }) })
+        }
+        return variant.second()
+      },
+    })
+    assert.equal(calls, 2, variant.name)
+    assert.equal(result.exitCode, 1, variant.name)
+    assert.equal(result.status, "error", variant.name)
+    assert.equal(result.code, variant.code, variant.name)
+    const written = JSON.parse(fs.readFileSync(fixture.outcomePath, "utf8"))
+    assert.equal(written.status, "error", variant.name)
+    assert.equal(written.review, null, variant.name)
+    assert.equal(written.batchId, "b0001", variant.name)
+    assert.equal(written.promptSha256, sha256(PROMPT), variant.name)
+    assert.equal(written.diagnostic.code, variant.code, variant.name)
+    assert.equal(written.attempts.length, 2, variant.name)
+    assert.deepEqual(
+      written.attempts.map((entry) => entry.index),
+      [1, 2],
+      variant.name,
+    )
+    assert.equal(written.attempts[0].status, "unavailable", variant.name)
+    assert.equal(written.attempts[0].code, "provider-rate-limited", variant.name)
+    assert.equal(written.attempts[1].status, "error", variant.name)
+    assert.equal(written.attempts[1].code, variant.code, variant.name)
+    assert.equal(isValidAttempts(written.attempts, written.status), true, variant.name)
+  }
+})
+
+test("a first output-length attempt followed by an exception still logs both invocations", async () => {
+  const fixture = modelFixture()
+  let calls = 0
+  const result = await runReview({
+    ...fixture,
+    cliPath: "/fake/opencode",
+    expected: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
+    execute: async () => {
+      calls += 1
+      if (calls === 1) return spawnResult({ status: 0, stdout: lengthJsonl() })
+      throw new ContainerFailure("cleanup-failed")
+    },
+  })
+  assert.equal(calls, 2)
+  assert.equal(result.exitCode, 1)
+  assert.equal(result.status, "error")
+  assert.equal(result.code, "cleanup-failed")
+  const written = JSON.parse(fs.readFileSync(fixture.outcomePath, "utf8"))
+  assert.equal(written.status, "error")
+  assert.equal(written.review, null)
+  assert.equal(written.batchId, "b0001")
+  assert.equal(written.promptSha256, sha256(PROMPT))
+  assert.equal(written.attempts.length, 2)
+  assert.equal(written.attempts[0].index, 1)
+  assert.equal(written.attempts[0].code, "output-length")
+  assert.equal(written.attempts[1].index, 2)
+  assert.equal(written.attempts[1].code, "cleanup-failed")
+  assert.equal(isValidAttempts(written.attempts, written.status), true)
+})
+
+test("validation failures before runtime do not fabricate attempt evidence", async () => {
+  const fixture = modelFixture({
+    input: inputFixture(),
+    prompt: `${PROMPT}\nchanged after hashing`,
+    manifest: manifestFixture(),
+  })
+  const result = await runReview({
+    ...fixture,
+    cliPath: "/fake/opencode",
+    expected: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
+    execute: async () => {
+      throw new Error("must not execute")
+    },
+  })
+  assert.equal(result.exitCode, 1)
+  assert.equal(result.code, "prompt-hash-mismatch")
+  const written = JSON.parse(fs.readFileSync(fixture.outcomePath, "utf8"))
+  assert.equal(written.status, "error")
+  assert.equal(Object.hasOwn(written, "attempts"), false)
+})
+
+test("attempt metadata is validated and unsafe shapes never contribute findings", () => {
+  const valid = outcomeFixture({
+    attempts: [
+      { index: 1, status: "error", code: "output-length", finishReason: "length", tokens: { reasoning: 32_000 } },
+      { index: 2, status: "reviewed", code: "reviewed", finishReason: "stop", tokens: { input: 10, output: 20 } },
+    ],
+  })
+  assert.doesNotThrow(() => validateOutcome(valid))
+
+  const unsafe = [
+    {
+      ...outcomeFixture(),
+      attempts: [
+        { index: 1, status: "reviewed", code: "reviewed" },
+        { index: 2, status: "reviewed", code: "reviewed" },
+        { index: 3, status: "reviewed", code: "reviewed" },
+      ],
+    },
+    { ...outcomeFixture(), attempts: [{ index: 1, status: "reviewed", code: "reviewed", message: "provider text" }] },
+    { ...outcomeFixture(), attempts: [{ index: 1, status: "reviewed", code: "reviewed", tokens: { reasoning: -1 } }] },
+    {
+      ...outcomeFixture(),
+      attempts: [{ index: 1, status: "unavailable", code: "provider-rate-limited", providerStatus: 999 }],
+    },
+  ]
+  for (const outcome of unsafe) {
+    assert.throws(() => validateOutcome(outcome), (error) => error.code === "invalid-outcome")
+  }
+
+  const manifest = manifestFixture()
+  const withUnsafe = aggregateReview(manifest, [
+    {
+      ...batchOutcome("b0001", manifest),
+      attempts: [{ index: 1, status: "reviewed", code: "reviewed", message: "provider text" }],
+    },
+  ])
+  assert.equal(withUnsafe.status, "incomplete")
+  assert.equal(withUnsafe.findings.length, 0)
+  assert.ok(withUnsafe.issues.some((issue) => issue.code === "invalid-outcome"))
+
+  const withRetry = aggregateReview(manifest, [
+    {
+      ...batchOutcome("b0001", manifest),
+      attempts: [
+        { index: 1, status: "error", code: "output-length", finishReason: "length" },
+        { index: 2, status: "reviewed", code: "reviewed", finishReason: "stop" },
+      ],
+    },
+  ])
+  assert.equal(withRetry.status, "complete")
+  assert.equal(withRetry.findings.length, 1)
+})
+
 test("every ContainerFailure is fatal and never classified unavailable", async () => {
   for (const code of ["isolation-failed", "iptables-command-failed", "container-invalid", "provider-rate-limited"]) {
     const fixture = modelFixture()
@@ -803,6 +1432,8 @@ test("every ContainerFailure is fatal and never classified unavailable", async (
     const outcome = JSON.parse(fs.readFileSync(fixture.outcomePath, "utf8"))
     assert.equal(outcome.status, "error", code)
     assert.equal(outcome.diagnostic.code, code, code)
+    assert.equal(outcome.batchId, "b0001", code)
+    assert.equal(outcome.promptSha256, sha256(PROMPT), code)
   }
 
   const broken = modelFixture()

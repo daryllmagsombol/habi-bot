@@ -305,7 +305,7 @@ jobs:
     needs: prepare
     if: needs.prepare.outputs.ready == 'true' && needs.prepare.outputs.batch_count != '0'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     # Same-run artifact access uses the Actions runtime token, not a job token.
     permissions: {}
     strategy:
