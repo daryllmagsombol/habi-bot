@@ -46,11 +46,29 @@ export const CONTAINER_CREATE_AMBIGUOUS = "container-create-ambiguous"
 export const FORWARD_PROOF_FAILED = "forward-proof-failed"
 export const OWNER_LABEL = "habi.review.owner"
 
-// Only the dedicated-network creation step is treated as a transient setup
-// race. Every policy, forward-proof, self-test, cleanup, and container-shape
-// failure stays fatal: retrying a failed containment check could otherwise
-// turn a security signal into an accepted review.
-const RETRYABLE_ISOLATION_CODES = new Set([ISOLATION_NETWORK_CREATE])
+// Retryable set: every stage below runs strictly BEFORE any model call, and a
+// retry is a brand-new `runContainedCli` invocation that rebuilds the dedicated
+// network and must re-pass the complete fail-closed containment self-test
+// before inference. Retry therefore cannot permit uncontained inference: a real
+// containment defect fails both attempts and stays fatal with no reviewed text.
+// The remaining pre-inference stages are environment/setup races:
+//   isolation-network-create  - dedicated network or iptables setup command
+//   isolation-selftest-probe  - self-test gateway lookup, probe stream/outcome
+//   isolation-selftest-inspect - self-test container shape inspection
+//   isolation-selftest-remove - self-test container removal/absence confirmation
+// Security-verification outcomes stay permanently fatal so a failed containment
+// assertion is never retried away:
+//   isolation-policy-load (policy/contract/security validation, unknown setup),
+//   forward-proof-failed (private-destination enforcement proof),
+// plus cleanup, container create/shape, image, CLI/environment/config,
+// raw-limit, tool-use, malformed/schema/protocol, cancellation, and anything
+// after accepted text.
+const RETRYABLE_ISOLATION_CODES = new Set([
+  ISOLATION_NETWORK_CREATE,
+  ISOLATION_SELFTEST_PROBE,
+  ISOLATION_SELFTEST_INSPECT,
+  ISOLATION_SELFTEST_REMOVE,
+])
 
 // `createIsolatedNetwork` also installs and verifies the iptables policy, so
 // only explicit transient command-execution codes from that stage may reach
@@ -86,9 +104,13 @@ function fail(code, cause) {
 }
 
 /**
- * A retry is allowed only for the transient network-creation setup class.
- * Anything that verifies containment, policy, forwarding, self-test results,
- * cleanup, or container shape remains fatal on the first observed attempt.
+ * A retry is allowed only for pre-inference isolation setup races. Each retry
+ * is a fresh runtime invocation that must re-pass the full containment
+ * self-test before any model call, so retry can never permit uncontained
+ * inference. Anything that verifies containment policy or forwarding
+ * (`isolation-policy-load`, `forward-proof-failed`), and every cleanup,
+ * container-shape, integrity, protocol, or post-text failure remains fatal on
+ * the first observed attempt.
  */
 export function isRetryableIsolationFailure(error) {
   return error instanceof ContainerFailure && RETRYABLE_ISOLATION_CODES.has(error.code)

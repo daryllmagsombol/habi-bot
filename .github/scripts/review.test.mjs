@@ -1112,38 +1112,147 @@ test("two transient isolation failures remain fatal with both attempts recorded"
   assert.equal(serialized.includes("provider body"), false)
 })
 
+test("each retryable pre-inference isolation stage retries once, then accepts a clean review", async () => {
+  for (const code of [
+    ISOLATION_NETWORK_CREATE,
+    ISOLATION_SELFTEST_PROBE,
+    ISOLATION_SELFTEST_INSPECT,
+    ISOLATION_SELFTEST_REMOVE,
+  ]) {
+    const fixture = modelFixture()
+    const requests = []
+    const secret = `SECRET ${code} /var/run/docker.sock iptables dump`
+    const result = await runReview({
+      ...fixture,
+      cliPath: "/fake/opencode",
+      expected: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
+      execute: async (request) => {
+        requests.push(request)
+        if (requests.length === 1) {
+          throw new ContainerFailure(code, { cause: new Error(secret) })
+        }
+        return spawnResult({ stdout: VALID_JSONL })
+      },
+    })
+
+    assert.equal(result.exitCode, 0, code)
+    assert.equal(result.status, "reviewed", code)
+    assert.equal(requests.length, 2, code)
+    // The retry is the identical already-validated request: same prompt bytes,
+    // hash, config, batch, and bounds. A fresh runtime invocation re-runs the
+    // complete containment self-test before any model call.
+    assert.equal(requests[0].cliPath, requests[1].cliPath, code)
+    assert.equal(requests[0].prompt, PROMPT, code)
+    assert.equal(requests[1].prompt, PROMPT, code)
+    assert.equal(sha256(requests[0].prompt), sha256(requests[1].prompt), code)
+    assert.deepEqual(requests[0].config, requests[1].config, code)
+    assert.equal(requests[0].timeoutMs, requests[1].timeoutMs, code)
+    assert.equal(requests[0].maxBuffer, requests[1].maxBuffer, code)
+    assert.equal(requests[0].signal, requests[1].signal, code)
+
+    const written = JSON.parse(fs.readFileSync(fixture.outcomePath, "utf8"))
+    assert.equal(written.status, "reviewed", code)
+    assert.equal(written.batchId, "b0001", code)
+    assert.equal(written.promptSha256, sha256(PROMPT), code)
+    assert.deepEqual(
+      written.attempts,
+      [
+        { index: 1, status: "error", code },
+        { index: 2, status: "reviewed", code: "reviewed", finishReason: "stop" },
+      ],
+      code,
+    )
+    assert.equal(isValidAttempts(written.attempts, written.status), true, code)
+    const serialized = JSON.stringify(written)
+    assert.equal(serialized.includes(secret), false, code)
+    assert.equal(serialized.includes("docker.sock"), false, code)
+  }
+})
+
+test("a second failure of any retryable isolation stage stays fatal with both attempts recorded", async () => {
+  for (const code of [
+    ISOLATION_NETWORK_CREATE,
+    ISOLATION_SELFTEST_PROBE,
+    ISOLATION_SELFTEST_INSPECT,
+    ISOLATION_SELFTEST_REMOVE,
+  ]) {
+    const fixture = modelFixture()
+    const secret = `SECRET ${code} provider body and iptables dump`
+    let calls = 0
+    const result = await runReview({
+      ...fixture,
+      cliPath: "/fake/opencode",
+      expected: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
+      execute: async () => {
+        calls += 1
+        throw new ContainerFailure(code, { cause: new Error(secret) })
+      },
+    })
+
+    assert.equal(calls, 2, code)
+    assert.equal(result.exitCode, 1, code)
+    assert.equal(result.status, "error", code)
+    assert.equal(result.code, code, code)
+    const written = JSON.parse(fs.readFileSync(fixture.outcomePath, "utf8"))
+    assert.equal(written.status, "error", code)
+    assert.equal(written.review, null, code)
+    assert.equal(written.batchId, "b0001", code)
+    assert.equal(written.promptSha256, sha256(PROMPT), code)
+    assert.equal(written.diagnostic.code, code, code)
+    assert.deepEqual(
+      written.attempts,
+      [
+        { index: 1, status: "error", code },
+        { index: 2, status: "error", code },
+      ],
+      code,
+    )
+    assert.equal(isValidAttempts(written.attempts, written.status), true, code)
+    const serialized = JSON.stringify(written)
+    assert.equal(serialized.includes(secret), false, code)
+    assert.equal(serialized.includes("provider body"), false, code)
+  }
+})
+
 test("cancellation during an isolation retry is not retried", async () => {
-  for (const exitCode of [130, 143]) {
-    const original = process.exitCode
-    try {
-      const fixture = modelFixture()
-      let calls = 0
-      const result = await runReview({
-        ...fixture,
-        cliPath: "/fake/opencode",
-        expected: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
-        execute: async () => {
-          calls += 1
-          process.exitCode = exitCode
-          throw new ContainerFailure(ISOLATION_NETWORK_CREATE)
-        },
-      })
-      assert.equal(calls, 1, String(exitCode))
-      assert.equal(result.exitCode, 1, String(exitCode))
-      assert.equal(result.status, "error", String(exitCode))
-      assert.equal(result.code, "cancelled", String(exitCode))
-      assert.equal(process.exitCode, exitCode, String(exitCode))
-      const written = JSON.parse(fs.readFileSync(fixture.outcomePath, "utf8"))
-      assert.equal(written.status, "error", String(exitCode))
-      assert.equal(written.review, null, String(exitCode))
-      assert.equal(written.diagnostic.code, "cancelled", String(exitCode))
-      assert.deepEqual(
-        written.attempts,
-        [{ index: 1, status: "error", code: "cancelled" }],
-        String(exitCode),
-      )
-    } finally {
-      process.exitCode = original
+  for (const code of [
+    ISOLATION_NETWORK_CREATE,
+    ISOLATION_SELFTEST_PROBE,
+    ISOLATION_SELFTEST_INSPECT,
+    ISOLATION_SELFTEST_REMOVE,
+  ]) {
+    for (const exitCode of [130, 143]) {
+      const original = process.exitCode
+      try {
+        const fixture = modelFixture()
+        let calls = 0
+        const result = await runReview({
+          ...fixture,
+          cliPath: "/fake/opencode",
+          expected: { repo: REPO, pr: 7, baseSha: BASE, headSha: HEAD },
+          execute: async () => {
+            calls += 1
+            process.exitCode = exitCode
+            throw new ContainerFailure(code)
+          },
+        })
+        assert.equal(calls, 1, `${code} ${exitCode}`)
+        assert.equal(result.exitCode, 1, `${code} ${exitCode}`)
+        assert.equal(result.status, "error", `${code} ${exitCode}`)
+        assert.equal(result.code, "cancelled", `${code} ${exitCode}`)
+        assert.equal(process.exitCode, exitCode, `${code} ${exitCode}`)
+        const written = JSON.parse(fs.readFileSync(fixture.outcomePath, "utf8"))
+        assert.equal(written.status, "error", `${code} ${exitCode}`)
+        assert.equal(written.review, null, `${code} ${exitCode}`)
+        assert.equal(written.diagnostic.code, "cancelled", `${code} ${exitCode}`)
+        assert.deepEqual(
+          written.attempts,
+          [{ index: 1, status: "error", code: "cancelled" }],
+          `${code} ${exitCode}`,
+        )
+      } finally {
+        process.exitCode = original
+      }
     }
   }
 })
@@ -1174,30 +1283,6 @@ test("fatal, security, overflow, and cancellation outcomes are never retried", a
         throw new ContainerFailure(ISOLATION_POLICY_LOAD)
       },
       code: ISOLATION_POLICY_LOAD,
-      exitCode: 1,
-    },
-    {
-      name: ISOLATION_SELFTEST_PROBE,
-      execute: async () => {
-        throw new ContainerFailure(ISOLATION_SELFTEST_PROBE)
-      },
-      code: ISOLATION_SELFTEST_PROBE,
-      exitCode: 1,
-    },
-    {
-      name: ISOLATION_SELFTEST_INSPECT,
-      execute: async () => {
-        throw new ContainerFailure(ISOLATION_SELFTEST_INSPECT)
-      },
-      code: ISOLATION_SELFTEST_INSPECT,
-      exitCode: 1,
-    },
-    {
-      name: ISOLATION_SELFTEST_REMOVE,
-      execute: async () => {
-        throw new ContainerFailure(ISOLATION_SELFTEST_REMOVE)
-      },
-      code: ISOLATION_SELFTEST_REMOVE,
       exitCode: 1,
     },
     {
@@ -2721,7 +2806,7 @@ test("workflow artifact listing is run-scoped, paginated, and fails closed witho
 
 test("batched workflow uses a trusted generated matrix with bounded parallelism and always publishes", () => {
   assert.match(OPENCODE_WORKFLOW, /fail-fast: false/)
-  assert.match(OPENCODE_WORKFLOW, /max-parallel: 4/)
+  assert.match(OPENCODE_WORKFLOW, /max-parallel: 3/)
   assert.match(OPENCODE_WORKFLOW, /batch: \$\{\{ fromJSON\(needs\.prepare\.outputs\.batches\) \}\}/)
   assert.match(OPENCODE_WORKFLOW, /needs\.prepare\.outputs\.batch_count != '0'/)
   assert.match(OPENCODE_WORKFLOW, /name: review-outcome-\$\{\{ matrix\.batch \}\}/)

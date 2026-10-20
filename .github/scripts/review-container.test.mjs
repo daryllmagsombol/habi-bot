@@ -1031,25 +1031,36 @@ test("runContainedCli maps self-test probe, inspect, and removal failures to dis
   }
 })
 
-test("only the network-create isolation stage is retryable", () => {
-  for (const code of ["isolation-network-create", "forward-proof-failed", "cleanup-failed"]) {
-    const error = new ContainerFailure(code)
-    assert.equal(isRetryableIsolationFailure(error), code === ISOLATION_NETWORK_CREATE, code)
-  }
-  for (const code of [
-    ISOLATION_POLICY_LOAD,
+test("every pre-inference isolation setup stage is retryable while containment checks stay fatal", () => {
+  const retryable = [
+    ISOLATION_NETWORK_CREATE,
     ISOLATION_SELFTEST_PROBE,
     ISOLATION_SELFTEST_INSPECT,
     ISOLATION_SELFTEST_REMOVE,
+  ]
+  for (const code of retryable) {
+    assert.equal(isRetryableIsolationFailure(new ContainerFailure(code)), true, code)
+  }
+  // Containment verification and every other failure class remain fatal.
+  for (const code of [
+    ISOLATION_POLICY_LOAD,
+    "forward-proof-failed",
+    "cleanup-failed",
     "container-invalid",
     "container-create-failed",
+    "container-create-ambiguous",
+    "image-invalid",
     "cli-integrity",
     "env-invalid",
+    "invalid-config",
+    "raw-limit",
+    "tool-use",
   ]) {
     assert.equal(isRetryableIsolationFailure(new ContainerFailure(code)), false, code)
   }
-  assert.equal(isRetryableIsolationFailure(new Error("isolation-network-create")), false)
+  assert.equal(isRetryableIsolationFailure(new Error(ISOLATION_NETWORK_CREATE)), false)
   assert.equal(isRetryableIsolationFailure({ code: ISOLATION_NETWORK_CREATE }), false)
+  assert.equal(isRetryableIsolationFailure({ code: ISOLATION_SELFTEST_PROBE }), false)
 })
 
 test("runContainedCli returns cancellation before creating any Docker resource", async () => {

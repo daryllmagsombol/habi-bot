@@ -292,8 +292,10 @@ export async function runReview({
               : "container-failure"
         setAttempt(attempts, attemptEntry(invocation, "error", code))
         if (runtimeCancelled(signal)) throw cancellationFailure(attempts, invocation)
-        // Only the transient dedicated-network creation step may be retried,
-        // and only within the shared two-attempt cap. Every attempt is a full
+        // Only pre-inference isolation setup stages (network create, self-test
+        // probe/inspect/remove) may be retried, and only within the shared
+        // two-attempt cap. Containment-verification outcomes (policy load,
+        // forward proof) and every other failure stay fatal. Every attempt is a full
         // fresh invocation that recreates the network and reruns the complete
         // fail-closed containment self-test before any model call, so a setup
         // race cannot become uncontained inference. A persistent fault fails
