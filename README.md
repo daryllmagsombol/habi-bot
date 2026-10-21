@@ -133,6 +133,12 @@ This is the product intent, not current functionality:
 
 SSO proves identity only. Mailbox, calendar, and file permissions require a separate, explicit future consent flow. Persistent memory and project-wide context require deliberate opt-in and visible controls. Bot Markdown can guide style and workflow, but it never grants permissions.
 
+## Product goal: bring your own provider
+
+Users should be able to connect their own **OpenCode, CommandCode, Claude/Anthropic, or ChatGPT/OpenAI** access using API keys or officially supported, per-user sign-in where available. This is a planned goal, not implemented support or a promise that every subscription permits Habi integration.
+
+Provider connections must be owner-isolated, securely managed server-side, and revocable/deletable. Each provider needs verified API/subscription entitlements, permitted use, data handling, quotas, and billing behavior before enablement. Never share one user's credentials or allowance with other users, bypass provider restrictions, or silently switch to paid/platform-funded access. ChatGPT/Claude subscriptions are not interchangeable with API keys. Provider availability and delivery phase remain subject to feasibility and acceptance gates.
+
 ## POC scope
 
 The planned POC is a usable private chat product. **None of the product capabilities below are implemented in the current foundation.**
