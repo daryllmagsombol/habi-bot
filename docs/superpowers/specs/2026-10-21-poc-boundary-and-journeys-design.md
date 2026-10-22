@@ -1,6 +1,6 @@
 # Habi POC Boundary and User Journeys — Design
 
-- **Status:** Product baseline approved by the owner on 2026-10-21 (in session). Security review **not performed**. H-001 remains open. P0 has not passed. This document records the approved baseline; its publication does not constitute security acceptance, issue acceptance, or a passed gate.
+- **Status:** Product baseline approved by the owner on 2026-10-21; AI-assisted planning-boundary review accepted by the owner on 2026-10-22 (see acceptance status below). H-001 closure also requires these documentation-link corrections to be merged and recorded on the issue; this file alone does not close H-001. P0 has not passed. Neither publication nor planning acceptance establishes runtime security.
 - **Date:** 2026-10-21
 - **Phase:** P0 — Feasibility (H-001)
 - **Scope:** Planning specification only. No product flow described here is implemented.
@@ -9,13 +9,13 @@
 
 ## Current state versus planned flows
 
-The repository contains only a runnable development foundation: a pnpm/Turborepo workspace, a minimal web shell, a `GET /health` API, an inert worker, shared packages, and local PostgreSQL Compose tooling. Authentication, chat, Bots, model calls, Hermes, persistence, queues, and deployment are not implemented ([README.md:7-9](https://github.com/daryllmagsombol/habi-bot/blob/main/README.md#L7-L9), [README.md:34-41](https://github.com/daryllmagsombol/habi-bot/blob/main/README.md#L34-L41)).
+The repository contains only a runnable development foundation: a pnpm/Turborepo workspace, a minimal web shell, a `GET /health` API, an inert worker, shared packages, and local PostgreSQL Compose tooling. Authentication, chat, Bots, model calls, Hermes, persistence, queues, and deployment are not implemented ([README.md:7-9](https://github.com/daryllmagsombol/habi-bot/blob/e47dedb3612e9c46ee4ed7db7e31639f20114a1c/README.md#L7-L9), [README.md:34-41](https://github.com/daryllmagsombol/habi-bot/blob/e47dedb3612e9c46ee4ed7db7e31639f20114a1c/README.md#L34-L41)).
 
 Every flow below is planned behavior, not current functionality.
 
 ## Existing planning boundary
 
-Sources: [issue #1](https://github.com/daryllmagsombol/habi-bot/issues/1) and [repository scope/security rules](https://github.com/daryllmagsombol/habi-bot/blob/main/README.md#L124-L166).
+Sources: [issue #1](https://github.com/daryllmagsombol/habi-bot/issues/1) and [repository scope/security rules](https://github.com/daryllmagsombol/habi-bot/blob/e47dedb3612e9c46ee4ed7db7e31639f20114a1c/README.md#L124-L172).
 
 - Landing → signup/login → personal workspace → create/select a Bot → private conversation.
 - Email/password and Google/Microsoft/Facebook SSO are planned. SSO establishes identity only; mailbox/calendar/file access requires separate future consent.
@@ -39,7 +39,7 @@ Workspace proposal: a personal Bot chooser and owner-scoped conversation list; t
 
 ## Phase gates and traceability
 
-Source: [phase table](https://github.com/daryllmagsombol/habi-bot/blob/main/README.md#L253-L264).
+Source: [phase table](https://github.com/daryllmagsombol/habi-bot/blob/e47dedb3612e9c46ee4ed7db7e31639f20114a1c/README.md#L263-L270).
 
 - **P0:** H-001–H-008 accepted with scope, object model, provider, Hermes lifecycle/isolation/no-tool, VM/runtime and auth evidence. Isolation failure blocks launch.
 - **P1:** H-009–H-025 delivered with private-chat acceptance evidence.
@@ -50,13 +50,13 @@ Source: [phase table](https://github.com/daryllmagsombol/habi-bot/blob/main/READ
 
 Creating an issue or publishing this document does not authorize later-phase implementation.
 
-Downstream: landing/auth #14/#15; ownership/session #16/#17; chat #18; persistence #19; stream/replay #20; Bot lifecycle #24; acceptance #25. Object model #2, isolation #5, no-tool proof #6 and auth architecture #8 constrain these journeys.
+Downstream: landing/auth [#14](https://github.com/daryllmagsombol/habi-bot/issues/14)/[#15](https://github.com/daryllmagsombol/habi-bot/issues/15); ownership/session [#16](https://github.com/daryllmagsombol/habi-bot/issues/16)/[#17](https://github.com/daryllmagsombol/habi-bot/issues/17); chat [#18](https://github.com/daryllmagsombol/habi-bot/issues/18); persistence [#19](https://github.com/daryllmagsombol/habi-bot/issues/19); stream/replay [#20](https://github.com/daryllmagsombol/habi-bot/issues/20); Bot lifecycle [#24](https://github.com/daryllmagsombol/habi-bot/issues/24); acceptance [#25](https://github.com/daryllmagsombol/habi-bot/issues/25). Object model [#2](https://github.com/daryllmagsombol/habi-bot/issues/2), isolation [#5](https://github.com/daryllmagsombol/habi-bot/issues/5), no-tool proof [#6](https://github.com/daryllmagsombol/habi-bot/issues/6) and auth architecture [#8](https://github.com/daryllmagsombol/habi-bot/issues/8) constrain these journeys.
 
 ## Open decisions — deliberately unresolved
 
-Source: [open P0 decisions](https://github.com/daryllmagsombol/habi-bot/blob/main/README.md#L293-L303).
+Source: [open P0 decisions](https://github.com/daryllmagsombol/habi-bot/blob/e47dedb3612e9c46ee4ed7db7e31639f20114a1c/README.md#L299-L309).
 
-1. Exact free provider/model and exhaustion behavior (#3).
+1. Exact free provider/model and exhaustion behavior ([#3](https://github.com/daryllmagsombol/habi-bot/issues/3)).
 2. Registration mode: public vs invite-only.
 3. Initial file types and sizes.
 4. Bot count policy.
@@ -73,7 +73,7 @@ Connections must be owner-isolated, securely managed server-side, and revocable/
 ## Acceptance status
 
 - **Product baseline:** approved by the owner on 2026-10-21 in session. The approval covers the journeys, boundary, phase gates, and unresolved decisions as published in the [source comment](https://github.com/daryllmagsombol/habi-bot/issues/1#issuecomment-6313596610). The orchestrator records that approval on issue #1.
-- **Security review:** not performed.
+- **Security-boundary acceptance:** the owner accepted the AI-assisted planning-boundary review on 2026-10-22 ([decision record](https://github.com/daryllmagsombol/habi-bot/issues/1#issuecomment-6341720556)). This is not independent human security certification or runtime verification. H-001 closure also requires these documentation-link corrections to be merged and recorded on the issue.
 - **H-001:** remains open. **P0:** not passed.
 - **Documentation:** this file is part of the repository documentation. Its publication does not constitute issue acceptance, security review, or a passed gate.
 - **Open decisions:** all seven above remain unresolved; none has been silently approved.
