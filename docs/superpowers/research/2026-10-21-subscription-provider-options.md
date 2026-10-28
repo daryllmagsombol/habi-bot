@@ -5,6 +5,12 @@
 - **Scope:** CommandCode GOAT (first pass) and ChatGPT Plus / Codex (second pass), in that order. Both are subscription products; neither is a free-provider substitute.
 - **Gate state:** Preliminary only. This note does not accept H-003, start implementation, or authorize multi-user traffic.
 
+## Post-publication observation — CommandCode GOAT API probe (2026-10-22)
+
+Two bounded synthetic Chat Completions requests were later made against the documented CommandCode Provider API with `deepseek/deepseek-v4.1-flash`, a local owner-provided key, and no tools or retries. The non-streaming request returned HTTP 200 with `OK` and 44 total tokens. The streaming request returned HTTP 200, 22 SSE events through `[DONE]`, and 107 total tokens, but consumed the 64-token completion budget as reasoning and returned no visible text.
+
+The ZDR header was omitted from the streaming request at the owner's direction because it may affect price. This is therefore **personal-only transport evidence**, not zero-retention/no-training evidence, multi-user permission, or proof of included-credit/no-extra-charge billing. The vendor's documented default retention risk of up to 30 days applies. The rest of this note remains the dated 2026-10-21 terms and feasibility assessment.
+
 ## 1. Vendor and product identity
 
 The vendor is **Langbase, Inc. d/b/a Command Code** ([Terms](https://commandcode.ai/terms), [Privacy](https://commandcode.ai/privacy)). The product is **Command Code**, a coding-agent CLI/desktop/IDE product with a separate **Provider API**. “GOAT” is a Command Code subscription plan, not a separate company or SDK.
