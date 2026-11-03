@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -17,11 +18,18 @@ import {
   EXIT_USAGE,
   REPO_ROOT,
   SCRIPT_PATH,
+  SYSTEM_PATH_DIRECTORIES,
   childPath,
+  corepackCommand,
+  detectPnpmLauncher,
   isInsideRepo,
   parseArgs,
+  resolveSystemTool,
   snapshotRepoShape,
+  spawnCommand,
   stepEnvironment,
+  stringifyForLog,
+  writeToolShims,
 } from './clean-install.mjs';
 
 const NODE = process.execPath;
@@ -256,18 +264,135 @@ test('helper guards keep temp paths outside the repository and reject bad argume
   assert.throws(() => parseArgs(['--bogus']), /Unknown argument/);
 });
 
-test('child process env replaces the inherited PATH with fixed absolute directories', () => {
-  const hostilePath = '/tmp/habi-untrusted-bin:/usr/bin';
-  const env = stepEnvironment({ ...process.env, PATH: hostilePath }, process.execPath);
+test('child process env replaces the inherited PATH with system directories only', () => {
+  const hostilePath = '/tmp/habi-untrusted-bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin';
+  const env = stepEnvironment({ ...process.env, PATH: hostilePath });
   const entries = env.PATH.split(path.delimiter);
+  const expected = SYSTEM_PATH_DIRECTORIES.filter((directory) => existsSync(directory));
 
   assert.notEqual(env.PATH, hostilePath);
-  assert.doesNotMatch(env.PATH, /habi-untrusted-bin/);
+  assert.deepEqual(entries, expected);
   assert.ok(entries.length > 0);
   assert.ok(entries.every((entry) => path.isAbsolute(entry)), `not absolute: ${env.PATH}`);
-  assert.ok(entries.includes(path.dirname(process.execPath)), 'PATH must include the node directory');
-  assert.equal(env.PATH, childPath(process.execPath));
+  assert.ok(
+    entries.every((entry) => SYSTEM_PATH_DIRECTORIES.includes(entry)),
+    `PATH must contain only system directories: ${env.PATH}`,
+  );
+  assert.ok(!entries.includes(path.dirname(process.execPath)), 'node directory must not be on PATH');
+  assert.doesNotMatch(env.PATH, /habi-untrusted-bin/);
+  assert.doesNotMatch(env.PATH, /homebrew/);
+  assert.doesNotMatch(env.PATH, /\/usr\/local/);
+  assert.equal(env.PATH, childPath());
   assert.equal(env.HOME, process.env.HOME, 'HOME must stay forwarded');
+
+  if (process.env.TMPDIR !== undefined) {
+    assert.equal(env.TMPDIR, process.env.TMPDIR, 'TMPDIR must stay forwarded');
+  }
+});
+
+test('spawn commands resolve git and tar absolutely and run corepack through node', () => {
+  const git = resolveSystemTool('git');
+  const tar = resolveSystemTool('tar');
+
+  assert.equal(git, '/usr/bin/git');
+  assert.equal(tar, '/usr/bin/tar');
+  assert.ok(path.isAbsolute(git) && path.isAbsolute(tar));
+
+  assert.deepEqual(spawnCommand({ executable: git }, ['rev-parse', 'HEAD']), {
+    executable: '/usr/bin/git',
+    args: ['rev-parse', 'HEAD'],
+  });
+  assert.deepEqual(spawnCommand({ executable: tar, baseArgs: [] }, ['-x', '-C', '/tmp/tree']), {
+    executable: '/usr/bin/tar',
+    args: ['-x', '-C', '/tmp/tree'],
+  });
+
+  const corepack = corepackCommand();
+
+  if (corepack === null) {
+    assert.equal(existsSync(path.join(path.dirname(process.execPath), 'corepack')), false);
+  } else {
+    const probe = spawnCommand(corepack, ['--version']);
+
+    assert.equal(corepack.executable, process.execPath);
+    assert.ok(path.isAbsolute(corepack.baseArgs[0]), 'corepack shim must be absolute');
+    assert.match(corepack.baseArgs[0], /corepack(\.js)?$/);
+    assert.equal(probe.executable, process.execPath);
+    assert.deepEqual(probe.args, [corepack.baseArgs[0], '--version']);
+
+    const launcher = detectPnpmLauncher({ cwd: REPO_ROOT, env: stepEnvironment() });
+
+    assert.equal(launcher.source, 'corepack');
+    assert.equal(launcher.executable, process.execPath);
+    assert.ok(path.isAbsolute(launcher.baseArgs[0]));
+    assert.deepEqual(launcher.baseArgs, [corepack.baseArgs[0], 'pnpm']);
+    assert.deepEqual(spawnCommand(launcher, ['--version']).args, [
+      corepack.baseArgs[0],
+      'pnpm',
+      '--version',
+    ]);
+  }
+});
+
+test('toolchain shims expose node and the pinned pnpm without a PATH lookup', () => {
+  const dir = tempDir('habi clean install shim ');
+  const corepack = corepackCommand();
+  const launcher =
+    corepack === null
+      ? null
+      : { executable: corepack.executable, baseArgs: [...corepack.baseArgs, 'pnpm'] };
+
+  try {
+    if (launcher === null) {
+      assert.equal(existsSync(path.join(path.dirname(process.execPath), 'corepack')), false);
+      return;
+    }
+
+    const { nodeShim, pnpmShim } = writeToolShims(dir, launcher);
+    const contents = readFileSync(pnpmShim, 'utf8');
+    const minimalPath = { ...process.env, PATH: '/usr/bin:/bin' };
+
+    assert.equal(realpathSync(nodeShim), realpathSync(process.execPath));
+    assert.ok(contents.startsWith('#!/bin/sh\n'), 'pnpm shim must be a shell script');
+    assert.match(contents, /exec '/);
+    assert.ok(contents.includes(launcher.executable), 'shim must embed the absolute node path');
+    assert.ok(contents.includes(launcher.baseArgs[0]), 'shim must embed the absolute corepack path');
+
+    // PATH deliberately excludes the node directory: the shims must not need it.
+    const nodeResult = spawnSync(nodeShim, ['-p', 'process.version'], {
+      cwd: dir,
+      encoding: 'utf8',
+      env: minimalPath,
+    });
+
+    assert.equal(nodeResult.status, 0, nodeResult.stderr);
+    assert.equal(nodeResult.stdout.trim(), process.version);
+
+    const pnpmResult = spawnSync(pnpmShim, ['--version'], {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+      env: minimalPath,
+    });
+
+    assert.equal(pnpmResult.status, 0, pnpmResult.stderr);
+    assert.match(pnpmResult.stdout.trim(), /^\d+\.\d+\.\d+$/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('stringifyForLog keeps strings verbatim and falls back to type tags', () => {
+  assert.equal(stringifyForLog('plain text'), 'plain text');
+  assert.equal(stringifyForLog({ label: 'value' }), '{"label":"value"}');
+  assert.equal(stringifyForLog(null), 'null');
+  assert.equal(stringifyForLog(undefined), '[object Undefined]');
+  assert.equal(stringifyForLog(() => {}), '[object Function]');
+  assert.equal(stringifyForLog(Symbol('tag')), '[object Symbol]');
+
+  const circular = {};
+
+  circular.self = circular;
+  assert.equal(stringifyForLog(circular), '[object Object]');
 });
 
 test('script leaves no temp artifacts behind after a full dry-run or failure cycle', () => {

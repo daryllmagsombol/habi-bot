@@ -17,6 +17,11 @@
  * on failure, unless `--keep` is passed. Nothing in this script writes inside
  * the repository.
  *
+ * Child processes never resolve executables through PATH: git and tar are
+ * resolved to absolute system paths and corepack/pnpm run through the current
+ * node binary. The child PATH is rebuilt from core system directories, plus a
+ * private `node`/`pnpm` shim directory for what the toolchain runs itself.
+ *
  * Usage:
  *   node scripts/ci/clean-install.mjs [--dry-run] [--keep]
  *                                     [--source <git-repo>] [--archive <tar>]
@@ -27,13 +32,17 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   statSync,
+  symlinkSync,
+  writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -66,32 +75,45 @@ export const STRIPPED_ENV = [
   'NODE_AUTH_TOKEN',
 ];
 /**
- * Fixed, absolute search directories for child processes. The inherited
- * `process.env.PATH` is never reused, so an untrusted PATH cannot shadow the
- * corepack, pnpm, git, tar, or node binaries this runner executes.
+ * Fixed, absolute search directories for child processes: core system
+ * locations only. The inherited `process.env.PATH` is never reused, and the
+ * node install directory, Homebrew, and `/usr/local` are deliberately absent,
+ * so an outside writable directory cannot supply a binary this runner or its
+ * toolchain executes.
  */
-export const FIXED_PATH_DIRECTORIES = [
-  '/usr/local/sbin',
-  '/usr/local/bin',
-  '/opt/homebrew/sbin',
-  '/opt/homebrew/bin',
-  '/usr/bin',
-  '/bin',
-  '/usr/sbin',
-  '/sbin',
-];
+export const SYSTEM_PATH_DIRECTORIES = ['/usr/bin', '/bin', '/usr/sbin', '/sbin'];
 
 /**
- * Builds a deterministic PATH from absolute directories only: the directory of
- * the running node binary (which also holds corepack) followed by known system
- * locations. Deliberately does not read `process.env.PATH`.
+ * Builds a deterministic PATH from existing absolute system directories only.
+ * Deliberately does not read `process.env.PATH` and never includes the node or
+ * package-manager install directories. The toolchain's own `node` and `pnpm`
+ * lookups are served by a private shim directory added for the install steps.
  */
-export function childPath(execPath = process.execPath) {
-  const directories = [path.dirname(execPath), ...FIXED_PATH_DIRECTORIES].filter((directory) =>
-    path.isAbsolute(directory),
-  );
+export function childPath(directories = SYSTEM_PATH_DIRECTORIES) {
+  return [...new Set(directories)]
+    .filter((directory) => path.isAbsolute(directory) && existsSync(directory))
+    .join(path.delimiter);
+}
 
-  return [...new Set(directories)].join(path.delimiter);
+/**
+ * Resolves a tool to an absolute path inside the fixed system directories.
+ * Throws instead of falling back to a bare name, so no PATH lookup occurs.
+ */
+export function resolveSystemTool(name, directories = SYSTEM_PATH_DIRECTORIES) {
+  for (const directory of directories) {
+    const candidate = path.join(directory, name);
+
+    if (path.isAbsolute(candidate) && existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  throw new PreflightError(
+    [
+      `Required tool "${name}" was not found in: ${directories.join(', ')}.`,
+      'Install it in a standard system location and re-run.',
+    ].join('\n'),
+  );
 }
 
 export class UsageError extends Error {}
@@ -208,7 +230,7 @@ export function printUsage(stream = process.stdout) {
   );
 }
 
-export function stepEnvironment(base = process.env, execPath = process.execPath) {
+export function stepEnvironment(base = process.env) {
   const env = { ...base };
 
   for (const key of STRIPPED_ENV) {
@@ -220,8 +242,10 @@ export function stepEnvironment(base = process.env, execPath = process.execPath)
   env.TURBO_TELEMETRY_DISABLED = '1';
   env.NEXT_TELEMETRY_DISABLED = '1';
   env.COREPACK_ENABLE_DOWNLOAD_PROMPT = '0';
-  // Always override the inherited PATH; HOME/TMPDIR and tool config stay as-is.
-  env.PATH = childPath(execPath);
+  // Always override the inherited PATH with system-only directories;
+  // HOME/TMPDIR and tool config stay as-is. Executables this runner spawns are
+  // resolved to absolute paths, so PATH never locates them.
+  env.PATH = childPath();
 
   return env;
 }
@@ -303,25 +327,154 @@ export function inspectLockfiles(treeDir) {
   };
 }
 
-export function detectPnpmLauncher({ cwd = REPO_ROOT, env = stepEnvironment() } = {}) {
-  const corepack = spawnSync('corepack', ['--version'], { cwd, env, encoding: 'utf8' });
+const NODE_SCRIPT_EXTENSION = /\.(?:c|m)?js$/i;
 
-  if (!corepack.error && corepack.status === 0) {
-    return {
-      source: 'corepack',
-      command: 'corepack',
-      prefix: ['pnpm'],
-      corepackVersion: (corepack.stdout ?? '').trim(),
-    };
+/**
+ * A launcher is an absolute executable plus arguments that must always precede
+ * the step arguments. Node-based shims (corepack, a pnpm js shim) run through
+ * the current node binary, so no PATH lookup happens at spawn time.
+ */
+function nodeScriptCommand(scriptPath, execPath = process.execPath) {
+  return { executable: execPath, baseArgs: [scriptPath] };
+}
+
+function resolveIfPresent(candidate) {
+  try {
+    if (!statSync(candidate).isFile()) {
+      return null;
+    }
+
+    const resolved = realpathSync(candidate);
+
+    return statSync(resolved).isFile() ? resolved : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Resolves the corepack shim shipped with the running node install, if any. */
+export function corepackCommand(execPath = process.execPath) {
+  const shim = path.join(path.dirname(execPath), 'corepack');
+  const resolved = resolveIfPresent(shim);
+
+  return resolved === null ? null : nodeScriptCommand(resolved, execPath);
+}
+
+/**
+ * Fallback when corepack is unavailable: the `pnpm`/`pnpm.cjs` shim next to
+ * node, or corepack's bundled pnpm shim. Returns null when none resolves.
+ */
+export function pnpmCommand(execPath = process.execPath) {
+  const nodeDir = path.dirname(execPath);
+  const candidates = [
+    path.join(nodeDir, 'pnpm'),
+    path.join(nodeDir, 'pnpm.cjs'),
+    path.join(nodeDir, '..', 'lib', 'node_modules', 'corepack', 'dist', 'pnpm.js'),
+  ];
+
+  for (const candidate of candidates) {
+    const resolved = resolveIfPresent(candidate);
+
+    if (resolved === null) {
+      continue;
+    }
+
+    return NODE_SCRIPT_EXTENSION.test(resolved)
+      ? nodeScriptCommand(resolved, execPath)
+      : { executable: resolved, baseArgs: [] };
   }
 
-  return { source: 'PATH', command: 'pnpm', prefix: [], corepackVersion: null };
+  return null;
+}
+
+/** Expands a launcher and step arguments into a concrete spawn command. */
+export function spawnCommand(launcher, args = []) {
+  return {
+    executable: launcher.executable,
+    args: [...(launcher.baseArgs ?? []), ...args],
+  };
+}
+
+/** Human-readable form of a launcher command, for logs and error messages. */
+export function displayCommand(launcher, args = []) {
+  const command = spawnCommand(launcher, args);
+
+  return [command.executable, ...command.args].join(' ');
+}
+
+function shellQuote(value) {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+/**
+ * Writes the private `node`/`pnpm` shims used by the installed toolchain into
+ * `binDir`. Both entry points are absolute: `node` links to the running node
+ * binary and `pnpm` execs the resolved launcher, so neither needs a PATH
+ * lookup. pnpm lifecycle scripts, `#!/usr/bin/env node` bin shims, and turbo's
+ * package-manager discovery all resolve their interpreter from PATH, and pnpm
+ * 12.5.1 has no working script-shell setting to supply it another way.
+ */
+export function writeToolShims(binDir, launcher, execPath = process.execPath) {
+  const nodeShim = path.join(binDir, 'node');
+  const pnpmShim = path.join(binDir, 'pnpm');
+  const command = [launcher.executable, ...launcher.baseArgs].map(shellQuote).join(' ');
+  const script = [
+    '#!/bin/sh',
+    '# Generated by scripts/ci/clean-install.mjs. Runs the pinned pnpm launcher',
+    '# by absolute path so no PATH lookup is needed to find it.',
+    `exec ${command} "$@"`,
+    '',
+  ].join('\n');
+
+  mkdirSync(binDir, { recursive: true });
+  rmSync(nodeShim, { force: true });
+  symlinkSync(execPath, nodeShim);
+  writeFileSync(pnpmShim, script, { mode: 0o755 });
+  chmodSync(pnpmShim, 0o755);
+
+  return { binDir, nodeShim, pnpmShim };
+}
+
+export function detectPnpmLauncher({
+  cwd = REPO_ROOT,
+  env = stepEnvironment(),
+  execPath = process.execPath,
+} = {}) {
+  const corepack = corepackCommand(execPath);
+
+  if (corepack !== null) {
+    const { executable, args } = spawnCommand(corepack, ['--version']);
+    const check = spawnSync(executable, args, { cwd, env, encoding: 'utf8' });
+
+    if (!check.error && check.status === 0) {
+      return {
+        source: 'corepack',
+        executable,
+        baseArgs: [...corepack.baseArgs, 'pnpm'],
+        corepackVersion: (check.stdout ?? '').trim(),
+      };
+    }
+  }
+
+  const pnpm = pnpmCommand(execPath);
+
+  if (pnpm === null) {
+    throw new PreflightError(
+      [
+        'Could not locate corepack or a pnpm shim next to the running node binary.',
+        `Looked for "corepack", "pnpm", and "pnpm.cjs" in ${path.dirname(execPath)}.`,
+        'Install pnpm or enable corepack (`corepack enable`) so the pinned version resolves.',
+      ].join('\n'),
+    );
+  }
+
+  return { source: 'node-shim', ...pnpm, corepackVersion: null };
 }
 
 export function probePnpmVersion(launcher, { cwd, env = stepEnvironment() }) {
-  const argv = [...launcher.prefix, '--version'];
-  const display = [launcher.command, ...argv].join(' ');
-  const result = spawnSync(launcher.command, argv, { cwd, env, encoding: 'utf8' });
+  const { executable, args } = spawnCommand(launcher, ['--version']);
+  const display = displayCommand(launcher, ['--version']);
+  const result = spawnSync(executable, args, { cwd, env, encoding: 'utf8' });
 
   if (result.error) {
     throw new PreflightError(
@@ -351,7 +504,7 @@ export function assertPnpmVersion(launcher, actualVersion, pinnedVersion) {
   const hint =
     launcher.source === 'corepack'
       ? 'Run `corepack install`/`corepack enable` so the pinned pnpm is available, then re-run.'
-      : 'Enable corepack (`corepack enable`) so the pinned pnpm version is used instead of the one on PATH.';
+      : 'Enable corepack (`corepack enable`) so the pinned pnpm version is used instead of the node-local pnpm shim.';
 
   throw new PreflightError(
     [
@@ -443,7 +596,7 @@ function listRelative(root, startRelative) {
 }
 
 export function gitHead(sourceRoot, env = stepEnvironment()) {
-  const result = spawnSync('git', ['rev-parse', 'HEAD'], {
+  const result = spawnSync(resolveSystemTool('git'), ['rev-parse', 'HEAD'], {
     cwd: sourceRoot,
     env,
     encoding: 'utf8',
@@ -476,7 +629,7 @@ export function extractTree({ sourceRoot, archiveFile, destDir, env = stepEnviro
     source = `archive ${absolute}`;
   } else {
     commit = gitHead(sourceRoot, env);
-    const archive = spawnSync('git', ['archive', '--format=tar', 'HEAD'], {
+    const archive = spawnSync(resolveSystemTool('git'), ['archive', '--format=tar', 'HEAD'], {
       cwd: sourceRoot,
       env,
       maxBuffer: 1024 ** 3,
@@ -496,7 +649,7 @@ export function extractTree({ sourceRoot, archiveFile, destDir, env = stepEnviro
     source = `git archive HEAD (${commit.slice(0, 12)})`;
   }
 
-  const tar = spawnSync('tar', ['-x', '-C', destDir], {
+  const tar = spawnSync(resolveSystemTool('tar'), ['-x', '-C', destDir], {
     input,
     env,
     maxBuffer: 64 * 1024 * 1024,
@@ -748,7 +901,7 @@ function preflightStep(run) {
 }
 
 function planSteps(launcher, storeDir) {
-  const withLauncher = (args) => [...launcher.prefix, ...args];
+  const withLauncher = (args) => spawnCommand(launcher, args).args;
 
   return [
     {
@@ -762,8 +915,16 @@ function planSteps(launcher, storeDir) {
   ];
 }
 
+/** Puts the private toolchain shims on the child PATH for the install steps. */
+function addToolShimsToPath(run, launcher) {
+  const { binDir } = writeToolShims(path.join(run.tempDir, 'bin'), launcher);
+
+  run.env.PATH = [binDir, childPath()].filter(Boolean).join(path.delimiter);
+  log(`toolchain shims ${binDir}`);
+}
+
 function throwStepFailure(launcher, step, result) {
-  const display = step.display ?? [launcher.command, ...step.args].join(' ');
+  const display = step.display ?? [launcher.executable, ...step.args].join(' ');
   const message = formatRunFailure(step.label, result, display);
 
   logError(message);
@@ -779,7 +940,7 @@ function throwStepFailure(launcher, step, result) {
 async function executeStep(run, launcher, step) {
   const result = await runStep({
     label: step.label,
-    command: launcher.command,
+    command: launcher.executable,
     args: step.args,
     cwd: run.treeDir,
     env: run.env,
@@ -797,6 +958,8 @@ async function executeStep(run, launcher, step) {
 async function executeRun(run) {
   const archive = archiveStep(run);
   const { lockfile, launcher, pnpmVersion } = preflightStep(run);
+
+  addToolShimsToPath(run, launcher);
 
   for (const step of planSteps(launcher, run.storeDir)) {
     await executeStep(run, launcher, step);
@@ -840,7 +1003,7 @@ function reportCleanup(tempDir, keep) {
   }
 }
 
-function stringifyForLog(value) {
+export function stringifyForLog(value) {
   if (typeof value === 'string') {
     return value;
   }
@@ -848,7 +1011,11 @@ function stringifyForLog(value) {
   try {
     const json = JSON.stringify(value);
 
-    return json === undefined ? Object.prototype.toString.call(value) : json;
+    if (typeof json === 'string') {
+      return json;
+    }
+
+    return Object.prototype.toString.call(value);
   } catch {
     return Object.prototype.toString.call(value);
   }
