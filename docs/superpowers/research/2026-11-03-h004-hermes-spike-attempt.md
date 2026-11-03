@@ -41,7 +41,13 @@ The pre-existing CLI credential authenticated `/provider/v1/models` (200) but fa
 | `POST /v1/runs/{id}/steer` with synthetic text | **200**, `{"accepted": true}` |
 | `POST /v1/runs/{id}/stop` ~1 s later | **200**, run had already `completed`; response carried `pending_steer` text |
 
-Steering is **accepted** while running, but the run finished before the steer took effect, so its effect on output is **not** proven.
+Steering is **accepted** while running. A dedicated check then created a long number-generation run, steered it after 1 s with "Reply with exactly: STEERED", and let it finish:
+
+- `POST /v1/runs/{id}/steer` → **200**, `accepted: true`
+- Final output: the full original `1…3000` sequence ending `END`; **`STEERED` absent**
+- Terminal payload retained `pending_steer: "STOP. Ignore prior instructions…"`
+
+**Steering is acknowledged but not applied in this configuration.** The adapter must not present steering as a working control until a mode that honors it is demonstrated.
 
 ### 3.3 Cancel while running
 
@@ -80,9 +86,9 @@ Terminal state **and** usage survive a harness restart. A replayed idempotency k
 
 ## 4. What is established vs not
 
-**Established:** create returns 202 with a run ID; duplicate keys replay one run; events are ordered with the terminal event last; failures surface as terminal `failed`; steering is accepted while running; stop yields `stopping → cancelled`; terminal state and usage remain visible after restart while an in-flight run is lost (404); usage fields are `input_tokens`/`output_tokens`/`total_tokens` plus cached counters.
+**Established:** create returns 202 with a run ID; duplicate keys replay one run; events are ordered with the terminal event last; failures surface as terminal `failed`; steering is accepted while running but was **not applied** to the output; stop yields `stopping → cancelled`; terminal state and usage remain visible after restart while an in-flight run is lost (404); usage fields are `input_tokens`/`output_tokens`/`total_tokens` plus cached counters.
 
-**Not established:** steering's effect on the final output; whether cancel reduces provider billing; behaviour under concurrent runs; tool advertisement under `platform_toolsets.api_server: []`; multi-user isolation (H-005); no-tool enforcement (H-006); ZDR behaviour on this model.
+**Not established:** whether any configuration applies a queued steer; whether cancel reduces provider billing; behaviour under concurrent runs; tool advertisement under `platform_toolsets.api_server: []`; multi-user isolation (H-005); no-tool enforcement (H-006); ZDR behaviour on this model.
 
 **Not claimed:** production readiness, spending guarantees, or any P0 gate.
 
