@@ -46,3 +46,138 @@ jobs:
 
       - name: Test SonarQube workflow checks
         run: node --test scripts/ci/sonarqube.test.mjs
+
+  # Separate from `verify`: image builds are slow and use the Docker daemon, but
+  # they must not change the foundation job's contract. No registry login, no
+  # provider secret, and no third-party action, so pull-request validation stays
+  # secretless and needs no new SHA pin.
+  images:
+    name: Build and inspect images
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+
+      - name: Test release secret scan
+        run: node --test scripts/ci/release-secret-scan.test.mjs
+
+      - name: Scan tracked files for committed secrets
+        run: node scripts/ci/release-secret-scan.mjs
+
+      # Build context is the repository root and the revision label keeps local
+      # images traceable to the commit. BuildKit's layer cache is reused by the
+      # later builds in this job without adding a cache action or registry.
+      - name: Build web image
+        env:
+          IMAGE_REVISION: ${{ github.sha }}
+          IMAGE_SOURCE: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          docker build \
+            --label "org.opencontainers.image.revision=$IMAGE_REVISION" \
+            --label "org.opencontainers.image.source=$IMAGE_SOURCE" \
+            -f apps/web/Dockerfile \
+            -t habi-web:ci \
+            .
+
+      - name: Build API image
+        env:
+          IMAGE_REVISION: ${{ github.sha }}
+          IMAGE_SOURCE: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          docker build \
+            --label "org.opencontainers.image.revision=$IMAGE_REVISION" \
+            --label "org.opencontainers.image.source=$IMAGE_SOURCE" \
+            --target api \
+            -f apps/backend/Dockerfile \
+            -t habi-api:ci \
+            .
+
+      - name: Build worker image
+        env:
+          IMAGE_REVISION: ${{ github.sha }}
+          IMAGE_SOURCE: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          docker build \
+            --label "org.opencontainers.image.revision=$IMAGE_REVISION" \
+            --label "org.opencontainers.image.source=$IMAGE_SOURCE" \
+            --target worker \
+            -f apps/backend/Dockerfile \
+            -t habi-worker:ci \
+            .
+
+      # Ephemeral host port, bounded retry, JSON assertion, unconditional cleanup.
+      - name: Check API health endpoint
+        env:
+          CONTAINER_NAME: habi-api-ci
+        run: |
+          set -euo pipefail
+          cleanup() {
+            docker rm --force "$CONTAINER_NAME" > /dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          docker run --detach --name "$CONTAINER_NAME" --publish 127.0.0.1::3001 habi-api:ci
+          port="$(docker port "$CONTAINER_NAME" 3001/tcp | head -n 1 | awk -F: '{print $NF}')"
+          if [ -z "$port" ]; then
+            echo "::error::Could not resolve the published API port."
+            exit 1
+          fi
+
+          body=""
+          attempt=1
+          while [ "$attempt" -le 30 ]; do
+            if body="$(curl --fail --silent --show-error --max-time 2 "http://127.0.0.1:${port}/health" 2> /dev/null)"; then
+              break
+            fi
+            body=""
+            attempt=$((attempt + 1))
+            sleep 1
+          done
+          if [ -z "$body" ]; then
+            echo "::error::API /health did not return 2xx after 30 attempts."
+            docker logs "$CONTAINER_NAME" || true
+            exit 1
+          fi
+
+          BODY="$body" node -e '
+            const body = JSON.parse(process.env.BODY ?? "");
+            if (!body || body.status !== "ok") {
+              console.error("::error::API /health did not report status=ok.");
+              process.exit(1);
+            }
+            console.log("api health: status=" + body.status + " service=" + (body.service ?? "unknown"));
+          '
+
+      # Start-only smoke check: the inert worker must stay running after boot.
+      # Listener inspection is deliberately not asserted here.
+      - name: Check worker starts
+        env:
+          CONTAINER_NAME: habi-worker-ci
+        run: |
+          set -euo pipefail
+          cleanup() {
+            docker rm --force "$CONTAINER_NAME" > /dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          docker run --detach --name "$CONTAINER_NAME" habi-worker:ci
+          sleep 3
+          running="$(docker inspect --format '{{.State.Running}}' "$CONTAINER_NAME")"
+          if [ "$running" != "true" ]; then
+            echo "::error::Worker container exited after startup."
+            docker logs "$CONTAINER_NAME" || true
+            exit 1
+          fi
+          echo "worker container: running"
