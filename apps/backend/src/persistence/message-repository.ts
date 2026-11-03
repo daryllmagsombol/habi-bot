@@ -5,7 +5,6 @@ import { decodeMessageCursor, encodeMessageCursor, isUuid } from './cursor.js';
 import {
   isUniqueViolation,
   PersistenceConflictError,
-  PersistenceNotFoundError,
   PersistenceValidationError,
   uniqueViolationConstraint,
 } from './errors.js';
@@ -15,6 +14,7 @@ import {
   MESSAGE_COLUMNS,
   requireActorUserId,
   requireResourceId,
+  requireRow,
   toMessage,
   type MessageRow,
 } from './rows.js';
@@ -239,12 +239,7 @@ export class MessageRepository {
       ownerUserId,
     ]);
 
-    const row = result.rows[0];
-    if (row === undefined) {
-      throw new PersistenceNotFoundError();
-    }
-
-    return toMessage(row);
+    return toMessage(requireRow(result));
   }
 
   /**
@@ -435,11 +430,6 @@ export class MessageRepository {
       [conversationId, ownerUserId],
     );
 
-    const row = result.rows[0];
-    if (row === undefined) {
-      throw new PersistenceNotFoundError();
-    }
-
-    return row;
+    return requireRow(result);
   }
 }
