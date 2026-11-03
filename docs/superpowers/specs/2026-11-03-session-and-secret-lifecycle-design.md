@@ -1,6 +1,6 @@
 # Session and Secret Lifecycle Design — H-017
 
-- **Status:** **Proposed design at planning fidelity. Issue #17 remains OPEN; nothing here is accepted, implemented, or verified.** No schema, migration, code, dependency, credential, or runtime claim accompanies this document. The P0 exit gate is satisfied at the recorded fidelity (2026-11-03).
+- **Status:** **Proposed design at planning fidelity. Issue #17 remains OPEN.** A session-contract spike now exists behind `HABI_SESSION_SPIKE=1` (in-memory, fixture auth only); it does not implement persistence, rate limiting, or provider-key storage, and it is not product authentication. The P0 exit gate is satisfied at the recorded fidelity (2026-11-03).
 - **Date:** 2026-11-03. **Phase:** P1 — Security (H-017).
 - **Scope:** Session record shape and lifecycle, cookie attributes, CSRF, revocation triggers, session validation by API and worker, and the at-rest lifecycle of per-user provider credentials. Numeric values are proposed defaults, not owner decisions.
 - **Authority:** [issue #17](https://github.com/daryllmagsombol/habi-bot/issues/17), the accepted [H-008 auth design](./2026-10-23-auth-architecture-and-sso-design.md), the accepted [H-002 object model](./2026-10-22-object-and-context-model-design.md), the [provider-access design](./2026-10-28-provider-access-and-daily-allowance-design.md), the [H-005 isolation triage](../research/2026-11-03-h005-isolation-triage.md), and the [two-user spike results](../research/2026-11-03-p0-spike-two-user-ownership-results.md).
