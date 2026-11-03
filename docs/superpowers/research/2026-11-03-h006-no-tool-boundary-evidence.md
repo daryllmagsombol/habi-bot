@@ -1,6 +1,6 @@
 # H-006 — No-tool boundary evidence (2026-11-03)
 
-- **Status:** Harness-boundary half proven; application-boundary half cannot be tested because no product runtime, Bot Markdown, uploads, queue, or callback surface exists. H-006 remains open.
+- **Status:** Harness-boundary half proven and inventoried; application-boundary half is **blocked** because no product runtime, Bot Markdown, uploads, queue, or callback surface exists. H-006 remains open.
 - **Phase:** P0 — Feasibility (H-006).
 - **Authority:** H-001 and H-004 are accepted. The harness is pinned to `NousResearch/hermes-agent` v0.22.2 at `d923a5eb487a17c0a68801bba9ef0f56c81040a8` with the API-server interface.
 
@@ -49,3 +49,28 @@ Each run produced two chat requests: the main streaming request and one non-stre
 - No policy is claimed to be enforced by the model's compliance.
 
 Evidence: `habi-h006/stub_provider.py`, `stub-captures.jsonl` (20 requests), `tool-matrix.json`, `probe_tools.py`, `probe_matrix.py`, `probe_injection.py`, gateway logs. Stub and gateway are stopped.
+
+## 7. Harness-side inventory (2026-11-03)
+
+Enumeration of every capability surface reachable in the pinned configuration, with the API-server platform as the product path.
+
+| Surface | State | Evidence |
+|---|---|---|
+| MCP servers | **None configured** | `hermes mcp list` → "No MCP servers configured."; no `*mcp*` file under `HERMES_HOME` |
+| Plugins | **None installed** | `HERMES_HOME/plugins/` contains 0 entries |
+| Installed skills in the profile | **None** | 0 `SKILL.md` under `HERMES_HOME/skills/` |
+| Built-in skills | Present in the harness package | `hermes skills list` shows built-in prompt packages (e.g. apple, autonomous-ai-agents); they are prompt assets, not executable tools, and cannot act without a tool surface |
+| `api_server` toolsets | **Empty (`[]`)** | Conditions A and C: 0 of 2 upstream requests carried `tools` |
+| CLI toolsets (not the product path) | 17/27 enabled | `hermes tools --summary` lists Browser Automation, Computer Use, Code Execution, Terminal & Processes, File Operations, Web Search, etc. |
+| Startup "21 tool schema(s) materialized" | Gateway-wide CLI machinery | Identical count logged under both the empty and default `api_server` toolset; upstream captures differ (0 vs 19 tools) |
+| System prompt | 2,812 characters, no tool definitions | Mentions tools/skills generically and names the profile path; contains no `browser`, `terminal`, `shell`, or `MCP` capability text |
+
+### Interpretation
+
+- The **API-server allow-list is empty**: no MCP, plugin, shell, browser, terminal, file, or web tool is reachable through the product path.
+- The CLI profile does load powerful toolsets by default. That is why the product path must never run through the CLI defaults, and why the empty `platform_toolsets.api_server` entry is a required line, not an optional one.
+- The startup schema count is a red herring for this question; only the captured upstream request is evidence.
+
+### Remaining criteria — blocked
+
+The following cannot be tested without a deployed Habi application layer (#21/#22): server-side rejection and audit of an unadvertised tool call, Bot Markdown and upload-borne injection, queue payloads, callback parameters, file-path traversal, and a user-facing fail-closed error. H-006 stays open and is blocked on that deployment, not on the harness.
