@@ -20,7 +20,7 @@ export function encodeBotCursor(cursor: BotCursor): string {
 export function decodeBotCursor(cursor: string): BotCursor {
   const decoded = decodeBase64Url(cursor);
 
-  if (decoded === null || !decoded.startsWith(CURSOR_PREFIX)) {
+  if (!decoded?.startsWith(CURSOR_PREFIX)) {
     throw new PersistenceValidationError('invalid_cursor');
   }
 
