@@ -1,0 +1,147 @@
+# Staging stack for Habi (H-011). Authoring and local verification only; this
+# file does not deploy anything by itself and no staging host is live.
+#
+# Build context is the repository root for all three images, matching the
+# Dockerfiles and the CI image builds:
+#   docker compose -f compose.staging.yaml build
+#   docker compose -f compose.staging.yaml up -d --wait
+#
+# Required values are interpolated from the shell or a file passed with
+# --env-file. Placeholders live in deploy/staging.env.example. No password,
+# token, or domain is stored here. See deploy/README.md.
+name: habi-staging
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  # Private: no published port, reachable only on the internal network.
+  postgres:
+    image: postgres:18.6-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-habi}
+      POSTGRES_USER: ${POSTGRES_USER:-habi}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD for staging (injected at deploy time; never commit it)}
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    mem_limit: 512m
+    cpus: 0.50
+    logging: *default-logging
+
+  api:
+    image: habi-api:${HABI_IMAGE_TAG:-staging}
+    build:
+      context: .
+      dockerfile: apps/backend/Dockerfile
+      target: api
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: "3001"
+    # Loopback-only by default; a reverse proxy or tunnel is an owner decision.
+    ports:
+      - "127.0.0.1:${API_HOST_PORT:-3001}:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - internal
+      - edge
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3001/health').then((response) => { if (!response.ok) process.exit(1); }).catch(() => process.exit(1));",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    stop_grace_period: 20s
+    mem_limit: 512m
+    cpus: 0.50
+    logging: *default-logging
+
+  worker:
+    image: habi-worker:${HABI_IMAGE_TAG:-staging}
+    build:
+      context: .
+      dockerfile: apps/backend/Dockerfile
+      target: worker
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - internal
+    # No ports and no healthcheck: the worker is inert and exposes no listener,
+    # so a liveness probe would only assert that Node can exit cleanly.
+    # `restart: unless-stopped` plus the crash-on-start failure mode is the
+    # current signal. A meaningful probe belongs with the first real job.
+    stop_grace_period: 20s
+    mem_limit: 384m
+    cpus: 0.50
+    logging: *default-logging
+
+  web:
+    image: habi-web:${HABI_IMAGE_TAG:-staging}
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      target: runtime
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+    ports:
+      - "127.0.0.1:${WEB_HOST_PORT:-3000}:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - edge
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/').then((response) => { if (!response.ok) process.exit(1); }).catch(() => process.exit(1));",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+    stop_grace_period: 20s
+    mem_limit: 512m
+    cpus: 0.50
+    logging: *default-logging
+
+networks:
+  # Host/external boundary: web and the API's published loopback port.
+  edge:
+    name: habi-staging-edge
+  # No gateway to the internet and no published ports for members.
+  internal:
+    name: habi-staging-internal
+    internal: true
+
+volumes:
+  postgres-data:
+    name: habi-staging-postgres-data

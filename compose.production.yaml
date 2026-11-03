@@ -1,0 +1,154 @@
+# Production stack for Habi (H-011). Authoring only: nothing is deployed, no
+# production host is live, and no domain, certificate, or registry is assumed.
+#
+# Images must come from the CI build, not from a local working tree:
+#   docker compose -f compose.production.yaml pull
+#   docker compose -f compose.production.yaml up -d --no-build --wait
+#
+# HABI_IMAGE_TAG is required here, unlike staging, so a production start always
+# names an immutable tag (for example a commit SHA) instead of an implicit
+# latest/staging. The `build:` blocks mirror staging so both files can be
+# diffed and validated locally; never pass --build for production.
+#
+# Secrets and domain-dependent configuration are injected at deploy time. See
+# deploy/README.md and deploy/production.env.example.
+name: habi-production
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  # Private: no published port, reachable only on the internal network.
+  postgres:
+    image: postgres:18.6-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-habi}
+      POSTGRES_USER: ${POSTGRES_USER:-habi}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD for production (injected at deploy time; never commit it)}
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    mem_limit: 512m
+    cpus: 0.50
+    logging: *default-logging
+
+  api:
+    image: habi-api:${HABI_IMAGE_TAG:?set HABI_IMAGE_TAG to the CI-built immutable tag (for example a commit SHA); production never builds locally}
+    # Always resolve the named tag from its published source; a locally built
+    # image can never be substituted for a release by accident.
+    pull_policy: always
+    build:
+      context: .
+      dockerfile: apps/backend/Dockerfile
+      target: api
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: "3001"
+    # Loopback-only by default. Public routing, TLS, and header handling need an
+    # owner-chosen reverse proxy/domain and are not configured here.
+    ports:
+      - "127.0.0.1:${API_HOST_PORT:-3001}:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - internal
+      - edge
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3001/health').then((response) => { if (!response.ok) process.exit(1); }).catch(() => process.exit(1));",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    stop_grace_period: 20s
+    mem_limit: 512m
+    cpus: 0.50
+    logging: *default-logging
+
+  worker:
+    image: habi-worker:${HABI_IMAGE_TAG:?set HABI_IMAGE_TAG to the CI-built immutable tag (for example a commit SHA); production never builds locally}
+    pull_policy: always
+    build:
+      context: .
+      dockerfile: apps/backend/Dockerfile
+      target: worker
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - internal
+    # No ports and no healthcheck: the worker is inert and exposes no listener,
+    # so a liveness probe would only assert that Node can exit cleanly.
+    stop_grace_period: 20s
+    mem_limit: 384m
+    cpus: 0.50
+    logging: *default-logging
+
+  web:
+    image: habi-web:${HABI_IMAGE_TAG:?set HABI_IMAGE_TAG to the CI-built immutable tag (for example a commit SHA); production never builds locally}
+    pull_policy: always
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      target: runtime
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+    ports:
+      - "127.0.0.1:${WEB_HOST_PORT:-3000}:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - edge
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/').then((response) => { if (!response.ok) process.exit(1); }).catch(() => process.exit(1));",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+    stop_grace_period: 20s
+    mem_limit: 512m
+    cpus: 0.50
+    logging: *default-logging
+
+networks:
+  # Host/external boundary: web and the API's published loopback port.
+  edge:
+    name: habi-production-edge
+  # No gateway to the internet and no published ports for members.
+  internal:
+    name: habi-production-internal
+    internal: true
+
+volumes:
+  postgres-data:
+    name: habi-production-postgres-data
