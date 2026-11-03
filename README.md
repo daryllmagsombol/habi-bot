@@ -282,15 +282,17 @@ Status meanings:
 - **Blocked** — Work cannot proceed. Record the blocker and what would unblock it.
 - **Done** — Acceptance criteria and the risk-based done rule are met with evidence. Code alone is not Done.
 
-Only three issues are initially **Ready**:
+No issue is currently **Ready** (board state checked 2026-11-03):
 
-- **H-001 — Lock POC boundary and user journeys** — no implementation dependency; the first planning gate.
-- **H-003 — Verify Zen free provider** — requires confirmed OpenCode Zen account/API access. Access is a prerequisite, not evidence of provider behavior; record actual responses rather than fabricating results.
-- **H-007 — Measure VM and Bun feasibility** — requires read-only access to the shared VM and current container/load data. Do not infer capacity from the handoff; record measurements.
+- **H-001, H-002, H-008 — Done.** Planning accepted and recorded on their issues.
+- **H-003 — Blocked.** The original OpenCode Zen free-model objective is a recorded no-go; no replacement provider scope or exhaustion evidence is accepted. Unblock requires an owner-accepted replacement scope and an authorized provider-evidence path.
+- **H-007 — Blocked.** Sustained VM measurement and the GreenCloud CPU-policy clarification are parked by the owner. Unblock requires a bounded measurement window with abort thresholds and a resolved or explicitly accepted CPU-accounting risk.
+- **H-004, H-005, H-006 — Backlog.** Hard dependencies on H-003/H-004.
+- **H-009–H-046 — Backlog.** Each carries the P0 phase gate.
 
-Every other issue starts in Backlog. Creating or moving an issue does not authorize a later phase.
+Creating or moving an issue does not authorize a later phase.
 
-*H-003 scope annotation (2026-10-28): the owner chose a personal CommandCode key for a single-user POC assumption; Cloudflare is parked. The remote issue still describes the earlier OpenCode/Zen free-model scope, and H-003 remains open and unaccepted.*
+*H-003 scope annotation (2026-10-28): the owner chose a personal CommandCode key for a single-user POC assumption; Cloudflare is parked. The remote issue still describes the earlier OpenCode/Zen free-model scope, and H-003 remains open and unaccepted. A platform-funded default with optional BYO and a 100,000-token daily allowance is a [published proposal](docs/superpowers/specs/2026-10-28-provider-access-and-daily-allowance-design.md), not an accepted H-001 amendment; shared multi-user use still requires written CommandCode permission.*
 
 ## Definition of done
 
@@ -302,13 +304,13 @@ Research issues are done only when they produce a decision record, evidence, and
 
 These decisions remain open and should be settled during P0. Recommendations are from the handoff, not approved decisions.
 
-1. Confirm the exact OpenCode Zen free endpoint and model, and what happens when quotas are exhausted. *Repository annotation (2026-10-28): Zen free is a no-go in Hermes; a personal CommandCode single-user POC is under evaluation. The remote issue still states the Zen/OpenCode scope.*
-2. Decide public registration versus invite-only for the first deployment. The handoff recommends invite-only on the shared VM until abuse controls are proven.
-3. Decide which file types and maximum sizes P2 initially accepts. The handoff recommends text/Markdown and text PDFs first.
-4. Decide whether a user can create unlimited Bots or starts with a small capped count.
-5. Decide whether public-web research belongs in P1 or P4. The default is P4.
-6. Measure Hermes' true cross-user memory and execution isolation. If it fails, use a segregated gateway/profile per user or switch to a simpler direct model adapter for P1.
-7. Confirm the domain, reverse-proxy topology, current VM load, email sender, and SSO provider registrations before production rollout.
+1. Provider scope and quota behavior. **Still open.** Zen free is a no-go in Hermes; a personal CommandCode single-user POC is the current assumption. The shared-key allowance design is a proposal only.
+2. Public registration versus invite-only. **Decided by H-008 (2026-10-23):** invite-only for email/password and SSO signup; email-bound invites.
+3. File types and maximum sizes for P2. **Still open**; no P2 upload feature is planned yet.
+4. Unlimited Bots versus a capped starting count. **Still open.**
+5. Public-web research in P1 or P4. **Still open.** The POC default remains no external-action tools; public web is not silently enabled.
+6. Hermes cross-user memory and execution isolation. **Still open** (H-005); it cannot be measured before H-004.
+7. Domain, reverse-proxy topology, live VM load, email sender, and SSO provider registrations. **Partially decided:** H-008 chose a same-origin `/api` reverse-proxy target and assumes no specific domain; live VM load is H-007; email sender and SSO registrations remain open.
 
 ## Source and status
 
