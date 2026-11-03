@@ -18,7 +18,7 @@ GitHub Actions now runs the foundation verification, the focused OpenCode review
 - **Execution ledger:** [Foundation progress ledger](docs/superpowers/plans/2026-10-19-initial-foundation-progress.md)
 - **Source:** Habi product and engineering handoff, October 18, 2026 (Asia/Manila).
 
-The foundation is a tooling-only exception to the P0 sequence. **H-009 remains open.** The P0 exit gate is satisfied at the recorded fidelity (2026-11-03), but no P1 issue is authorized to start merely because the gate passed. The GitHub issue text is a work specification, not evidence that a feature exists.
+The foundation is a tooling-only exception to the P0 sequence. **H-009 is complete** (Docker contexts, env validation, clean-install evidence). The P0 exit gate is satisfied at the recorded fidelity (2026-11-03), and P1 is authorized; each issue still needs its own dependencies accepted. The GitHub issue text is a work specification, not evidence that a feature exists.
 
 ### Implemented
 
@@ -300,12 +300,12 @@ Status meanings:
 
 Board state after the 2026-11-03 acceptances:
 
-- **H-001, H-002, H-003, H-004, H-007, H-008 — Done.**
+- **H-001, H-002, H-003, H-004, H-007, H-008, H-009 — Done.**
   - H-003 was accepted as a **single-user CommandCode POC only**; exhaustion and billing behavior remain unobserved residual risks, and multi-user use stays disabled.
   - H-004 was accepted with Hermes pinned as the P1 harness behind the adapter; steering is unsupported and in-flight runs are treated as lost.
   - H-007 was accepted on a **bounded read-only VM window**; one API + one worker + the web shell fit alongside current workloads with the proposed container ceilings, and Node remains the launch runtime.
 - **H-005, H-006 — Accepted at spike fidelity (2026-11-03).** Server-side ownership denial and tool-policy refusal were demonstrated in a gated two-user spike; real authentication, persistence, queue/storage paths, and the deployment shape are deferred to #25.
-- **H-009–H-046 — Backlog.** The P0 exit gate is satisfied at the recorded fidelity, but no P1 or later issue starts without an explicit owner decision.
+- **H-010–H-046 — Backlog.** The P0 exit gate is satisfied at the recorded fidelity, and P1 is authorized; each issue still needs its own dependencies accepted before it starts.
 
 Creating or moving an issue does not authorize a later phase.
 
@@ -333,6 +333,6 @@ These decisions remain open and should be settled during P0. Recommendations are
 
 This README summarizes the approved planning handoff dated **October 18, 2026** and the current repository foundation. The board records issue state; the issues contain the actionable scope, dependencies, acceptance criteria, and evidence requirements.
 
-The repository is a runnable foundation, not a product. H-009 remains open. The P0 exit gate is satisfied at the recorded fidelity (2026-11-03), with H-003 residual risks and the H-005/H-006 deployment proofs deferred to #25; that does not authorize P1 work, and no application feature is implied by the presence of the workspace or health endpoint. Foundation package versions are pinned in the manifests and lockfile; broader product choices remain open. The remote GitHub README may lag the local file until changes are pushed.
+The repository is a runnable foundation, not a product. H-009 is complete. The P0 exit gate is satisfied at the recorded fidelity (2026-11-03), with H-003 residual risks and the H-005/H-006 deployment proofs deferred to #25; P1 is authorized, but each issue still needs its own dependencies accepted, and no application feature is implied by the presence of the workspace or health endpoint. Foundation package versions are pinned in the manifests and lockfile; broader product choices remain open. The remote GitHub README may lag the local file until changes are pushed.
 
 Decisions should be recorded in the relevant issue or decision note when they are made. No credentials, production domains, delivery dates, or license terms are established by this document.
