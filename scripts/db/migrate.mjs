@@ -295,11 +295,13 @@ async function run() {
   }
 }
 
-run().catch((error) => {
+try {
+  await run();
+} catch (error) {
   if (error instanceof MigrationError) {
     process.stderr.write(`migration error: ${error.message}\n`);
   } else {
     process.stderr.write(`migration error: ${error.message ?? String(error)}\n`);
   }
   process.exitCode = 1;
-});
+}

@@ -9,18 +9,22 @@ import type { Queryable } from './database.js';
 import { PersistenceNotFoundError } from './errors.js';
 import { isUuid } from './cursor.js';
 
+/** PostgreSQL returns `timestamptz` as a `Date`; text casts may arrive as a string. */
+type Timestamp = Date | string;
+type NullableTimestamp = Timestamp | null;
+
 export interface ConversationRow {
   id: string;
   bot_id: string;
   title: string;
   status: ConversationStatus;
   last_message_seq: string;
-  created_at: Date | string;
-  updated_at: Date | string;
+  created_at: Timestamp;
+  updated_at: Timestamp;
 }
 
 export interface ConversationStateRow extends ConversationRow {
-  deleted_at: Date | string | null;
+  deleted_at: NullableTimestamp;
 }
 
 export interface MessageRow {
@@ -33,9 +37,9 @@ export interface MessageRow {
   status: MessageStatus;
   client_message_id: string | null;
   run_id: string | null;
-  created_at: Date | string;
-  finalized_at: Date | string | null;
-  deleted_at: Date | string | null;
+  created_at: Timestamp;
+  finalized_at: NullableTimestamp;
+  deleted_at: NullableTimestamp;
 }
 
 export const CONVERSATION_COLUMNS =
@@ -45,11 +49,11 @@ export const MESSAGE_COLUMNS = `m.id, m.conversation_id, m.owner_user_id, m.role
   m.content, m.seq, m.status, m.client_message_id, m.run_id, m.created_at,
   m.finalized_at, m.deleted_at`;
 
-function toIso(value: Date | string): string {
+function toIso(value: Timestamp): string {
   return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
 }
 
-function toNullableIso(value: Date | string | null): string | null {
+function toNullableIso(value: NullableTimestamp): string | null {
   return value === null ? null : toIso(value);
 }
 

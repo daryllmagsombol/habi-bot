@@ -25,6 +25,16 @@ interface ConversationLockRow {
   status: 'active' | 'archived' | 'deleted';
 }
 
+/** Already-validated append inputs, bound once and shared by the transaction steps. */
+interface AppendTransactionParams {
+  ownerUserId: string;
+  conversationId: string;
+  clientMessageId: string | null;
+  runId: string | null;
+  role: 'user' | 'assistant';
+  content: string;
+}
+
 const MESSAGES_FORWARD = `SELECT ${MESSAGE_COLUMNS}
    FROM messages m
    JOIN conversations c ON c.id = m.conversation_id
@@ -65,6 +75,32 @@ const EXISTING_CLIENT_MESSAGE = `SELECT ${MESSAGE_COLUMNS}
     AND m.owner_user_id = $2
     AND m.client_message_id = $3`;
 
+type InsertConflictCode =
+  | 'run_result_exists'
+  | 'message_idempotency_conflict'
+  | 'message_sequence_conflict';
+
+/**
+ * Maps a unique-violation constraint name to the conflict it represents.
+ * Returns `undefined` for any other failure, which callers rethrow unchanged.
+ */
+function insertConflictCode(error: unknown): InsertConflictCode | undefined {
+  if (!isUniqueViolation(error)) {
+    return undefined;
+  }
+
+  switch (uniqueViolationConstraint(error)) {
+    case 'messages_run_assistant_result_key':
+      return 'run_result_exists';
+    case 'messages_conversation_client_id_key':
+      return 'message_idempotency_conflict';
+    case 'messages_conversation_seq_key':
+      return 'message_sequence_conflict';
+    default:
+      return undefined;
+  }
+}
+
 /**
  * Owner- and conversation-scoped message persistence. Sequence allocation
  * locks the conversation row, so concurrent appends serialize and cannot
@@ -103,123 +139,16 @@ export class MessageRepository {
       throw new PersistenceValidationError('invalid_run_reference');
     }
 
-    return withTransaction(this.pool, async (client) => {
-      const conversation = await this.lockOwnedConversation(
-        client,
+    return withTransaction(this.pool, async (client) =>
+      this.appendWithinTransaction(client, {
         ownerUserId,
         conversationId,
-      );
-
-      if (conversation.status === 'archived') {
-        throw new PersistenceConflictError('conversation_archived');
-      }
-
-      if (clientMessageId !== null) {
-        const existing = await client.query<MessageRow>(EXISTING_CLIENT_MESSAGE, [
-          conversationId,
-          ownerUserId,
-          clientMessageId,
-        ]);
-        const existingRow = existing.rows[0];
-
-        if (existingRow !== undefined) {
-          if (existingRow.deleted_at !== null || existingRow.status === 'deleted') {
-            throw new PersistenceConflictError('message_tombstoned');
-          }
-
-          if (
-            existingRow.role === input.role &&
-            existingRow.content === input.content &&
-            existingRow.status === 'final'
-          ) {
-            return toMessage(existingRow);
-          }
-
-          throw new PersistenceConflictError('message_idempotency_conflict');
-        }
-      }
-
-      if (runId !== null) {
-        const run = await client.query<{ id: string }>(
-          `SELECT id
-             FROM runs
-            WHERE id = $1
-              AND conversation_id = $2
-              AND owner_user_id = $3`,
-          [runId, conversationId, ownerUserId],
-        );
-
-        if (run.rows[0] === undefined) {
-          throw new PersistenceValidationError('invalid_run_reference');
-        }
-      }
-
-      const allocated = await client.query<{ last_message_seq: string }>(
-        `UPDATE conversations
-            SET last_message_seq = last_message_seq + 1,
-                updated_at = now()
-          WHERE id = $1
-            AND owner_user_id = $2
-            AND deleted_at IS NULL
-            AND status = 'active'
-          RETURNING last_message_seq`,
-        [conversationId, ownerUserId],
-      );
-
-      const allocatedRow = allocated.rows[0];
-      if (allocatedRow === undefined) {
-        throw new PersistenceConflictError('conversation_archived');
-      }
-
-      let inserted: QueryResult<MessageRow>;
-      try {
-        inserted = await client.query<MessageRow>(
-          `INSERT INTO messages AS m (
-             conversation_id,
-             owner_user_id,
-             role,
-             content,
-             client_message_id,
-             seq,
-             run_id,
-             status,
-             finalized_at
-           )
-           VALUES ($1, $2, $3, $4, $5, $6, $7, 'final', now())
-           RETURNING ${MESSAGE_COLUMNS}`,
-          [
-            conversationId,
-            ownerUserId,
-            input.role,
-            input.content,
-            clientMessageId,
-            allocatedRow.last_message_seq,
-            runId,
-          ],
-        );
-      } catch (error) {
-        if (isUniqueViolation(error)) {
-          const constraint = uniqueViolationConstraint(error);
-          if (constraint === 'messages_run_assistant_result_key') {
-            throw new PersistenceConflictError('run_result_exists');
-          }
-          if (constraint === 'messages_conversation_client_id_key') {
-            throw new PersistenceConflictError('message_idempotency_conflict');
-          }
-          if (constraint === 'messages_conversation_seq_key') {
-            throw new PersistenceConflictError('message_sequence_conflict');
-          }
-        }
-        throw error;
-      }
-
-      const row = inserted.rows[0];
-      if (row === undefined) {
-        throw new Error('Message insert returned no row.');
-      }
-
-      return toMessage(row);
-    });
+        clientMessageId,
+        runId,
+        role: input.role,
+        content: input.content,
+      }),
+    );
   }
 
   /**
@@ -259,23 +188,23 @@ export class MessageRepository {
         : decodeMessageCursor(options.afterCursor);
 
     const result =
-      beforeSeq !== null
-        ? await this.pool.query<MessageRow>(MESSAGES_BACKWARD, [
-            ownedConversationId,
-            ownerUserId,
-            beforeSeq,
-            limit + 1,
-          ])
-        : await this.pool.query<MessageRow>(MESSAGES_FORWARD, [
+      beforeSeq === null
+        ? await this.pool.query<MessageRow>(MESSAGES_FORWARD, [
             ownedConversationId,
             ownerUserId,
             afterSeq,
+            limit + 1,
+          ])
+        : await this.pool.query<MessageRow>(MESSAGES_BACKWARD, [
+            ownedConversationId,
+            ownerUserId,
+            beforeSeq,
             limit + 1,
           ]);
 
     const hasMore = result.rows.length > limit;
     const pageRows = hasMore ? result.rows.slice(0, limit) : result.rows;
-    const orderedRows = beforeSeq !== null ? [...pageRows].reverse() : pageRows;
+    const orderedRows = beforeSeq === null ? pageRows : [...pageRows].reverse();
 
     const first = orderedRows[0];
     const last = orderedRows[orderedRows.length - 1];
@@ -285,12 +214,12 @@ export class MessageRepository {
       beforeCursor: first === undefined ? null : encodeMessageCursor(Number(first.seq)),
       afterCursor: last === undefined ? null : encodeMessageCursor(Number(last.seq)),
       hasMoreBefore:
-        beforeSeq !== null ? hasMore : afterSeq !== null && first !== undefined,
+        beforeSeq === null ? afterSeq !== null && first !== undefined : hasMore,
       hasMoreAfter:
-        beforeSeq !== null
-          ? last !== undefined &&
-            Number(last.seq) < Number(conversation.last_message_seq)
-          : hasMore,
+        beforeSeq === null
+          ? hasMore
+          : last !== undefined &&
+            Number(last.seq) < Number(conversation.last_message_seq),
     };
   }
 
@@ -316,6 +245,179 @@ export class MessageRepository {
     }
 
     return toMessage(row);
+  }
+
+  /**
+   * The transactional half of `append`, split into ordered steps: lock the
+   * conversation, resolve idempotency, validate the run reference, allocate a
+   * sequence, then insert. Each step keeps its own decisions so no single
+   * function carries the whole flow.
+   */
+  private async appendWithinTransaction(
+    client: PoolClient,
+    params: AppendTransactionParams,
+  ): Promise<Message> {
+    const conversation = await this.lockOwnedConversation(
+      client,
+      params.ownerUserId,
+      params.conversationId,
+    );
+
+    if (conversation.status === 'archived') {
+      throw new PersistenceConflictError('conversation_archived');
+    }
+
+    const existing = await this.findIdempotentMessage(client, params);
+    if (existing !== undefined) {
+      return existing;
+    }
+
+    await this.assertRunBelongsToConversation(client, params);
+
+    const seq = await this.allocateSequence(
+      client,
+      params.ownerUserId,
+      params.conversationId,
+    );
+
+    const row = await this.insertFinalMessage(client, params, seq);
+    return toMessage(row);
+  }
+
+  /**
+   * Returns the original message for a matching replay, throws when the
+   * repeated id is tombstoned or carries a different payload, and returns
+   * `undefined` when no row exists or no idempotency key was supplied.
+   */
+  private async findIdempotentMessage(
+    client: PoolClient,
+    params: AppendTransactionParams,
+  ): Promise<Message | undefined> {
+    if (params.clientMessageId === null) {
+      return undefined;
+    }
+
+    const existing = await client.query<MessageRow>(EXISTING_CLIENT_MESSAGE, [
+      params.conversationId,
+      params.ownerUserId,
+      params.clientMessageId,
+    ]);
+    const row = existing.rows[0];
+
+    if (row === undefined) {
+      return undefined;
+    }
+
+    if (row.deleted_at !== null || row.status === 'deleted') {
+      throw new PersistenceConflictError('message_tombstoned');
+    }
+
+    if (
+      row.role === params.role &&
+      row.content === params.content &&
+      row.status === 'final'
+    ) {
+      return toMessage(row);
+    }
+
+    throw new PersistenceConflictError('message_idempotency_conflict');
+  }
+
+  /** Rejects a run id that is not owned by this conversation and actor. */
+  private async assertRunBelongsToConversation(
+    client: PoolClient,
+    params: AppendTransactionParams,
+  ): Promise<void> {
+    if (params.runId === null) {
+      return;
+    }
+
+    const run = await client.query<{ id: string }>(
+      `SELECT id
+         FROM runs
+        WHERE id = $1
+          AND conversation_id = $2
+          AND owner_user_id = $3`,
+      [params.runId, params.conversationId, params.ownerUserId],
+    );
+
+    if (run.rows[0] === undefined) {
+      throw new PersistenceValidationError('invalid_run_reference');
+    }
+  }
+
+  /** Increments and returns the conversation sequence under its row lock. */
+  private async allocateSequence(
+    client: PoolClient,
+    ownerUserId: string,
+    conversationId: string,
+  ): Promise<string> {
+    const allocated = await client.query<{ last_message_seq: string }>(
+      `UPDATE conversations
+          SET last_message_seq = last_message_seq + 1,
+              updated_at = now()
+        WHERE id = $1
+          AND owner_user_id = $2
+          AND deleted_at IS NULL
+          AND status = 'active'
+        RETURNING last_message_seq`,
+      [conversationId, ownerUserId],
+    );
+
+    const row = allocated.rows[0];
+    if (row === undefined) {
+      throw new PersistenceConflictError('conversation_archived');
+    }
+
+    return row.last_message_seq;
+  }
+
+  /** Inserts the final message, mapping known unique violations to conflicts. */
+  private async insertFinalMessage(
+    client: PoolClient,
+    params: AppendTransactionParams,
+    seq: string,
+  ): Promise<MessageRow> {
+    let inserted: QueryResult<MessageRow>;
+    try {
+      inserted = await client.query<MessageRow>(
+        `INSERT INTO messages AS m (
+           conversation_id,
+           owner_user_id,
+           role,
+           content,
+           client_message_id,
+           seq,
+           run_id,
+           status,
+           finalized_at
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'final', now())
+         RETURNING ${MESSAGE_COLUMNS}`,
+        [
+          params.conversationId,
+          params.ownerUserId,
+          params.role,
+          params.content,
+          params.clientMessageId,
+          seq,
+          params.runId,
+        ],
+      );
+    } catch (error) {
+      const conflictCode = insertConflictCode(error);
+      if (conflictCode !== undefined) {
+        throw new PersistenceConflictError(conflictCode);
+      }
+      throw error;
+    }
+
+    const row = inserted.rows[0];
+    if (row === undefined) {
+      throw new Error('Message insert returned no row.');
+    }
+
+    return row;
   }
 
   private async lockOwnedConversation(

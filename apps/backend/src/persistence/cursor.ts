@@ -18,12 +18,12 @@ export function encodeMessageCursor(seq: number): string {
 export function decodeMessageCursor(cursor: string): number {
   const decoded = decodeBase64Url(cursor);
 
-  if (decoded === null || !decoded.startsWith(MESSAGE_CURSOR_PREFIX)) {
+  if (!decoded?.startsWith(MESSAGE_CURSOR_PREFIX)) {
     throw new PersistenceValidationError('invalid_cursor');
   }
 
   const rawSeq = decoded.slice(MESSAGE_CURSOR_PREFIX.length);
-  if (!/^[1-9][0-9]*$/.test(rawSeq)) {
+  if (!/^[1-9]\d*$/.test(rawSeq)) {
     throw new PersistenceValidationError('invalid_cursor');
   }
 
