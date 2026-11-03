@@ -1,6 +1,6 @@
 # P0 spike — two-user ownership and tool-denial results (2026-11-03)
 
-- **Status:** Bounded owner-authorized spike executed. Server-side ownership denial and tool-policy refusal are demonstrated at the application layer. H-005 and H-006 are **not accepted**: the spike uses fixture tokens, an in-memory store, and no real harness/queue/event-stream wiring.
+- **Status:** Bounded owner-authorized spike executed; **H-005 and H-006 accepted at spike fidelity by the owner on 2026-11-03.** Server-side ownership denial and tool-policy refusal are demonstrated at the application layer. Real authentication, persistence, queue/storage paths, and the deployment shape are deferred to #25.
 - **Phase:** P0 — Security feasibility (H-005, H-006).
 - **Authority:** Owner chose a bounded two-user auth + ownership slice on 2026-11-03, explicitly limited to running the isolation and tool-policy tests and stopping before P1 feature work.
 
