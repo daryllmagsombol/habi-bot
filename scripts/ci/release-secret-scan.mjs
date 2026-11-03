@@ -225,7 +225,7 @@ function collectProviderFindings(lines, providerLines) {
 
 /** Strips keyword separators so `api-key`, `api_key`, and `apikey` agree. */
 function normalizeKeyword(keyword) {
-  return keyword.toLowerCase().replace(/[_-]/g, '');
+  return keyword.toLowerCase().replaceAll(/[_-]/g, '');
 }
 
 /**
