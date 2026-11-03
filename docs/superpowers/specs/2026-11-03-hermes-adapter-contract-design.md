@@ -1,6 +1,6 @@
 # Hermes adapter contract — design (H-004 interface draft)
 
-- **Status:** **Interface draft; H-004 remains open.** The owner pinned `NousResearch/hermes-agent` v0.22.2 at `d923a5eb487a17c0a68801bba9ef0f56c81040a8` with the local API-server interface on 2026-11-03. A bounded spike then exercised create, idempotent replay, terminal failure, event replay, steer rejection, and stop rejection, but **no successful model run** was captured because the available credential was rejected for inference. See [the spike attempt](../research/2026-11-03-h004-hermes-spike-attempt.md). Successful streaming, cancel-while-running, restart recovery, and usage capture remain uncaptured.
+- **Status:** **Interface draft; H-004 remains open.** The owner pinned `NousResearch/hermes-agent` v0.22.2 at `d923a5eb487a17c0a68801bba9ef0f56c81040a8` with the local API-server interface on 2026-11-03. A bounded spike then observed create (202), idempotent replay of one run, ordered events with a terminal last event, terminal failure, steer acceptance while running, `stopping → cancelled`, usage fields, and terminal-state visibility after a harness restart. Steering's effect on output, in-flight restart recovery, and cancellation billing remain unproven. See [the lifecycle evidence](../research/2026-11-03-h004-hermes-spike-attempt.md).
 - **Date:** 2026-11-03. **Phase:** P0 — Feasibility, planning fidelity only.
 - **Scope:** A contract Habi can implement and later satisfy with a direct-call implementation instead of Hermes. No product code, schema, dependency, credential, install, or runtime change accompanies it.
 - **Authority:** the H-004 issue body (read-only), the accepted [single-user CommandCode scope](../research/2026-11-03-h003-commandcode-scope-acceptance.md), the accepted [H-002 object model](./2026-10-22-object-and-context-model-design.md), and the observed [pinned Hermes behaviour](../research/2026-10-28-personal-commandcode-hermes.md). Route, status, idempotency, and usage names in §3 are read from pinned source; none were executed.
@@ -162,20 +162,20 @@ Cited from the [personal CommandCode with pinned Hermes](../research/2026-10-28-
 
 ## 11. Open questions and evidence still required
 
-Rows 2–11 are **not yet captured**. Row 1 is answered by the owner pin; create/replay/failure paths have partial observations recorded in [the spike attempt](../research/2026-11-03-h004-hermes-spike-attempt.md).
+Rows 1, 2, 4, 8, 9, and 11 now have observations; rows 3, 5, 6, 7, and 10 remain partial or uncaptured. See [the lifecycle evidence](../research/2026-11-03-h004-hermes-spike-attempt.md).
 
 | # | Open question | Required evidence (not yet captured) |
 |---|---|---|
 | 1 | Which Hermes commit/API interface is pinned for H-004? | **Answered:** v0.22.2 at `d923a5eb487a17c0a68801bba9ef0f56c81040a8`, local API server (`/v1/runs` surface), owner-pinned 2026-11-03 |
-| 2 | Does `createRun` dispatch exactly once under a duplicate key? | Two submissions, one effective run, request capture showing one upstream dispatch |
+| 2 | Does `createRun` dispatch exactly once under a duplicate key? | **Observed:** duplicate `Idempotency-Key` returned the same `run_id` with `Idempotency-Replayed: true` and produced one completion; an upstream request count was not separately instrumented |
 | 3 | Are events ordered, gap-free, and dedupe-safe across reconnect? | Redacted capture with `(runId, seq)`, forced reconnect, replay from cursor |
-| 4 | Is the terminal state visible after cancel and reconnect? | Cancel and reconnect capture; terminal `cancelled` observed post-restart |
+| 4 | Is the terminal state visible after cancel and reconnect? | **Observed:** `stopping → cancelled` while running, and `cancelled` still returned after a gateway restart |
 | 5 | Does cancel stop billing? | Provider-side usage/credit evidence; until then unknown, never zero |
 | 6 | Can steering expand tools or data scope? | Structural-steering attempt rejected, plus advertised-tool capture |
 | 7 | Is transcript recovery complete after restart? | Restart transcript diff against Habi persistence; `seq` continuity |
-| 8 | How are error-in-200 and 202-then-`failed` surfaced end to end? | Adapter classification capture; no auto-retry observed; usage marked `unknown` |
-| 9 | What are the real usage fields and their relationships? | Raw provider and harness payloads; cached/reasoning presence or absence |
+| 8 | How are error-in-200 and 202-then-`failed` surfaced end to end? | **Observed:** 202 create → terminal `failed` with `last_event: run.failed` on an upstream 401; retries were disabled. Error-in-200 remains from the earlier stub battery |
+| 9 | What are the real usage fields and their relationships? | **Partially observed:** `input_tokens`, `output_tokens`, `total_tokens`, `cache_read_tokens`, `cache_write_tokens`; cancellation reports `usage: null`. Provider-side billing is unknown |
 | 10 | Is retry ever safe? | Pre-dispatch vs post-dispatch fault injection with dispatch state recorded |
-| 11 | What are the real idempotency and per-route details? | Header name, TTL/eviction, fingerprint mismatch, cross-scope behaviour, and `events`/`steer`/`stop` captures with statuses and bodies |
+| 11 | What are the real idempotency and per-route details? | **Partially observed:** `Idempotency-Key` request header, `Idempotency-Replayed` response header, durable replay across restart; TTL/eviction, fingerprint-mismatch, and cross-scope behaviour remain untested |
 
 Acceptance-criterion mapping, all unmet: lifecycle evidence → rows 1–11; duplicate create → 2 and 11; cancellation terminal after reconnect → 4; restart transcript → 7; steering cannot expand permissions → 6 and 11; usage attributable to user, conversation, and run → 9; replaceable boundary → this document plus a direct-call sketch; explicit gaps → this section. Sequence diagrams, redacted event captures, restart and cancellation evidence, and the "Hermes remains the P1 path" decision note are also outstanding.

@@ -1,56 +1,83 @@
-# H-004 — Hermes spike attempt (2026-11-03)
+# H-004 — Hermes lifecycle evidence (2026-11-03)
 
-- **Status:** Partial execution record. The harness was installed and its run API was exercised, but **no successful model run was captured** because the available CommandCode credential was rejected for inference. H-004 remains **open**; rows 2–11 of the adapter contract's evidence table are still uncaptured.
+- **Status:** Bounded spike executed against the owner-pinned harness. Create, idempotent replay, ordered events, terminal failure, steer acceptance, cancel-while-running, usage reporting, and restart visibility are **observed**. Steering's effect on output and cancellation billing are **not** proven. H-004 remains **open** (sequence diagrams and the P1-path decision note are still outstanding).
 - **Phase:** P0 — Feasibility (H-004).
-- **Authority:** Owner pinned `NousResearch/hermes-agent` **v0.22.2 at `d923a5eb487a17c0a68801bba9ef0f56c81040a8`** with the **local API-server interface** on 2026-11-03, and authorized an isolated install plus bounded synthetic lifecycle calls.
+- **Authority:** Owner pinned `NousResearch/hermes-agent` **v0.22.2 at `d923a5eb487a17c0a68801bba9ef0f56c81040a8`** with the **local API-server interface** on 2026-11-03, authorized the isolated install and bounded synthetic calls, and supplied a CommandCode Provider key with inference access.
 
 ## 1. Environment
 
 | Item | Value |
 |---|---|
-| Harness | `hermes-agent` at the pinned commit (git checkout, 361 MB) |
-| Install method | `uv venv --python 3.14` + `uv pip install -e .` (editable). A `uv tool install` of the git package is **refused by design**: the build backend errors with "Building wheels or sdists for hermes-agent is not supported." |
-| Python | 3.14.7 (uv-managed) |
-| Extra dependency | `.[messaging]` added for `aiohttp==3.14.3`; without it the API server cannot start (`check_api_server_requirements` requires `AIOHTTP_AVAILABLE`) |
-| Config | Isolated `HERMES_HOME`, synthetic single-use config: provider `commandcode`, model `reflection/beam:free`, `agent.api_max_retries: 0`, `agent.auto_recovery_cycles: 0`, `platforms.api_server` enabled on `127.0.0.1:8651` with a generated 32-char gateway key, `platform_toolsets.api_server: []` |
-| Process | `hermes gateway run -v`; `/health` returned 200; gateway stopped and verified gone after the probe |
+| Harness | `hermes-agent` at the pinned commit |
+| Install | `uv venv --python 3.14` + `uv pip install -e .` + `.[messaging]` (aiohttp is required by the API server). `uv tool install` of the git package is refused by design. |
+| Python | 3.14.7 |
+| Config | Isolated `HERMES_HOME`; provider `commandcode`; model `reflection/beam:free`; `agent.api_max_retries: 0`; `agent.auto_recovery_cycles: 0`; API server on `127.0.0.1:8651` with a generated gateway key; `platform_toolsets.api_server: []` |
+| Prompts | Synthetic only (`Reply with exactly: OK`, number-counting) |
+| Process | `hermes gateway run`; `/health` 200; stopped and verified gone after the probe |
 
-No repository file, credential, or production service was changed. The provider credential was read from the existing local `~/.commandcode/auth.json` and never printed.
+## 2. First attempt — credential rejection (superseded)
 
-## 2. Lifecycle observations (real, not stubbed)
+The pre-existing CLI credential authenticated `/provider/v1/models` (200) but failed `chat/completions` with **401 `Invalid 'Authorization' header or token`**; the run surfaced as `failed` with `last_event: run.failed`. The owner then supplied a Provider API key; `/models` and one `chat/completions` preflight returned 200.
+
+## 3. Observed lifecycle
+
+### 3.1 Create, idempotent replay, completion, events
 
 | Step | Result |
 |---|---|
-| `POST /v1/runs` with `Idempotency-Key: h004-probe-1`, input `Reply with exactly: OK` | **HTTP 202**, `{"run_id":"run_31c3…","status":"started","replayed":false}` |
-| Same request repeated with the same key | **HTTP 202**, **same `run_id`**, `Idempotency-Replayed: true`, `replayed: true` — no second run created |
-| `GET /v1/runs/{id}` | `status: "failed"`, `last_event: "run.failed"`, `error: "HTTP 401: Invalid 'Authorization' header or token."` |
-| `GET /v1/runs/{id}/events` (SSE) | One event: `run.failed` with `seq: 0`, same error, `completed: false` |
-| `POST /v1/runs/{id}/steer` on the terminal run | **HTTP 409**, `code: "run_not_accepting_steer"` |
-| `POST /v1/runs/{id}/stop` on the terminal run | **HTTP 200**, returns the already-`failed` record; no `cancelled` transition is fabricated |
+| `POST /v1/runs`, key `h004-…-1`, input `Reply with exactly: OK` | **202**, `run_925c131c…`, `status: started`, `replayed: false` |
+| Same key repeated | **202**, **same `run_id`**, `Idempotency-Replayed: true`, `replayed: true` — no second run |
+| `GET /v1/runs/{id}` | `completed`, `last_event: run.completed`, `output: "OK"` |
+| Usage | `input_tokens 741`, `output_tokens 22`, `total_tokens 763`, `cache_read_tokens 256`, `cache_write_tokens 0` |
+| `GET /v1/runs/{id}/events` (SSE) | 3 events, ordered: `message.delta` seq 0, `reasoning.available` seq 1, `run.completed` seq 2 (terminal last) |
 
-These are genuine observations of the pinned harness, but they cover the **failure path only**: create, idempotent replay, terminal failure surfacing, event replay, and control-request rejection. A successful stream, successful steering, cancellation while running, and restart recovery remain unobserved.
+`741 + 22 = 763`; `cache_read_tokens` is reported alongside and is **not** added again — consistent with the cached subset being inside the prompt total.
 
-## 3. Credential finding (blocker)
+### 3.2 Steering while running
 
-The local CommandCode credentials are not accepted for inference:
+| Step | Result |
+|---|---|
+| Create run B | **202**, `run_22e8f515…` |
+| `POST /v1/runs/{id}/steer` with synthetic text | **200**, `{"accepted": true}` |
+| `POST /v1/runs/{id}/stop` ~1 s later | **200**, run had already `completed`; response carried `pending_steer` text |
 
-| Credential | `GET /provider/v1/models` | `POST /provider/v1/chat/completions` |
-|---|---|---|
-| `auth.json` → `apiKey` (93 chars, `user_5…`) | HTTP 200 | **HTTP 401** `Invalid 'Authorization' header or token` |
-| `auth.json` → `command-code.key` (92 chars, `user_B…`) | HTTP 200 | **HTTP 401** (same) |
+Steering is **accepted** while running, but the run finished before the steer took effect, so its effect on output is **not** proven.
 
-Direct `curl` reproduces the 401 outside Hermes, and the Hermes CLI (`hermes -z … --provider commandcode`) reports the same rejection. The model listing endpoint accepts the token, so the key is not wholly invalid — it lacks inference credential scope or has expired. `/models` and `chat/completions` were exercised with a normal `curl` user agent; `python-urllib` is blocked by Cloudflare (403 code 1010) and is not a key signal.
+### 3.3 Cancel while running
 
-**Consequence:** a successful H-004 lifecycle run requires a CommandCode **Provider API key** with inference permission. That is a credential only the owner can supply.
+| Step | Result |
+|---|---|
+| Create run C | **202**, `run_22495bb9…` (long number-generation prompt) |
+| Steer | **200**, accepted |
+| `POST /v1/runs/{id}/stop` | **200**, `status: "stopping"` |
+| Poll to terminal | `cancelled`, `last_event: run.cancelled`, `output: null`, **`usage: null`** |
 
-## 4. What this does and does not establish
+Cancellation reaches a terminal state and reports **no usage** — which Habi must treat as `unknown`, not zero. Whether the provider billed less is **not** established.
 
-- **Established:** the pinned harness installs and serves its API; the run create/replay/idempotency path works; failures surface as `failed` with an SSE terminal event; terminal runs reject steering and do not pretend to cancel.
-- **Not established:** successful model execution, event ordering across a live stream, cancel-while-running, restart recovery, per-run usage fields, or any cost behavior.
-- **Not claimed:** multi-user isolation, no-tool enforcement (the adapter contract still requires it; this probe did not verify advertised tools), ZDR behavior, or a P0 gate.
+### 3.4 Restart visibility
 
-## 5. Next step
+The gateway was stopped and restarted, then both runs were queried again:
 
-Supply a CommandCode Provider API key with inference access (environment variable or a one-time file outside the repository), then rerun the bounded probe to capture rows 2–11. No automatic retry or paid fallback is planned for the 401 path; the failure is treated as `auth_rejected`, pre-dispatch.
+| Run | After restart |
+|---|---|
+| `run_925c131c…` | **200**, `completed`, same usage object |
+| `run_22495bb9…` | **200**, `cancelled`, `usage: null` |
 
-Evidence is retained under the temporary workspace `habi-h004/` (`probe_runs.py`, `evidence/h004-probe.json`, gateway log). The gateway process is stopped.
+Terminal state **and** usage survive a harness restart. A replayed idempotency key from an earlier process also returned the original run, showing the durable `(scope, key)` store persists.
+
+## 4. What is established vs not
+
+**Established:** create returns 202 with a run ID; duplicate keys replay one run; events are ordered with the terminal event last; failures surface as terminal `failed`; steering is accepted while running; stop yields `stopping → cancelled`; terminal state and usage remain visible after restart; usage fields are `input_tokens`/`output_tokens`/`total_tokens` plus cached counters.
+
+**Not established:** steering's effect on the final output; whether cancel reduces provider billing; recovery of a run that is **in flight** across restart (restart was tested after terminal); behaviour under concurrent runs; tool advertisement under `platform_toolsets.api_server: []`; multi-user isolation (H-005); no-tool enforcement (H-006); ZDR behaviour on this model.
+
+**Not claimed:** production readiness, spending guarantees, or any P0 gate.
+
+## 5. Next steps
+
+1. Capture a steering effect: longer generation, steer early, compare output.
+2. Kill the gateway mid-run and reconcile the in-flight run (lost vs still-running).
+3. Add sequence diagrams and the "Hermes remains the P1 path" decision note to close H-004.
+4. H-005/H-006 stay blocked on a running multi-user deployment.
+
+Evidence files: `habi-h004/evidence/h004-probe.json`, `habi-h004/evidence/h004-cancel.json`, `gateway2.log`, `gateway3.log`, and the probe scripts. Secrets were never printed; the gateway is stopped.
