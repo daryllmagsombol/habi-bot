@@ -428,7 +428,7 @@ export class UsageLimitService {
     return withTransaction(this.pool, async (client) => {
       const bucket = await this.repository.lockBucket(client, owner, dayBucket);
 
-      if (bucket === null || bucket.state !== 'unknown') {
+      if (bucket?.state !== 'unknown') {
         throw new UsageLimitError('reconcile_not_required');
       }
 
