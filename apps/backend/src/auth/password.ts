@@ -16,8 +16,9 @@
  * - Parsing validates every parameter so a corrupted or hostile stored hash
  *   cannot turn verification into an unbounded memory/cpu request.
  *
- * Unknown users still run a dummy verify against `DUMMY_PASSWORD_HASH` so login
- * failure timing does not distinguish "no such email" from "wrong password".
+ * Unknown users still run a dummy verify against a locally derived verifier so
+ * login failure timing does not distinguish "no such email" from "wrong
+ * password". The dummy target is a hash of random bytes, never a stored value.
  */
 import { randomBytes, scrypt, timingSafeEqual } from 'node:crypto';
 import type { ScryptOptions } from 'node:crypto';
@@ -37,13 +38,25 @@ const MAX_COST = 1 << 17;
 const MAX_BLOCK_SIZE = 8;
 const MAX_PARALLELIZATION = 2;
 
+const DUMMY_INPUT_BYTES = 32;
+
 /**
- * A valid scrypt hash of a fixed, non-secret dummy string. It exists only to
- * spend the same verification work when no credential row was found. It must
- * never be accepted as an account password hash because no account stores it.
+ * Cached verifier for the "no credential row" login path. It is derived on
+ * first use from random bytes that are never exported, logged, or compared
+ * against a submitted value, and hashed with the same profile as account
+ * passwords so the dummy verify costs the same work. No fixed literal exists,
+ * and no account can ever store this value.
  */
-export const DUMMY_PASSWORD_HASH =
-  'scrypt$1$32768$8$1$SDvooMATEwbEkmipkRIoMA$0Fs9mv6N1WI-C_tVoa_zI_U09F3mJc718yqzdz1-ykI';
+let dummyVerifier: string | undefined;
+
+export async function dummyPasswordVerifier(): Promise<string> {
+  if (dummyVerifier === undefined) {
+    const secret = randomBytes(DUMMY_INPUT_BYTES).toString('base64url');
+    dummyVerifier = await hashPassword(secret);
+  }
+
+  return dummyVerifier;
+}
 
 export type PasswordPolicyFailure = 'too_short' | 'too_long' | 'matches_email';
 

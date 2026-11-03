@@ -28,8 +28,8 @@ export default function SignupPage() {
       setStatus(`Account created for ${result.user.email}. You are signed in.`);
       setPassword('');
       setInviteToken('');
-    } catch (failure) {
-      setError(authErrorMessage(failure));
+    } catch (error_) {
+      setError(authErrorMessage(error_));
     } finally {
       setPending(false);
     }

@@ -24,6 +24,7 @@ import {
   HttpCode,
   HttpException,
   HttpStatus,
+  Inject,
   Post,
   Req,
   Res,
@@ -32,9 +33,6 @@ import {
 import type { Request, Response } from 'express';
 import { authErrorBody, AuthError } from './auth-errors.js';
 import type { AuthRequestContext, AuthService } from './auth-service.js';
-// Nest resolves the injected class token at runtime; a type-only import would
-// erase the constructor metadata, so keep the value import.
-// eslint-disable-next-line @typescript-eslint/consistent-type-imports
 import { AuthRuntime } from './auth-runtime.js';
 import { AuthSpikeGuard } from './auth-spike.guard.js';
 import type { AuthSessionResult } from './auth-types.js';
@@ -109,7 +107,7 @@ function writeIssuedSession(response: Response, result: AuthSessionResult): void
 
 @Controller('auth')
 export class AuthController {
-  constructor(private readonly runtime: AuthRuntime) {}
+  constructor(@Inject(AuthRuntime) private readonly runtime: AuthRuntime) {}
 
   @Post('signup')
   @HttpCode(HttpStatus.CREATED)

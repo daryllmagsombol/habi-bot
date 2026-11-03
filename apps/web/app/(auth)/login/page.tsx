@@ -26,8 +26,8 @@ export default function LoginPage() {
       const result = await postAuth('login', { email, password });
       setStatus(`Signed in as ${result.user.email}.`);
       setPassword('');
-    } catch (failure) {
-      setError(authErrorMessage(failure));
+    } catch (error_) {
+      setError(authErrorMessage(error_));
     } finally {
       setPending(false);
     }

@@ -10,7 +10,6 @@ export {
 export { AuthError, authErrorBody, type AuthErrorCode } from './auth-errors.js';
 export { canonicalizeEmail, MAX_EMAIL_LENGTH } from './email.js';
 export {
-  DUMMY_PASSWORD_HASH,
   hashPassword,
   MAX_PASSWORD_LENGTH,
   MIN_PASSWORD_LENGTH,

@@ -8,8 +8,9 @@
  *   logs the raw value.
  * - Signup consumes an email-bound invite atomically in the repository. The
  *   invite token is hashed before it reaches storage.
- * - Login verifies against `DUMMY_PASSWORD_HASH` when no credential exists, so
- *   the failure path performs the same expensive work as a wrong password.
+ * - Login verifies against a locally derived dummy verifier when no credential
+ *   exists, so the failure path performs the same expensive work as a wrong
+ *   password.
  * - Logout goes through `AuthSessionPort`; the H-017 core is not imported here.
  * - Recovery always resolves the same way and never returns the token. Email
  *   delivery is not implemented; only the hashed token row is recorded.
@@ -30,7 +31,7 @@ import type {
 } from './auth-types.js';
 import { canonicalizeEmail } from './email.js';
 import {
-  DUMMY_PASSWORD_HASH,
+  dummyPasswordVerifier,
   hashPassword,
   validatePassword,
   verifyPassword,
@@ -56,6 +57,10 @@ export interface AuthServiceOptions {
   readonly now?: () => number;
   readonly limiter?: FixedWindowRateLimiter;
   readonly registrationMode?: RegistrationMode;
+  /**
+   * Test seam: supplies a fixed verifier instead of the lazily derived dummy
+   * hash. Production callers should leave it unset.
+   */
   readonly dummyPasswordHash?: string;
 }
 
@@ -87,7 +92,7 @@ export class AuthService {
   private readonly now: () => number;
   private readonly limiter: FixedWindowRateLimiter;
   private readonly registrationMode: RegistrationMode;
-  private readonly dummyPasswordHash: string;
+  private readonly dummyPasswordHash: string | undefined;
 
   constructor(options: AuthServiceOptions) {
     this.repository = options.repository;
@@ -95,7 +100,7 @@ export class AuthService {
     this.now = options.now ?? Date.now;
     this.limiter = options.limiter ?? new FixedWindowRateLimiter(this.now);
     this.registrationMode = options.registrationMode ?? 'invite';
-    this.dummyPasswordHash = options.dummyPasswordHash ?? DUMMY_PASSWORD_HASH;
+    this.dummyPasswordHash = options.dummyPasswordHash;
   }
 
   async signup(input: SignupInput): Promise<AuthSessionResult> {
@@ -163,10 +168,9 @@ export class AuthService {
 
     // Always spend one scrypt verification, even with no row, so the response
     // time does not distinguish an unknown address from a wrong password.
-    const matches = await verifyPassword(
-      input.password,
-      credential?.passwordHash ?? this.dummyPasswordHash,
-    );
+    const verifier =
+      credential?.passwordHash ?? this.dummyPasswordHash ?? (await dummyPasswordVerifier());
+    const matches = await verifyPassword(input.password, verifier);
 
     if (credential === undefined || !matches) {
       throw new AuthError('invalid_credentials');

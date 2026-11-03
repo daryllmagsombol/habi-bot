@@ -62,14 +62,15 @@ function sessionCookies(header: string | null): string | undefined {
   return pairs.length === 0 ? undefined : pairs.join('; ');
 }
 
-async function forward(
-  request: Request,
-  context: RouteContext,
-  method: 'GET' | 'POST',
-): Promise<Response> {
-  const { path } = await context.params;
-  const action = path.join('/');
+type PreparedRequest =
+  | { readonly ok: true; readonly headers: Record<string, string>; readonly body?: string }
+  | { readonly ok: false; readonly response: Response };
 
+/**
+ * Whitelist and method gate. Returns the response to send instead of proxying,
+ * or `undefined` when the action may be forwarded.
+ */
+function rejectUnsupported(action: string, method: 'GET' | 'POST'): Response | undefined {
   if (!ALLOWED_ACTIONS.has(action)) {
     return errorResponse('not_found', 404);
   }
@@ -78,6 +79,15 @@ async function forward(
     return errorResponse('method_not_allowed', 405);
   }
 
+  return undefined;
+}
+
+/**
+ * Builds the upstream request headers, relaying only the session cookie, the
+ * CSRF token, the user agent, and (for POST) the content type. The origin is
+ * asserted here because the browser's Origin names the web origin.
+ */
+function upstreamHeaders(request: Request): Record<string, string> {
   const headers: Record<string, string> = {
     origin: authApiOrigin(),
     accept: 'application/json',
@@ -98,36 +108,43 @@ async function forward(
     headers['user-agent'] = userAgent;
   }
 
-  let body: string | undefined;
+  return headers;
+}
 
-  if (method === 'POST') {
-    const contentType = request.headers.get('content-type');
+/**
+ * Builds the upstream headers and reads the body for POST actions. An oversized
+ * body returns the 413 response instead, matching the other proxy rejections.
+ */
+async function prepareRequest(
+  request: Request,
+  method: 'GET' | 'POST',
+): Promise<PreparedRequest> {
+  const headers = upstreamHeaders(request);
 
-    if (contentType !== null) {
-      headers['content-type'] = contentType;
-    }
-
-    body = await request.text();
-
-    if (Buffer.byteLength(body, 'utf8') > MAX_BODY_BYTES) {
-      return errorResponse('invalid_request', 413);
-    }
+  if (method !== 'POST') {
+    return { ok: true, headers };
   }
 
-  let upstream: Response;
+  const contentType = request.headers.get('content-type');
 
-  try {
-    upstream = await fetch(`${authApiOrigin()}/auth/${action}`, {
-      method,
-      headers,
-      ...(body === undefined ? {} : { body }),
-      cache: 'no-store',
-      signal: AbortSignal.timeout(10000),
-    });
-  } catch {
-    return errorResponse('auth_unavailable', 502);
+  if (contentType !== null) {
+    headers['content-type'] = contentType;
   }
 
+  const body = await request.text();
+
+  if (Buffer.byteLength(body, 'utf8') > MAX_BODY_BYTES) {
+    return { ok: false, response: errorResponse('invalid_request', 413) };
+  }
+
+  return { ok: true, headers, body };
+}
+
+/**
+ * Copies the upstream status and the relayed headers (content type, CSRF
+ * token, retry-after, and every Set-Cookie) onto a no-store response.
+ */
+async function relayResponse(upstream: Response): Promise<Response> {
   const responseHeaders = new Headers({ 'cache-control': 'no-store' });
   const contentType = upstream.headers.get('content-type');
   const csrfToken = upstream.headers.get('x-csrf-token');
@@ -153,6 +170,42 @@ async function forward(
     status: upstream.status,
     headers: responseHeaders,
   });
+}
+
+async function forward(
+  request: Request,
+  context: RouteContext,
+  method: 'GET' | 'POST',
+): Promise<Response> {
+  const { path } = await context.params;
+  const action = path.join('/');
+  const rejection = rejectUnsupported(action, method);
+
+  if (rejection !== undefined) {
+    return rejection;
+  }
+
+  const prepared = await prepareRequest(request, method);
+
+  if (!prepared.ok) {
+    return prepared.response;
+  }
+
+  let upstream: Response;
+
+  try {
+    upstream = await fetch(`${authApiOrigin()}/auth/${action}`, {
+      method,
+      headers: prepared.headers,
+      ...(prepared.body === undefined ? {} : { body: prepared.body }),
+      cache: 'no-store',
+      signal: AbortSignal.timeout(10000),
+    });
+  } catch {
+    return errorResponse('auth_unavailable', 502);
+  }
+
+  return relayResponse(upstream);
 }
 
 export async function GET(request: Request, context: RouteContext): Promise<Response> {

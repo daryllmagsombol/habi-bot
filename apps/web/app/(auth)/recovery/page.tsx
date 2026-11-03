@@ -29,8 +29,8 @@ export default function RecoveryPage() {
       // The server returns the same acknowledgement for known and unknown
       // addresses; this copy must not add an existence signal.
       setStatus(ACKNOWLEDGEMENT);
-    } catch (failure) {
-      setError(authErrorMessage(failure));
+    } catch (error_) {
+      setError(authErrorMessage(error_));
     } finally {
       setPending(false);
     }

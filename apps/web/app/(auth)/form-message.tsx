@@ -1,15 +1,16 @@
 'use client';
 
 interface FormMessageProps {
-  error: string;
-  status: string;
+  readonly error: string;
+  readonly status: string;
 }
 
 /**
  * Shared live region. `role="alert"` announces errors immediately; the status
- * line uses `role="status"` so success is announced without stealing focus.
+ * line uses the native `<output>` element, whose implicit `role="status"`,
+ * so success is announced without stealing focus.
  */
-export function FormMessage({ error, status }: FormMessageProps) {
+export function FormMessage({ error, status }: Readonly<FormMessageProps>) {
   return (
     <div className="mt-6 space-y-2" aria-live="polite">
       {error === '' ? null : (
@@ -21,12 +22,9 @@ export function FormMessage({ error, status }: FormMessageProps) {
         </p>
       )}
       {status === '' ? null : (
-        <p
-          role="status"
-          className="rounded-md border border-emerald-300 bg-emerald-50 px-3 py-2 text-sm text-emerald-900"
-        >
+        <output className="block rounded-md border border-emerald-300 bg-emerald-50 px-3 py-2 text-sm text-emerald-900">
           {status}
-        </p>
+        </output>
       )}
     </div>
   );
