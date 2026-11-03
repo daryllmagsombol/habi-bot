@@ -1,6 +1,6 @@
 # Habi Object and Context Model — Design
 
-- **Status:** **Design approved by the owner at planning fidelity on 2026-10-23; this revision is prepared for user-authorized publication on 2026-10-28.** Local planning acceptance is recorded. The document is **not merged**, and no runtime, security, implementation, schema, or P0 acceptance is implied. Remote H-002 acceptance recording is **pending after publication**: issue #2 is currently CLOSED on GitHub with no published acceptance record or checklist evidence. Recording acceptance there belongs to the owner/parent. Design contracts below are approved; downstream implementation choices remain deferred.
+- **Status:** **Design approved by the owner at planning fidelity on 2026-10-23; owner acceptance was recorded on [issue #2](https://github.com/daryllmagsombol/habi-bot/issues/2#issuecomment-6469307504) on 2026-10-28, and this revision merged in PR #52 as commit `1c9578e3b69684c6ccff4bbd8136b0a5c0cbb26b` on 2026-10-28.** Local planning acceptance is recorded. Issue #2 is CLOSED and Done on the project board. No runtime, security, implementation, schema, or P0 acceptance is implied. Design contracts below are approved; downstream implementation choices remain deferred.
 - **Date:** 2026-10-22; owner decisions and design approval added 2026-10-23
 - **Phase:** P0 — Feasibility (H-002)
 - **Scope:** Persistence-neutral object/context vocabulary, then a PostgreSQL mapping and index plan. Design only.
@@ -19,7 +19,7 @@ These are recorded owner decisions. They shape the design but do **not by themse
 | D2. Memory recall approval | Recall requires **both** per-Bot approval and per-conversation approval; both default off. | Selection UX and ranking remain downstream. |
 | D3. Memory source deletion | An explicitly saved, accepted Memory **survives** deletion of its source conversation: its provenance is nulled or tombstoned and an audit record is written. The user may then delete it explicitly. Explicit memory deletion or account deletion removes it. | Source deletion must not silently erase accepted memories; no implicit retention period is set. |
 
-**Owner approval — 2026-10-23:** the owner approved all design contracts in §18, the deferrals in §21, D1–D3, and the #16/#32 AI-assisted requirements review. This records **planning acceptance only** and authorizes preparing this document for publication, not implementation. At approval time publication was held; the owner has since authorized preparation for publication. Remote H-002 acceptance is **not yet recorded**: issue #2 shows CLOSED without published acceptance evidence, so the issue-side record is pending after publication. It is not human security certification, runtime verification, or a passed P0 gate. The independent reviewer did not re-review the orchestrator’s later corrections; the orchestrator checked them. Mermaid rendering was unavailable.
+**Owner approval — 2026-10-23:** the owner approved all design contracts in §18, the deferrals in §21, D1–D3, and the #16/#32 AI-assisted requirements review. This records **planning acceptance only**, not implementation. The owner recorded that acceptance on [issue #2](https://github.com/daryllmagsombol/habi-bot/issues/2#issuecomment-6469307504) on 2026-10-28; issue #2 is CLOSED and Done on the project board. It is not human security certification, runtime verification, or a passed P0 gate. The independent reviewer did not re-review the orchestrator’s later corrections; the orchestrator checked them. Mermaid rendering was unavailable.
 
 Implementation choices in §21 remain deferred; they are not conditions for this design approval.
 
@@ -692,7 +692,7 @@ The owner approved all contracts below on 2026-10-23. They are design requiremen
 
 ## 19. Acceptance evidence matrix
 
-**Design approved by the owner on 2026-10-23; this revision is prepared for user-authorized publication on 2026-10-28. H-002 issue acceptance is not yet recorded: issue #2 is CLOSED remotely without a published acceptance record, and this document is not merged.** Runtime proof remains downstream and is not a condition for this design gate.
+**Design approved by the owner on 2026-10-23; H-002 acceptance is recorded on [issue #2](https://github.com/daryllmagsombol/habi-bot/issues/2#issuecomment-6469307504) (issue CLOSED, board Done), and this document merged in PR #52 as commit `1c9578e3b69684c6ccff4bbd8136b0a5c0cbb26b` on 2026-10-28.** Runtime proof remains downstream and is not a condition for this design gate.
 
 | #2 criterion | Design evidence (approved) | Runtime proof (downstream, not this gate) |
 |---|---|---|
@@ -713,7 +713,7 @@ Deliverables:
 | Visibility/authorization matrix | Approved design |
 | Run and Message state tables | Approved design |
 | #16/#32 AI-assisted requirements review | **Accepted by owner with documented limitations (§22)** |
-| H-002 issue acceptance evidence | **Pending after publication:** local planning acceptance is recorded; remote issue annotation/checklist evidence has not been posted |
+| H-002 issue acceptance evidence | **Recorded:** [owner acceptance on issue #2](https://github.com/daryllmagsombol/habi-bot/issues/2#issuecomment-6469307504), 2026-10-28; local planning acceptance 2026-10-23 |
 | Naming-collision review notes (#2 deliverable) | **Partially deferred:** this document fixes the entity vocabulary it uses, but no separate cross-issue naming-collision resolution is recorded |
 | Retention and purge mechanics | **Deferred** (§21): only the deletion/archive behavior in D1–D3 and §16 is approved |
 
@@ -768,7 +768,7 @@ A read-only comparison against issues #16 and #32 identified missing export audi
 
 The owner **accepted this AI-assisted requirements review on 2026-10-23 with documented limitations**: it is not independent human security certification, the independent reviewer did not re-review the later corrections, and the orchestrator performed the correction check. There is no runtime verification. Local-link, whitespace, and diagram-reference checks were run; Mermaid parser/render validation was unavailable. The foundation suite is not required for this documentation-only change.
 
-**Design approved at planning fidelity; prepared for publication.** Local acceptance is recorded. Remote H-002 issue acceptance is not: issue #2 is CLOSED without published acceptance evidence, so that recording is pending after publication. This document is not merged. Owner decisions D1 (Bot archive), D2 (memory two-gate approval), and D3 (memory source-deletion preservation) are recorded 2026-10-23. This approval is not runtime security, provider approval, or a passed P0 gate. No criterion in §19 is claimed as runtime-verified.
+**Design approved at planning fidelity; published and merged.** Local acceptance is recorded, and remote H-002 acceptance is recorded on [issue #2](https://github.com/daryllmagsombol/habi-bot/issues/2#issuecomment-6469307504) (issue CLOSED, board Done); this revision merged in PR #52 as commit `1c9578e3b69684c6ccff4bbd8136b0a5c0cbb26b` on 2026-10-28. Owner decisions D1 (Bot archive), D2 (memory two-gate approval), and D3 (memory source-deletion preservation) are recorded 2026-10-23. This approval is not runtime security, provider approval, or a passed P0 gate. No criterion in §19 is claimed as runtime-verified.
 
 Sources:
 
@@ -785,4 +785,4 @@ Sources:
 - [Preliminary constraints note](../research/2026-10-21-object-model-and-auth-constraints.md)
 - https://github.com/users/daryllmagsombol/projects/1
 
-**Design approved at planning fidelity. Not implementation, not merged. Remote H-002 acceptance recording pending after publication.**
+**Design approved at planning fidelity. Not implementation. H-002 acceptance recorded on issue #2; merged in PR #52.**

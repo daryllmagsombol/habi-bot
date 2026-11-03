@@ -1,12 +1,12 @@
 # Auth Architecture and SSO Design — H-008
 
-- **Status:** **Owner accepted the H-008 planning design locally on 2026-10-23; this revision is prepared for user-authorized publication on 2026-10-28**, including the documented AI-review limitations and deferred prerequisites. The document is **not merged**. Remote H-008 acceptance is **pending after publication**: issue #8 is OPEN and depends on H-002, whose remote acceptance is also unrecorded despite the issue being CLOSED. Issue/board reconciliation belongs to the owner/parent. This is not implementation, runtime security proof, independent human certification, or a passed P0 gate.
+- **Status:** **Owner accepted the H-008 planning design on 2026-10-23 and recorded that acceptance on [issue #8](https://github.com/daryllmagsombol/habi-bot/issues/8#issuecomment-6469318852) on 2026-10-28; this revision merged in PR #52 as commit `1c9578e3b69684c6ccff4bbd8136b0a5c0cbb26b` on 2026-10-28**, including the documented AI-review limitations and deferred prerequisites. Issue #8 is CLOSED and Done on the project board, and its H-002 dependency is also accepted and closed. This is not implementation, runtime security proof, independent human certification, or a passed P0 gate.
 - **Date:** 2026-10-23
 - **Phase:** P0 — Feasibility (H-008)
 - **Scope:** Select the auth architecture and specify sessions, CSRF, SSO callback binding, invite-only registration, account linking, missing-email recovery, provider scopes/setup, secret boundaries, and downstream contracts.
-- **Authority:** [issue #8](https://github.com/daryllmagsombol/habi-bot/issues/8), the accepted [H-001 boundary](2026-10-21-poc-boundary-and-journeys-design.md), the owner-approved [H-002 object model](2026-10-22-object-and-context-model-design.md) (local revision), and the [H-008 research dossier](../research/2026-10-23-auth-architecture-decision-dossier.md).
+- **Authority:** [issue #8](https://github.com/daryllmagsombol/habi-bot/issues/8), the accepted [H-001 boundary](2026-10-21-poc-boundary-and-journeys-design.md), the owner-approved and accepted [H-002 object model](2026-10-22-object-and-context-model-design.md), and the [H-008 research dossier](../research/2026-10-23-auth-architecture-decision-dossier.md).
 - **Repository state:** runnable foundation only. Local manifests pin Next.js 16.4.2, NestJS 12.2.0, and Node 24.20.0. No auth, session, cookie, OAuth, or persistence code exists (`apps/web/package.json`, `apps/backend/package.json`, `.node-version`, `AGENTS.md`).
-- **Baseline note:** H-002 is approved locally and is being prepared for publication alongside this document. Its remote acceptance record and closure reconciliation are still unrecorded: issue #2 is CLOSED without published acceptance evidence. This design relies on the local approved model, not on the merged draft or the issue's current GitHub state.
+- **Baseline note:** H-002 was approved at planning fidelity on 2026-10-23, published in PR #52, and accepted on [issue #2](https://github.com/daryllmagsombol/habi-bot/issues/2#issuecomment-6469307504) on 2026-10-28; issue #2 is CLOSED and Done. This design relies on that accepted model.
 - **Review note:** this revision incorporates read-only builder findings and owner answers dated 2026-10-23. It has not been independently re-reviewed and makes no runtime claim.
 
 This document separates **Owner decision** (recorded), **Design requirement** (accepted at planning fidelity), and **Deferred** (downstream implementation). Cryptographic defaults remain engineering recommendations, not individually selected owner values.
@@ -32,7 +32,7 @@ The design covers email/password and Google/Microsoft/Facebook SSO under **invit
 | D9. Canonical email | **One unique verified login/recovery email per active account** | Conservative canonical comparison; no provider-specific rewriting |
 | D10. Password recovery | Email reset **only replaces an existing password**; a first password requires fresh existing-provider authentication and an explicit add | No reset path creates a password, and no support override exists |
 
-D4–D10 are design constraints, not runtime evidence. Local planning acceptance is recorded; this revision is prepared for publication, while remote H-008 acceptance recording is pending after publication.
+D4–D10 are design constraints, not runtime evidence. Local planning acceptance is recorded on 2026-10-23, and the owner recorded H-008 acceptance on [issue #8](https://github.com/daryllmagsombol/habi-bot/issues/8#issuecomment-6469318852) on 2026-10-28; issue #8 is CLOSED and Done.
 
 ## 3. Architecture
 
@@ -449,7 +449,7 @@ Client IP is derived only from a configured trusted-proxy chain; arbitrary `X-Fo
 
 ## 12. Design acceptance matrix
 
-**Owner accepted this design locally on 2026-10-23. No criterion is runtime-verified and no P0 gate passes. Design acceptance does not require downstream implementation evidence.**
+**Owner accepted this design at planning fidelity on 2026-10-23 and recorded H-008 acceptance on [issue #8](https://github.com/daryllmagsombol/habi-bot/issues/8#issuecomment-6469318852) on 2026-10-28. No criterion is runtime-verified and no P0 gate passes. Design acceptance does not require downstream implementation evidence.**
 
 | #8 design criterion | Design evidence | Design status |
 |---|---|---|
@@ -463,7 +463,7 @@ Client IP is derived only from a configured trusted-proxy chain; arbitrary `X-Fo
 | Password reset and first-password boundaries explicit | §4.4, §7.6 | Specified |
 | Per-surface abuse limits identified | §10.1 | Surfaces/keys/owners specified; numeric values deferred |
 
-**Design acceptance status:** owner accepted all design criteria locally, with the documented review limitations and deferred prerequisites. Runtime evidence for sessions, CSRF, linking, invites, and provider behavior belongs to #14/#15/#17/#25. This revision is prepared for publication; remote acceptance evidence and issue closure are pending after publication. This approval does not authorize implementation.
+**Design acceptance status:** the owner accepted all design criteria at planning fidelity on 2026-10-23 and recorded acceptance on [issue #8](https://github.com/daryllmagsombol/habi-bot/issues/8#issuecomment-6469318852) on 2026-10-28, with the documented review limitations and deferred prerequisites; issue #8 is CLOSED and Done. Runtime evidence for sessions, CSRF, linking, invites, and provider behavior belongs to #14/#15/#17/#25. This approval does not authorize implementation.
 
 ### 12.1 Read-only builder review disposition
 
@@ -498,7 +498,7 @@ The builder review was read-only. This draft has not been independently re-revie
 2. Production domain, TLS, and proxy are required before runtime; the design target does not assume them.
 3. Facebook `email` App Review/Business Verification applicability is unknown; it affects enablement, not the architecture.
 
-No unresolved material owner question remains for this design. Local planning acceptance is recorded; this revision is prepared for publication, and remote issue reconciliation is pending after publication.
+No unresolved material owner question remains for this design. Local planning acceptance is recorded on 2026-10-23, H-008 acceptance is recorded on [issue #8](https://github.com/daryllmagsombol/habi-bot/issues/8#issuecomment-6469318852) on 2026-10-28, and the issue is CLOSED and Done.
 
 ## 14. Sources
 
@@ -506,7 +506,7 @@ No unresolved material owner question remains for this design. Local planning ac
 |---|---|
 | [Issue #8](https://github.com/daryllmagsombol/habi-bot/issues/8) | Outcome, checklist, acceptance, non-goals |
 | [H-001 boundary](2026-10-21-poc-boundary-and-journeys-design.md) | Identity-only SSO, missing email, no silent merge, open decisions 2/7 |
-| [H-002 object model](2026-10-22-object-and-context-model-design.md) (local approved) | Owner chain, non-enumerating denial, session revocation, one database |
+| [H-002 object model](2026-10-22-object-and-context-model-design.md) (accepted) | Owner chain, non-enumerating denial, session revocation, one database |
 | [H-008 dossier](../research/2026-10-23-auth-architecture-decision-dossier.md) | Prior option analysis and provider research |
 | [Issue #16](https://github.com/daryllmagsombol/habi-bot/issues/16), [#17](https://github.com/daryllmagsombol/habi-bot/issues/17), [#21](https://github.com/daryllmagsombol/habi-bot/issues/21) | Ownership, lifecycle, and BYO boundaries |
 | [Google OpenID Connect](https://developers.google.com/identity/openid-connect/openid-connect) | Scopes, email claims, redirect URI match |
@@ -516,4 +516,4 @@ No unresolved material owner question remains for this design. Local planning ac
 | [OpenID Connect Core](https://openid.net/specs/openid-connect-core-1_0.html) | `iss`/`aud`/signature/nonce/state validation |
 | [OWASP Session Management](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html), [CSRF Prevention](https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html) | Engineering guidance; not a substitute for the owner decisions above |
 
-**Planning design accepted locally; prepared for publication. Not merged. No implementation or runtime proof; P0 has not passed.**
+**Planning design accepted on 2026-10-23; acceptance recorded on issue #8 and merged in PR #52. No implementation or runtime proof; P0 has not passed.**
