@@ -1,6 +1,6 @@
 # H-004 — Harness path decision (Hermes vs direct calls)
 
-- **Status:** Recommendation at planning fidelity, 2026-11-03. The owner has not accepted it; H-004 remains open. It is based on the bounded single-user spike in [the lifecycle evidence](./2026-11-03-h004-hermes-spike-attempt.md), not on multi-user, tool-policy, or production evidence.
+- **Status:** **Accepted by the owner on 2026-11-03** at planning fidelity. Hermes remains the P1 harness on the conditions in §3. The acceptance is based on the bounded single-user spike in [the lifecycle evidence](./2026-11-03-h004-hermes-spike-attempt.md), not on multi-user, tool-policy, or production evidence; the reversal triggers in §4 still apply.
 - **Question:** does Hermes remain the P1 harness path, or should Habi use a direct provider adapter?
 - **Scope:** one decision and its conditions. No implementation, deployment, or provider-contract claim.
 
