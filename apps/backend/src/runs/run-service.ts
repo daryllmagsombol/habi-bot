@@ -45,9 +45,7 @@ import {
   requireResourceId,
 } from '../persistence/rows.js';
 import { RunIdempotencyConflictError } from './errors.js';
-import { RunRepository } from './run-repository.js';
-import type { RunRow } from './run-repository.js';
-import { toRunView } from './run-repository.js';
+import { RunRepository, toRunView, type RunRow } from './run-repository.js';
 import {
   normalizeAllowedTools,
   normalizeCancelReason,
