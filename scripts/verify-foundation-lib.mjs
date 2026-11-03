@@ -41,7 +41,7 @@ export function findForbiddenDotenvFiles(root, appDirs = APP_DIRS) {
     }
   }
 
-  return found.sort();
+  return found.sort((left, right) => left.localeCompare(right));
 }
 
 export function formatForbiddenDotenvMessage(files) {

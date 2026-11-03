@@ -495,7 +495,7 @@ export function probePnpmVersion(launcher, { cwd, env = stepEnvironment() }) {
 
   const lines = (result.stdout ?? '').trim().split('\n');
 
-  return lines[lines.length - 1].trim();
+  return (lines.at(-1) ?? '').trim();
 }
 
 export function assertPnpmVersion(launcher, actualVersion, pinnedVersion) {
@@ -1099,7 +1099,7 @@ export async function main(argv = process.argv.slice(2), repoRoot = REPO_ROOT) {
 }
 
 const invokedDirectly =
-  process.argv[1] !== undefined && path.resolve(process.argv[1]) === path.resolve(SCRIPT_PATH);
+  process.argv.length > 1 && path.resolve(process.argv[1]) === path.resolve(SCRIPT_PATH);
 
 if (invokedDirectly) {
   try {

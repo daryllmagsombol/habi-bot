@@ -207,7 +207,7 @@ export class MessageRepository {
     const orderedRows = beforeSeq === null ? pageRows : [...pageRows].reverse();
 
     const first = orderedRows[0];
-    const last = orderedRows[orderedRows.length - 1];
+    const last = orderedRows.at(-1);
 
     return {
       messages: orderedRows.map(toMessage),

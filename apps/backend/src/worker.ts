@@ -23,10 +23,12 @@ async function bootstrap(): Promise<void> {
   console.log(JSON.stringify({ event: 'worker.ready', service: 'worker' }));
 }
 
-bootstrap().catch((error: unknown) => {
+try {
+  await bootstrap();
+} catch (error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
   console.error(JSON.stringify({ event: 'worker.error', message }));
   keepAlive.port1.close();
   keepAlive.port2.close();
   process.exitCode = 1;
-});
+}

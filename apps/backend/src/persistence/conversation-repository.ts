@@ -121,7 +121,7 @@ export class ConversationRepository {
 
     const hasMore = result.rows.length > limit;
     const rows = hasMore ? result.rows.slice(0, limit) : result.rows;
-    const last = rows[rows.length - 1];
+    const last = rows.at(-1);
 
     return {
       conversations: rows.map(toConversation),

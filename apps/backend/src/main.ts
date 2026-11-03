@@ -8,7 +8,7 @@ const DEFAULT_PORT = 3001;
 
 function readHost(raw: string | undefined): string {
   const host = raw?.trim();
-  return host ? host : DEFAULT_HOST;
+  return host || DEFAULT_HOST;
 }
 
 function readPort(raw: string | undefined): number {
@@ -45,8 +45,10 @@ async function bootstrap(): Promise<void> {
   console.log(JSON.stringify({ event: 'api.ready', service: 'api', host, port }));
 }
 
-bootstrap().catch((error: unknown) => {
+try {
+  await bootstrap();
+} catch (error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
   console.error(JSON.stringify({ event: 'api.error', message }));
   process.exitCode = 1;
-});
+}

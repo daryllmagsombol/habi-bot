@@ -329,7 +329,7 @@ export function collectTrackedFiles(root) {
     .toString('utf8')
     .split('\0')
     .filter((entry) => entry.length > 0)
-    .sort();
+    .sort((left, right) => left.localeCompare(right));
 }
 
 /**
