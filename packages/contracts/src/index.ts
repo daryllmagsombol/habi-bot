@@ -6,3 +6,13 @@ export interface HealthResponse {
   status: 'ok';
   service: 'api';
 }
+
+export type {
+  Conversation,
+  ConversationPage,
+  ConversationStatus,
+  Message,
+  MessagePage,
+  MessageRole,
+  MessageStatus,
+} from './chat.js';
