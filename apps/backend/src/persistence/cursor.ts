@@ -46,7 +46,7 @@ export function writeCursor(prefix: string, payload: unknown): string {
 export function readCursorPayload(cursor: string, prefix: string): string {
   const decoded = decodeBase64Url(cursor);
 
-  if (decoded === null || !decoded.startsWith(prefix)) {
+  if (!decoded?.startsWith(prefix)) {
     throw new PersistenceValidationError('invalid_cursor');
   }
 
