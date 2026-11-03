@@ -162,17 +162,17 @@ Cited from the [personal CommandCode with pinned Hermes](../research/2026-10-28-
 
 ## 11. Open questions and evidence still required
 
-Rows 1, 2, 4, 8, 9, and 11 now have observations; rows 3, 5, 6, 7, and 10 remain partial or uncaptured. See [the lifecycle evidence](../research/2026-11-03-h004-hermes-spike-attempt.md).
+Rows 1, 2, 4, 8, 9, 11 have observations; rows 3 and 7 are partial; rows 5, 6, and 10 remain uncaptured. See [the lifecycle evidence](../research/2026-11-03-h004-hermes-spike-attempt.md).
 
 | # | Open question | Required evidence (not yet captured) |
 |---|---|---|
 | 1 | Which Hermes commit/API interface is pinned for H-004? | **Answered:** v0.22.2 at `d923a5eb487a17c0a68801bba9ef0f56c81040a8`, local API server (`/v1/runs` surface), owner-pinned 2026-11-03 |
 | 2 | Does `createRun` dispatch exactly once under a duplicate key? | **Observed:** duplicate `Idempotency-Key` returned the same `run_id` with `Idempotency-Replayed: true` and produced one completion; an upstream request count was not separately instrumented |
-| 3 | Are events ordered, gap-free, and dedupe-safe across reconnect? | Redacted capture with `(runId, seq)`, forced reconnect, replay from cursor |
+| 3 | Are events ordered, gap-free, and dedupe-safe across reconnect? | **Partially observed:** replay returned `seq` 0–2 in order with the terminal event last; a forced reconnect from a cursor and duplicate delivery remain untested |
 | 4 | Is the terminal state visible after cancel and reconnect? | **Observed:** `stopping → cancelled` while running, and `cancelled` still returned after a gateway restart |
 | 5 | Does cancel stop billing? | Provider-side usage/credit evidence; until then unknown, never zero |
 | 6 | Can steering expand tools or data scope? | Structural-steering attempt rejected, plus advertised-tool capture |
-| 7 | Is transcript recovery complete after restart? | Restart transcript diff against Habi persistence; `seq` continuity |
+| 7 | Is transcript recovery complete after restart? | **Partially observed:** terminal runs return their status/usage after restart, while a run killed in flight returns **404 `run_not_found`**. Habi must reconcile it as `lost`; a transcript diff and `seq` continuity check remain |
 | 8 | How are error-in-200 and 202-then-`failed` surfaced end to end? | **Observed:** 202 create → terminal `failed` with `last_event: run.failed` on an upstream 401; retries were disabled. Error-in-200 remains from the earlier stub battery |
 | 9 | What are the real usage fields and their relationships? | **Partially observed:** `input_tokens`, `output_tokens`, `total_tokens`, `cache_read_tokens`, `cache_write_tokens`; cancellation reports `usage: null`. Provider-side billing is unknown |
 | 10 | Is retry ever safe? | Pre-dispatch vs post-dispatch fault injection with dispatch state recorded |
