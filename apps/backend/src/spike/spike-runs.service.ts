@@ -6,9 +6,18 @@
  * used as a lookup key. Everything is lost on process exit.
  */
 import { randomUUID } from 'node:crypto';
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
+import {
+  OWNERSHIP_AUDIT_SINK,
+  OwnershipDeniedError,
+  PROCESS_AUDIT_HASH_SALT,
+  assertOwned,
+  createInMemoryAuditSink,
+} from '../ownership/ownership.js';
+import type { AuditSink } from '../ownership/ownership.js';
 
 const RUN_ID_PREFIX = 'run_';
+const RUN_RESOURCE_TYPE = 'spike.run';
 const HARNESS_RUN_ID_PREFIX = 'harness_';
 const CONVERSATION_ID_PREFIX = 'conv_';
 
@@ -49,6 +58,13 @@ export function toRunView(run: SpikeRun): SpikeRunView {
 @Injectable()
 export class SpikeRunsService {
   private readonly runs = new Map<string, SpikeRun>();
+  private readonly ownershipAudit: AuditSink;
+
+  constructor(
+    @Optional() @Inject(OWNERSHIP_AUDIT_SINK) ownershipAudit?: AuditSink,
+  ) {
+    this.ownershipAudit = ownershipAudit ?? createInMemoryAuditSink();
+  }
 
   createRun(ownerUserId: string, conversationId: string | undefined): SpikeRun {
     const now = new Date().toISOString();
@@ -67,17 +83,28 @@ export class SpikeRunsService {
   }
 
   /**
-   * Returns the run only for its owner. Unknown ids and other users' runs are
-   * indistinguishable so callers can respond with the same non-enumerating 404.
+   * Returns the run only for its owner. Enforcement lives in the shared
+   * default-deny helper; unknown ids, other users' runs, and soft-deleted runs
+   * are indistinguishable so callers can respond with the same non-enumerating
+   * 404. Denials are sent to the ownership audit sink (hash only, no content).
    */
   findOwnedRun(runId: string, ownerUserId: string): SpikeRun | undefined {
-    const run = this.runs.get(runId);
+    try {
+      return assertOwned({
+        actorUserId: ownerUserId,
+        resource: this.runs.get(runId),
+        resourceId: runId,
+        resourceType: RUN_RESOURCE_TYPE,
+        auditSink: this.ownershipAudit,
+        hashSalt: PROCESS_AUDIT_HASH_SALT,
+      });
+    } catch (error) {
+      if (error instanceof OwnershipDeniedError) {
+        return undefined;
+      }
 
-    if (run?.ownerUserId !== ownerUserId) {
-      return undefined;
+      throw error;
     }
-
-    return run;
   }
 
   listOwnedRuns(ownerUserId: string): SpikeRun[] {
