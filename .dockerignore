@@ -1,0 +1,28 @@
+# Docker build context is the repository root.
+# Keep the context minimal: installs, builds, and caches are recreated inside the image.
+
+.git
+.github
+.gitignore
+.DS_Store
+.serena
+
+# Dependencies and build output are always produced inside the image.
+node_modules
+**/node_modules
+**/dist
+**/.next
+**/*.tsbuildinfo
+.turbo
+coverage
+**/coverage
+
+# Local logs and environment values; the example file stays available as documentation.
+*.log
+**/*.log
+.env
+.env.*
+!.env.example
+
+# Long-form project documentation is not part of any image build.
+docs
