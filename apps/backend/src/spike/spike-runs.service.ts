@@ -73,7 +73,7 @@ export class SpikeRunsService {
   findOwnedRun(runId: string, ownerUserId: string): SpikeRun | undefined {
     const run = this.runs.get(runId);
 
-    if (run === undefined || run.ownerUserId !== ownerUserId) {
+    if (run?.ownerUserId !== ownerUserId) {
       return undefined;
     }
 
