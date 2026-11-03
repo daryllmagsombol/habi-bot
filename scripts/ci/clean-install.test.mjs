@@ -17,9 +17,11 @@ import {
   EXIT_USAGE,
   REPO_ROOT,
   SCRIPT_PATH,
+  childPath,
   isInsideRepo,
   parseArgs,
   snapshotRepoShape,
+  stepEnvironment,
 } from './clean-install.mjs';
 
 const NODE = process.execPath;
@@ -252,6 +254,20 @@ test('helper guards keep temp paths outside the repository and reject bad argume
   assert.throws(() => parseArgs(['--source', '/tmp/x', '--archive', '/tmp/x.tar']), /mutually exclusive/);
   assert.throws(() => parseArgs(['--temp-root']), /Missing value/);
   assert.throws(() => parseArgs(['--bogus']), /Unknown argument/);
+});
+
+test('child process env replaces the inherited PATH with fixed absolute directories', () => {
+  const hostilePath = '/tmp/habi-untrusted-bin:/usr/bin';
+  const env = stepEnvironment({ ...process.env, PATH: hostilePath }, process.execPath);
+  const entries = env.PATH.split(path.delimiter);
+
+  assert.notEqual(env.PATH, hostilePath);
+  assert.doesNotMatch(env.PATH, /habi-untrusted-bin/);
+  assert.ok(entries.length > 0);
+  assert.ok(entries.every((entry) => path.isAbsolute(entry)), `not absolute: ${env.PATH}`);
+  assert.ok(entries.includes(path.dirname(process.execPath)), 'PATH must include the node directory');
+  assert.equal(env.PATH, childPath(process.execPath));
+  assert.equal(env.HOME, process.env.HOME, 'HOME must stay forwarded');
 });
 
 test('script leaves no temp artifacts behind after a full dry-run or failure cycle', () => {

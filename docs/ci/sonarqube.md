@@ -79,6 +79,12 @@ The workflow passes:
 
 A failing or timed-out quality gate fails the analysis job. Missing configuration skips only; it does not hide analysis or server failures.
 
+### Project gate (2026-11-03)
+
+The `habi-bot` project uses a project-specific gate named **Habi**, copied from Sonar way with the `new_coverage` condition removed. The built-in gate demanded 80% new-code coverage, but this repository has no LCOV property and no coverage mandate (see [Sonar engineering guidance](../SONAR_GUIDELINES.md)); that server condition contradicted repository policy rather than exposing a code defect.
+
+Remaining conditions: `new_violations > 0`, `new_duplicated_lines_density > 3%`, `new_security_hotspots_reviewed < 100%`. This is server configuration, not repository policy, and it is not a quality-gate pass claim. Code findings are still fixed; no rule is disabled and no file is excluded to satisfy the gate.
+
 There is **no LCOV or coverage report property**. The repository's smoke tests are not source-mapped coverage and must not be presented as such. Do not claim a coverage or quality-gate pass from this lane. If coverage becomes a requirement, generate a real source-mapped report in a separate trusted job and wire it explicitly; do not fabricate a report or add a placeholder LCOV path.
 
 ## Branch and pull-request detection

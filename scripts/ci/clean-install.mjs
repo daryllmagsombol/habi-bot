@@ -65,6 +65,34 @@ export const STRIPPED_ENV = [
   'NPM_TOKEN',
   'NODE_AUTH_TOKEN',
 ];
+/**
+ * Fixed, absolute search directories for child processes. The inherited
+ * `process.env.PATH` is never reused, so an untrusted PATH cannot shadow the
+ * corepack, pnpm, git, tar, or node binaries this runner executes.
+ */
+export const FIXED_PATH_DIRECTORIES = [
+  '/usr/local/sbin',
+  '/usr/local/bin',
+  '/opt/homebrew/sbin',
+  '/opt/homebrew/bin',
+  '/usr/bin',
+  '/bin',
+  '/usr/sbin',
+  '/sbin',
+];
+
+/**
+ * Builds a deterministic PATH from absolute directories only: the directory of
+ * the running node binary (which also holds corepack) followed by known system
+ * locations. Deliberately does not read `process.env.PATH`.
+ */
+export function childPath(execPath = process.execPath) {
+  const directories = [path.dirname(execPath), ...FIXED_PATH_DIRECTORIES].filter((directory) =>
+    path.isAbsolute(directory),
+  );
+
+  return [...new Set(directories)].join(path.delimiter);
+}
 
 export class UsageError extends Error {}
 export class PreflightError extends Error {}
@@ -100,6 +128,47 @@ export function assertOutsideRepo(targetPath, repoRoot = REPO_ROOT) {
   }
 }
 
+const BOOLEAN_FLAGS = new Map([
+  ['--dry-run', 'dryRun'],
+  ['--keep', 'keep'],
+  ['--help', 'help'],
+  ['-h', 'help'],
+]);
+const VALUE_FLAGS = new Map([
+  ['--source', 'source'],
+  ['--archive', 'archive'],
+  ['--temp-root', 'tempRoot'],
+]);
+
+function readFlagValue(argv, index, flag) {
+  const value = argv[index + 1];
+
+  if (value === undefined || value.startsWith('--')) {
+    throw new UsageError(`Missing value for ${flag}.`);
+  }
+
+  return value;
+}
+
+/** Applies the argument at `index` and returns the index of the next one. */
+function applyArgument(options, argv, index) {
+  const arg = argv[index];
+
+  if (BOOLEAN_FLAGS.has(arg)) {
+    options[BOOLEAN_FLAGS.get(arg)] = true;
+
+    return index + 1;
+  }
+
+  if (VALUE_FLAGS.has(arg)) {
+    options[VALUE_FLAGS.get(arg)] = readFlagValue(argv, index, arg);
+
+    return index + 2;
+  }
+
+  throw new UsageError(`Unknown argument: ${arg}`);
+}
+
 export function parseArgs(argv = []) {
   const options = {
     dryRun: false,
@@ -109,39 +178,10 @@ export function parseArgs(argv = []) {
     archive: null,
     tempRoot: null,
   };
+  let index = 0;
 
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index];
-
-    if (arg === '--dry-run') {
-      options.dryRun = true;
-      continue;
-    }
-
-    if (arg === '--keep') {
-      options.keep = true;
-      continue;
-    }
-
-    if (arg === '--help' || arg === '-h') {
-      options.help = true;
-      continue;
-    }
-
-    if (arg === '--source' || arg === '--archive' || arg === '--temp-root') {
-      const value = argv[index + 1];
-
-      if (value === undefined || value.startsWith('--')) {
-        throw new UsageError(`Missing value for ${arg}.`);
-      }
-
-      const key = arg === '--temp-root' ? 'tempRoot' : arg.slice(2);
-      options[key] = value;
-      index += 1;
-      continue;
-    }
-
-    throw new UsageError(`Unknown argument: ${arg}`);
+  while (index < argv.length) {
+    index = applyArgument(options, argv, index);
   }
 
   if (options.source && options.archive) {
@@ -168,7 +208,7 @@ export function printUsage(stream = process.stdout) {
   );
 }
 
-export function stepEnvironment(base = process.env) {
+export function stepEnvironment(base = process.env, execPath = process.execPath) {
   const env = { ...base };
 
   for (const key of STRIPPED_ENV) {
@@ -180,6 +220,8 @@ export function stepEnvironment(base = process.env) {
   env.TURBO_TELEMETRY_DISABLED = '1';
   env.NEXT_TELEMETRY_DISABLED = '1';
   env.COREPACK_ENABLE_DOWNLOAD_PROMPT = '0';
+  // Always override the inherited PATH; HOME/TMPDIR and tool config stay as-is.
+  env.PATH = childPath(execPath);
 
   return env;
 }
@@ -261,7 +303,7 @@ export function inspectLockfiles(treeDir) {
   };
 }
 
-export function detectPnpmLauncher({ cwd = REPO_ROOT, env = process.env } = {}) {
+export function detectPnpmLauncher({ cwd = REPO_ROOT, env = stepEnvironment() } = {}) {
   const corepack = spawnSync('corepack', ['--version'], { cwd, env, encoding: 'utf8' });
 
   if (!corepack.error && corepack.status === 0) {
@@ -276,7 +318,7 @@ export function detectPnpmLauncher({ cwd = REPO_ROOT, env = process.env } = {}) 
   return { source: 'PATH', command: 'pnpm', prefix: [], corepackVersion: null };
 }
 
-export function probePnpmVersion(launcher, { cwd, env }) {
+export function probePnpmVersion(launcher, { cwd, env = stepEnvironment() }) {
   const argv = [...launcher.prefix, '--version'];
   const display = [launcher.command, ...argv].join(' ');
   const result = spawnSync(launcher.command, argv, { cwd, env, encoding: 'utf8' });
@@ -353,9 +395,22 @@ export function measureDirectory(directory, entryLimit = 200000) {
   return { entries, bytes };
 }
 
+/** Deterministic, locale-independent ordering (UTF-16 code unit order). */
+export function compareCodeUnits(left, right) {
+  if (left < right) {
+    return -1;
+  }
+
+  if (left > right) {
+    return 1;
+  }
+
+  return 0;
+}
+
 export function snapshotRepoShape(repoRoot = REPO_ROOT) {
   return {
-    root: readdirSync(repoRoot).sort(),
+    root: readdirSync(repoRoot).sort(compareCodeUnits),
     scripts: listRelative(repoRoot, 'scripts'),
   };
 }
@@ -384,12 +439,13 @@ function listRelative(root, startRelative) {
     }
   }
 
-  return found.sort();
+  return found.sort(compareCodeUnits);
 }
 
-export function gitHead(sourceRoot) {
+export function gitHead(sourceRoot, env = stepEnvironment()) {
   const result = spawnSync('git', ['rev-parse', 'HEAD'], {
     cwd: sourceRoot,
+    env,
     encoding: 'utf8',
   });
 
@@ -402,7 +458,7 @@ export function gitHead(sourceRoot) {
   return result.stdout.trim();
 }
 
-export function extractTree({ sourceRoot, archiveFile, destDir }) {
+export function extractTree({ sourceRoot, archiveFile, destDir, env = stepEnvironment() }) {
   mkdirSync(destDir, { recursive: true });
 
   let input;
@@ -419,9 +475,10 @@ export function extractTree({ sourceRoot, archiveFile, destDir }) {
     input = readFileSync(absolute);
     source = `archive ${absolute}`;
   } else {
-    commit = gitHead(sourceRoot);
+    commit = gitHead(sourceRoot, env);
     const archive = spawnSync('git', ['archive', '--format=tar', 'HEAD'], {
       cwd: sourceRoot,
+      env,
       maxBuffer: 1024 ** 3,
     });
 
@@ -439,7 +496,11 @@ export function extractTree({ sourceRoot, archiveFile, destDir }) {
     source = `git archive HEAD (${commit.slice(0, 12)})`;
   }
 
-  const tar = spawnSync('tar', ['-x', '-C', destDir], { input, maxBuffer: 64 * 1024 * 1024 });
+  const tar = spawnSync('tar', ['-x', '-C', destDir], {
+    input,
+    env,
+    maxBuffer: 64 * 1024 * 1024,
+  });
 
   if (tar.error) {
     throw new PreflightError(`Could not run tar: ${tar.error.message}`);
@@ -502,10 +563,22 @@ export function runStep({ label, command, args, cwd, env, display }) {
   });
 }
 
+function describeFailureReason(result) {
+  if (result.error) {
+    return `could not start: ${result.error.message}`;
+  }
+
+  const status = result.status ?? 'unknown';
+
+  if (result.signal) {
+    return `exit ${status} (signal ${result.signal})`;
+  }
+
+  return `exit ${status}`;
+}
+
 export function formatRunFailure(label, result, commandDisplay) {
-  const reason = result.error
-    ? `could not start: ${result.error.message}`
-    : `exit ${result.status ?? 'unknown'}${result.signal ? ` (signal ${result.signal})` : ''}`;
+  const reason = describeFailureReason(result);
 
   return `${label} failed (${reason}) after ${formatDuration(result.durationMs)} — ${commandDisplay}`;
 }
@@ -556,6 +629,12 @@ function removeTempDir(tempDir, keep) {
   return { removed: true, kept: false };
 }
 
+function describePnpmSource(pnpm) {
+  const corepackNote = pnpm.corepackVersion ? ` (corepack ${pnpm.corepackVersion})` : '';
+
+  return `  pnpm            ${pnpm.version} via ${pnpm.source}${corepackNote}`;
+}
+
 function printEvidence(evidence) {
   const stepSummary = evidence.steps
     .map((entry) => `${entry.label} ${formatDuration(entry.durationMs)}`)
@@ -564,11 +643,7 @@ function printEvidence(evidence) {
   log('evidence');
   console.log(`  commit          ${evidence.commit ?? '<archive override>'}`);
   console.log(`  node            v${process.versions.node} (expected ${evidence.nodePin ?? 'unpinned'})`);
-  console.log(
-    `  pnpm            ${evidence.pnpm.version} via ${evidence.pnpm.source}${
-      evidence.pnpm.corepackVersion ? ` (corepack ${evidence.pnpm.corepackVersion})` : ''
-    }`,
-  );
+  console.log(describePnpmSource(evidence.pnpm));
   console.log(
     `  lockfile        ${evidence.lockfile.name} sha256=${evidence.lockfile.sha256} bytes=${evidence.lockfile.bytes}`,
   );
@@ -581,11 +656,259 @@ function printEvidence(evidence) {
   console.log(`  total           ${formatDuration(evidence.totalMs)}`);
 }
 
+function describeNodePin(nodePin) {
+  if (nodePin === null) {
+    return ' (no .node-version pin)';
+  }
+
+  if (nodePin === process.versions.node) {
+    return ` (matches .node-version ${nodePin})`;
+  }
+
+  return ` (WARN: .node-version pins ${nodePin})`;
+}
+
+function logRunContext(run) {
+  const origin = run.options.archive
+    ? ` (archive ${run.options.archive})`
+    : ' (git archive HEAD)';
+
+  log(`temp tree ${run.tempDir}`);
+  log(`source ${run.sourceRoot}${origin}`);
+  log(`node v${process.versions.node}${describeNodePin(run.nodePin)}`);
+}
+
+/** Creates the isolated temp tree, which lives outside the repository. */
+function startRun({ options, repoRoot, sourceRoot, nodePin }) {
+  const tempRoot = path.resolve(options.tempRoot ?? tmpdir());
+
+  assertOutsideRepo(tempRoot, repoRoot);
+  mkdirSync(tempRoot, { recursive: true });
+
+  const tempDir = mkdtempSync(path.join(tempRoot, TEMP_PREFIX));
+  const run = {
+    options,
+    sourceRoot,
+    nodePin,
+    tempDir,
+    treeDir: path.join(tempDir, 'tree'),
+    storeDir: path.join(tempDir, 'store'),
+    env: stepEnvironment(),
+    steps: [],
+    startedAt: Date.now(),
+  };
+
+  assertOutsideRepo(tempDir, repoRoot);
+  logRunContext(run);
+
+  return run;
+}
+
+function archiveStep(run) {
+  const startedAt = Date.now();
+  const archive = extractTree({
+    sourceRoot: run.sourceRoot,
+    archiveFile: run.options.archive,
+    destDir: run.treeDir,
+    env: run.env,
+  });
+  const durationMs = Date.now() - startedAt;
+
+  run.steps.push({ label: 'archive', durationMs });
+  log(`archive ok in ${formatDuration(durationMs)} (${archive.source})`);
+
+  return archive;
+}
+
+function assertColdStore(storeDir) {
+  if (!existsSync(storeDir)) {
+    return;
+  }
+
+  throw new PreflightError(`Isolated store already exists, refusing to call it cold: ${storeDir}`);
+}
+
+function preflightStep(run) {
+  const startedAt = Date.now();
+  const lockfile = inspectLockfiles(run.treeDir);
+  const pin = readPackageManagerPin(path.join(run.treeDir, 'package.json'));
+  const launcher = detectPnpmLauncher({ cwd: run.treeDir, env: run.env });
+  const pnpmVersion = probePnpmVersion(launcher, { cwd: run.treeDir, env: run.env });
+
+  assertPnpmVersion(launcher, pnpmVersion, pin.version);
+  assertColdStore(run.storeDir);
+
+  const durationMs = Date.now() - startedAt;
+
+  log(
+    `preflight ok in ${formatDuration(durationMs)} (${lockfile.name} sha256=${lockfile.sha256.slice(0, 12)}…, pnpm ${pnpmVersion} via ${launcher.source}, cold store)`,
+  );
+
+  return { lockfile, launcher, pnpmVersion };
+}
+
+function planSteps(launcher, storeDir) {
+  const withLauncher = (args) => [...launcher.prefix, ...args];
+
+  return [
+    {
+      label: 'install',
+      args: withLauncher(['install', '--frozen-lockfile', '--store-dir', storeDir]),
+      display: `pnpm install --frozen-lockfile --store-dir ${storeDir}`,
+    },
+    { label: 'build', args: withLauncher(['build']) },
+    { label: 'typecheck', args: withLauncher(['typecheck']) },
+    { label: 'test', args: withLauncher(['test']) },
+  ];
+}
+
+function throwStepFailure(launcher, step, result) {
+  const display = step.display ?? [launcher.command, ...step.args].join(' ');
+  const message = formatRunFailure(step.label, result, display);
+
+  logError(message);
+
+  if (result.tail.trim()) {
+    logError(`${step.label} last output:`);
+    console.error(result.tail.trimEnd());
+  }
+
+  throw new StepFailedError(message);
+}
+
+async function executeStep(run, launcher, step) {
+  const result = await runStep({
+    label: step.label,
+    command: launcher.command,
+    args: step.args,
+    cwd: run.treeDir,
+    env: run.env,
+    display: step.display,
+  });
+
+  if (!result.ok) {
+    throwStepFailure(launcher, step, result);
+  }
+
+  run.steps.push({ label: step.label, durationMs: result.durationMs });
+  log(`${step.label} ok in ${formatDuration(result.durationMs)}`);
+}
+
+async function executeRun(run) {
+  const archive = archiveStep(run);
+  const { lockfile, launcher, pnpmVersion } = preflightStep(run);
+
+  for (const step of planSteps(launcher, run.storeDir)) {
+    await executeStep(run, launcher, step);
+  }
+
+  const store = { dir: run.storeDir, ...measureDirectory(run.storeDir) };
+
+  printEvidence({
+    commit: archive.commit,
+    nodePin: run.nodePin,
+    pnpm: {
+      version: pnpmVersion,
+      source: launcher.source,
+      corepackVersion: launcher.corepackVersion,
+    },
+    lockfile,
+    store,
+    archive,
+    steps: run.steps,
+    totalMs: Date.now() - run.startedAt,
+  });
+  log('PASS: cold install, build, typecheck, and tests succeeded from git archive HEAD.');
+}
+
+/** Cleans up the temp tree; returns the cleanup error, if any. */
+function reportCleanup(tempDir, keep) {
+  try {
+    const cleanup = removeTempDir(tempDir, keep);
+
+    if (cleanup.kept) {
+      log(`temp tree kept at ${tempDir}`);
+    } else if (cleanup.removed) {
+      log('temp tree removed');
+    }
+
+    return null;
+  } catch (error) {
+    logError(error.message);
+
+    return error;
+  }
+}
+
+function stringifyForLog(value) {
+  if (typeof value === 'string') {
+    return value;
+  }
+
+  try {
+    const json = JSON.stringify(value);
+
+    return json === undefined ? Object.prototype.toString.call(value) : json;
+  } catch {
+    return Object.prototype.toString.call(value);
+  }
+}
+
+function describeFailure(failure) {
+  if (failure instanceof Error) {
+    return failure.stack ?? failure.message;
+  }
+
+  return stringifyForLog(failure);
+}
+
+function exitCodeForFailure(failure, startedAt) {
+  if (!failure) {
+    return EXIT_OK;
+  }
+
+  if (failure instanceof StepFailedError) {
+    logError(`FAIL after ${formatDuration(Date.now() - startedAt)}`);
+
+    return EXIT_STEP_FAILED;
+  }
+
+  if (failure instanceof PreflightError || failure instanceof UsageError) {
+    logError(failure.message);
+    logError(`FAIL after ${formatDuration(Date.now() - startedAt)}`);
+
+    return EXIT_USAGE;
+  }
+
+  logError(describeFailure(failure));
+  logError(`FAIL after ${formatDuration(Date.now() - startedAt)}`);
+
+  return EXIT_STEP_FAILED;
+}
+
+async function runColdInstall({ options, repoRoot, sourceRoot, nodePin }) {
+  const run = startRun({ options, repoRoot, sourceRoot, nodePin });
+  let failure = null;
+
+  try {
+    await executeRun(run);
+  } catch (error) {
+    failure = error;
+  } finally {
+    const cleanupError = reportCleanup(run.tempDir, options.keep);
+
+    failure ??= cleanupError;
+  }
+
+  return exitCodeForFailure(failure, run.startedAt);
+}
+
 export async function main(argv = process.argv.slice(2), repoRoot = REPO_ROOT) {
   const options = parseArgs(argv);
 
   if (options.help) {
     printUsage();
+
     return EXIT_OK;
   }
 
@@ -599,161 +922,21 @@ export async function main(argv = process.argv.slice(2), repoRoot = REPO_ROOT) {
       pin: readPackageManagerPin(path.join(sourceRoot, 'package.json')),
       nodePin,
     });
+
     return EXIT_OK;
   }
 
-  const tempRoot = path.resolve(options.tempRoot ?? tmpdir());
-  assertOutsideRepo(tempRoot, repoRoot);
-  mkdirSync(tempRoot, { recursive: true });
-
-  const tempDir = mkdtempSync(path.join(tempRoot, TEMP_PREFIX));
-  const treeDir = path.join(tempDir, 'tree');
-  const storeDir = path.join(tempDir, 'store');
-  const env = stepEnvironment();
-  const steps = [];
-  const startedAt = Date.now();
-  let failure = null;
-
-  assertOutsideRepo(tempDir, repoRoot);
-  log(`temp tree ${tempDir}`);
-  log(`source ${sourceRoot}${options.archive ? ` (archive ${options.archive})` : ' (git archive HEAD)'}`);
-
-  const nodeNote = nodePin
-    ? nodePin === process.versions.node
-      ? ` (matches .node-version ${nodePin})`
-      : ` (WARN: .node-version pins ${nodePin})`
-    : ' (no .node-version pin)';
-  log(`node v${process.versions.node}${nodeNote}`);
-
-  try {
-    const archiveStarted = Date.now();
-    const archive = extractTree({
-      sourceRoot,
-      archiveFile: options.archive,
-      destDir: treeDir,
-    });
-    const archiveMs = Date.now() - archiveStarted;
-    steps.push({ label: 'archive', durationMs: archiveMs });
-    log(`archive ok in ${formatDuration(archiveMs)} (${archive.source})`);
-
-    const preflightStarted = Date.now();
-    const lockfile = inspectLockfiles(treeDir);
-    const pin = readPackageManagerPin(path.join(treeDir, 'package.json'));
-    const launcher = detectPnpmLauncher({ cwd: treeDir, env });
-    const pnpmVersion = probePnpmVersion(launcher, { cwd: treeDir, env });
-    assertPnpmVersion(launcher, pnpmVersion, pin.version);
-
-    if (existsSync(storeDir)) {
-      throw new PreflightError(`Isolated store already exists, refusing to call it cold: ${storeDir}`);
-    }
-
-    const preflightMs = Date.now() - preflightStarted;
-    log(
-      `preflight ok in ${formatDuration(preflightMs)} (${lockfile.name} sha256=${lockfile.sha256.slice(0, 12)}…, pnpm ${pnpmVersion} via ${launcher.source}, cold store)`,
-    );
-
-    const pnpmArgs = (args) => [...launcher.prefix, ...args];
-    const installArgs = pnpmArgs(['install', '--frozen-lockfile', '--store-dir', storeDir]);
-    const plan = [
-      {
-        label: 'install',
-        args: installArgs,
-        display: `pnpm install --frozen-lockfile --store-dir ${storeDir}`,
-      },
-      { label: 'build', args: pnpmArgs(['build']) },
-      { label: 'typecheck', args: pnpmArgs(['typecheck']) },
-      { label: 'test', args: pnpmArgs(['test']) },
-    ];
-
-    for (const step of plan) {
-      const result = await runStep({
-        label: step.label,
-        command: launcher.command,
-        args: step.args,
-        cwd: treeDir,
-        env,
-        display: step.display,
-      });
-
-      if (!result.ok) {
-        const display = step.display ?? [launcher.command, ...step.args].join(' ');
-        const message = formatRunFailure(step.label, result, display);
-
-        logError(message);
-
-        if (result.tail.trim()) {
-          logError(`${step.label} last output:`);
-          console.error(result.tail.trimEnd());
-        }
-
-        throw new StepFailedError(message);
-      }
-
-      steps.push({ label: step.label, durationMs: result.durationMs });
-      log(`${step.label} ok in ${formatDuration(result.durationMs)}`);
-    }
-
-    const store = { dir: storeDir, ...measureDirectory(storeDir) };
-
-    printEvidence({
-      commit: archive.commit,
-      nodePin,
-      pnpm: { version: pnpmVersion, source: launcher.source, corepackVersion: launcher.corepackVersion },
-      lockfile,
-      store,
-      archive,
-      steps,
-      totalMs: Date.now() - startedAt,
-    });
-    log('PASS: cold install, build, typecheck, and tests succeeded from git archive HEAD.');
-  } catch (error) {
-    failure = error;
-  } finally {
-    try {
-      const cleanup = removeTempDir(tempDir, options.keep);
-
-      if (cleanup.kept) {
-        log(`temp tree kept at ${tempDir}`);
-      } else if (cleanup.removed) {
-        log('temp tree removed');
-      }
-    } catch (error) {
-      failure ??= error;
-      logError(error.message);
-    }
-  }
-
-  if (failure) {
-    if (failure instanceof StepFailedError) {
-      logError(`FAIL after ${formatDuration(Date.now() - startedAt)}`);
-      return EXIT_STEP_FAILED;
-    }
-
-    if (failure instanceof PreflightError || failure instanceof UsageError) {
-      logError(failure.message);
-      logError(`FAIL after ${formatDuration(Date.now() - startedAt)}`);
-      return EXIT_USAGE;
-    }
-
-    logError(failure?.stack ?? String(failure));
-    logError(`FAIL after ${formatDuration(Date.now() - startedAt)}`);
-    return EXIT_STEP_FAILED;
-  }
-
-  return EXIT_OK;
+  return runColdInstall({ options, repoRoot, sourceRoot, nodePin });
 }
 
 const invokedDirectly =
   process.argv[1] !== undefined && path.resolve(process.argv[1]) === path.resolve(SCRIPT_PATH);
 
 if (invokedDirectly) {
-  main().then(
-    (code) => {
-      process.exitCode = code;
-    },
-    (error) => {
-      logError(error instanceof UsageError ? error.message : (error?.stack ?? String(error)));
-      process.exitCode = error instanceof UsageError ? EXIT_USAGE : EXIT_STEP_FAILED;
-    },
-  );
+  try {
+    process.exitCode = await main();
+  } catch (error) {
+    logError(error instanceof UsageError ? error.message : describeFailure(error));
+    process.exitCode = error instanceof UsageError ? EXIT_USAGE : EXIT_STEP_FAILED;
+  }
 }
