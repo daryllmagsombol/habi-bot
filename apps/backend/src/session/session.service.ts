@@ -76,8 +76,8 @@ export interface SessionRecord {
 }
 
 export interface SessionObserver {
-  userAgent?: string | undefined;
-  ip?: string | undefined;
+  userAgent?: string;
+  ip?: string;
 }
 
 export interface IssuedSession {
@@ -230,7 +230,7 @@ export class SessionService {
   revoke(sessionId: string, at = this.clock.now()): boolean {
     const record = this.lookup(sessionId);
 
-    if (record === undefined || record.revokedAt !== null) {
+    if (record?.revokedAt !== null) {
       return false;
     }
 
