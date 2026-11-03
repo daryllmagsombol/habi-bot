@@ -945,7 +945,7 @@ function positive(value: number | undefined, fallback: number): number {
 function stripTrailingSlashes(value: string): string {
   let end = value.length;
 
-  while (end > 0 && value.charCodeAt(end - 1) === SLASH_CODE_UNIT) {
+  while (end > 0 && value.codePointAt(end - 1) === SLASH_CODE_UNIT) {
     end -= 1;
   }
 
