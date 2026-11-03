@@ -13,6 +13,7 @@ import {
   loadOwnedConversation,
   requireActorUserId,
   requireResourceId,
+  requireRow,
   toConversation,
   type ConversationRow,
   type ConversationStateRow,
@@ -167,12 +168,7 @@ export class ConversationRepository {
       [ownedConversationId, ownerUserId, nextTitle],
     );
 
-    const row = result.rows[0];
-    if (row === undefined) {
-      throw new PersistenceNotFoundError();
-    }
-
-    return toConversation(row);
+    return toConversation(requireRow(result));
   }
 
   /**
@@ -194,13 +190,8 @@ export class ConversationRepository {
       [ownedConversationId, ownerUserId],
     );
 
-    const row = result.rows[0];
-    if (row === undefined) {
-      // Deleted, foreign, or nonexistent: one non-enumerating outcome.
-      throw new PersistenceNotFoundError();
-    }
-
-    return toConversation(row);
+    // Deleted, foreign, or nonexistent: one non-enumerating outcome.
+    return toConversation(requireRow(result));
   }
 
   /**
@@ -250,12 +241,7 @@ export class ConversationRepository {
         [ownedConversationId, ownerUserId],
       );
 
-      const existing = alreadyDeleted.rows[0];
-      if (existing === undefined) {
-        throw new PersistenceNotFoundError();
-      }
-
-      return toConversation(existing);
+      return toConversation(requireRow(alreadyDeleted));
     });
   }
 }

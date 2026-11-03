@@ -15,15 +15,22 @@ import {
 } from '../persistence/errors.js';
 import { isUuid } from '../persistence/cursor.js';
 import { MAX_PAGE_SIZE, normalizeLimit } from '../persistence/pagination.js';
-import { requireActorUserId, requireResourceId } from '../persistence/rows.js';
+import {
+  loadOwnedRow,
+  requireActorUserId,
+  requireResourceId,
+  requireRow,
+  toIso,
+  toNullableIso,
+  type NullableTimestamp,
+  type ScopedLoadOptions,
+  type Timestamp,
+} from '../persistence/rows.js';
 import type {
   AttachmentRecord,
   AttachmentStatus,
   ListAttachmentsOptions,
 } from './types.js';
-
-type Timestamp = Date | string;
-type NullableTimestamp = Timestamp | null;
 
 interface AttachmentRow {
   id: string;
@@ -52,16 +59,8 @@ const ATTACHMENT_RETURNING = `id, owner_user_id, conversation_id, message_id,
 const LIVE_SCOPE = `a.owner_user_id = $2
    AND c.deleted_at IS NULL`;
 
-const ATTACHMENT_BY_ID = `SELECT ${ATTACHMENT_COLUMNS}
-   FROM attachments a
-   JOIN conversations c
-     ON c.id = a.conversation_id
-    AND c.owner_user_id = a.owner_user_id
-  WHERE a.id = $1
-    AND ${LIVE_SCOPE}
-    AND a.deleted_at IS NULL`;
-
-const ATTACHMENT_BY_ID_INCLUDING_DELETED = `SELECT ${ATTACHMENT_COLUMNS}
+/** Owned attachment row, tombstoned or not. */
+const ATTACHMENT_BY_ID_ANY = `SELECT ${ATTACHMENT_COLUMNS}
    FROM attachments a
    JOIN conversations c
      ON c.id = a.conversation_id
@@ -69,13 +68,46 @@ const ATTACHMENT_BY_ID_INCLUDING_DELETED = `SELECT ${ATTACHMENT_COLUMNS}
   WHERE a.id = $1
     AND ${LIVE_SCOPE}`;
 
-function toIso(value: Timestamp): string {
-  return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
-}
+/** Owned attachment row that has not been tombstoned. */
+const ATTACHMENT_BY_ID_LIVE = `${ATTACHMENT_BY_ID_ANY}
+    AND a.deleted_at IS NULL`;
 
-function toNullableIso(value: NullableTimestamp): string | null {
-  return value === null ? null : toIso(value);
-}
+const ATTACHMENT_STATEMENTS = {
+  live: ATTACHMENT_BY_ID_LIVE,
+  withDeleted: ATTACHMENT_BY_ID_ANY,
+  lock: 'FOR UPDATE OF a',
+} as const;
+
+/** Publishes a pending row; the guard keeps the transition single-shot. */
+const STORE_ATTACHMENT = `UPDATE attachments
+    SET status = 'stored',
+        stored_at = now()
+  WHERE id = $1
+    AND owner_user_id = $2
+    AND status = 'pending'
+    AND deleted_at IS NULL
+  RETURNING ${ATTACHMENT_RETURNING}`;
+
+/** Records a policy rejection; the guard keeps the transition single-shot. */
+const REJECT_ATTACHMENT = `UPDATE attachments
+    SET status = 'rejected'
+  WHERE id = $1
+    AND owner_user_id = $2
+    AND status = 'pending'
+    AND deleted_at IS NULL
+  RETURNING ${ATTACHMENT_RETURNING}`;
+
+/**
+ * Tombstones any non-deleted row. `deleted_at` is preserved so a repeated
+ * delete reports the original tombstone time.
+ */
+const TOMBSTONE_ATTACHMENT = `UPDATE attachments
+    SET status = 'deleted',
+        deleted_at = COALESCE(deleted_at, now())
+  WHERE id = $1
+    AND owner_user_id = $2
+    AND status <> 'deleted'
+  RETURNING ${ATTACHMENT_RETURNING}`;
 
 function toByteSize(value: string | number): number {
   const byteSize = typeof value === 'number' ? value : Number(value);
@@ -134,27 +166,15 @@ async function loadOwnedAttachment(
   queryable: Queryable,
   actorUserId: string,
   attachmentId: string,
-  options: { includeDeleted?: boolean; forUpdate?: boolean } = {},
+  options: ScopedLoadOptions = {},
 ): Promise<AttachmentRow> {
-  const ownerUserId = requireActorUserId(actorUserId);
-  const ownedAttachmentId = requireResourceId(attachmentId);
-
-  const base = options.includeDeleted === true
-    ? ATTACHMENT_BY_ID_INCLUDING_DELETED
-    : ATTACHMENT_BY_ID;
-  const sql = options.forUpdate === true ? `${base} FOR UPDATE OF a` : base;
-
-  const result = await queryable.query<AttachmentRow>(sql, [
-    ownedAttachmentId,
-    ownerUserId,
-  ]);
-
-  const row = result.rows[0];
-  if (row === undefined) {
-    throw new PersistenceNotFoundError();
-  }
-
-  return row;
+  return loadOwnedRow<AttachmentRow>(
+    queryable,
+    actorUserId,
+    attachmentId,
+    ATTACHMENT_STATEMENTS,
+    options,
+  );
 }
 
 export interface InsertAttachmentRecord {
@@ -165,6 +185,20 @@ export interface InsertAttachmentRecord {
   byteSize: number;
   sha256: string;
   storageKey: string;
+}
+
+/** One idempotent, owner-scoped lifecycle change on a single attachment. */
+interface StatusTransition {
+  /** Static statement applying the change; it binds the id and owner. */
+  sql: string;
+  /** Status that means the change already applied, so a repeat returns the row. */
+  settledStatus: AttachmentStatus;
+  /** Status the row must hold first; omitted accepts any live status. */
+  fromStatus?: AttachmentStatus;
+  /** Tombstoned rows stay reachable so a repeated delete can report itself. */
+  includeDeleted: boolean;
+  /** Outcome when a concurrent writer already moved the row out of scope. */
+  onMissingRow: 'settled' | 'not_found';
 }
 
 /**
@@ -216,12 +250,7 @@ export class AttachmentRepository {
       ],
     );
 
-    const row = result.rows[0];
-    if (row === undefined) {
-      throw new PersistenceNotFoundError();
-    }
-
-    return toAttachmentRecord(row);
+    return toAttachmentRecord(requireRow(result));
   }
 
   /** Reads live (pending or stored) metadata the actor owns. */
@@ -236,38 +265,15 @@ export class AttachmentRepository {
     actorUserId: string,
     attachmentId: string,
   ): Promise<AttachmentRecord> {
-    return withTransaction(this.pool, async (client) => {
-      const current = await loadOwnedAttachment(client, actorUserId, attachmentId, {
-        forUpdate: true,
-      });
-
-      if (current.status === 'stored') {
-        return toAttachmentRecord(current);
-      }
-
-      if (current.status !== 'pending') {
-        throw new PersistenceNotFoundError();
-      }
-
-      const result = await client.query<AttachmentRow>(
-        `UPDATE attachments
-            SET status = 'stored',
-                stored_at = now()
-          WHERE id = $1
-            AND owner_user_id = $2
-            AND status = 'pending'
-            AND deleted_at IS NULL
-          RETURNING ${ATTACHMENT_RETURNING}`,
-        [current.id, current.owner_user_id],
-      );
-
-      const row = result.rows[0];
-      if (row === undefined) {
-        throw new PersistenceNotFoundError();
-      }
-
-      return toAttachmentRecord(row);
+    const { record } = await this.transition(actorUserId, attachmentId, {
+      sql: STORE_ATTACHMENT,
+      settledStatus: 'stored',
+      fromStatus: 'pending',
+      includeDeleted: false,
+      onMissingRow: 'not_found',
     });
+
+    return record;
   }
 
   /** Records a policy rejection. Idempotent for an already-rejected row. */
@@ -275,37 +281,15 @@ export class AttachmentRepository {
     actorUserId: string,
     attachmentId: string,
   ): Promise<AttachmentRecord> {
-    return withTransaction(this.pool, async (client) => {
-      const current = await loadOwnedAttachment(client, actorUserId, attachmentId, {
-        forUpdate: true,
-      });
-
-      if (current.status === 'rejected') {
-        return toAttachmentRecord(current);
-      }
-
-      if (current.status !== 'pending') {
-        throw new PersistenceNotFoundError();
-      }
-
-      const result = await client.query<AttachmentRow>(
-        `UPDATE attachments
-            SET status = 'rejected'
-          WHERE id = $1
-            AND owner_user_id = $2
-            AND status = 'pending'
-            AND deleted_at IS NULL
-          RETURNING ${ATTACHMENT_RETURNING}`,
-        [current.id, current.owner_user_id],
-      );
-
-      const row = result.rows[0];
-      if (row === undefined) {
-        throw new PersistenceNotFoundError();
-      }
-
-      return toAttachmentRecord(row);
+    const { record } = await this.transition(actorUserId, attachmentId, {
+      sql: REJECT_ATTACHMENT,
+      settledStatus: 'rejected',
+      fromStatus: 'pending',
+      includeDeleted: false,
+      onMissingRow: 'not_found',
     });
+
+    return record;
   }
 
   /** Lists stored attachments in one owned conversation, newest first. */
@@ -349,45 +333,63 @@ export class AttachmentRepository {
     actorUserId: string,
     attachmentId: string,
   ): Promise<{ record: AttachmentRecord; alreadyDeleted: boolean }> {
-    const ownerUserId = requireActorUserId(actorUserId);
-    const ownedAttachmentId = requireResourceId(attachmentId);
+    const { record, alreadySettled } = await this.transition(
+      actorUserId,
+      attachmentId,
+      {
+        sql: TOMBSTONE_ATTACHMENT,
+        settledStatus: 'deleted',
+        includeDeleted: true,
+        onMissingRow: 'settled',
+      },
+    );
 
+    return { record, alreadyDeleted: alreadySettled };
+  }
+
+  /**
+   * Runs one lifecycle change under the row lock. A repeat call reports the
+   * settled row instead of failing, a foreign or tombstoned id stays not found,
+   * and a lost race follows the transition's declared outcome.
+   */
+  private async transition(
+    actorUserId: string,
+    attachmentId: string,
+    transition: StatusTransition,
+  ): Promise<{ record: AttachmentRecord; alreadySettled: boolean }> {
     return withTransaction(this.pool, async (client) => {
-      const current = await loadOwnedAttachment(
-        client,
-        ownerUserId,
-        ownedAttachmentId,
-        { includeDeleted: true, forUpdate: true },
-      );
+      const current = await loadOwnedAttachment(client, actorUserId, attachmentId, {
+        includeDeleted: transition.includeDeleted,
+        forUpdate: true,
+      });
 
-      if (current.status === 'deleted') {
-        return {
-          record: toAttachmentRecord(current),
-          alreadyDeleted: true,
-        };
+      if (current.status === transition.settledStatus) {
+        return { record: toAttachmentRecord(current), alreadySettled: true };
       }
 
-      const result = await client.query<AttachmentRow>(
-        `UPDATE attachments
-            SET status = 'deleted',
-                deleted_at = COALESCE(deleted_at, now())
-          WHERE id = $1
-            AND owner_user_id = $2
-            AND status <> 'deleted'
-          RETURNING ${ATTACHMENT_RETURNING}`,
-        [current.id, current.owner_user_id],
-      );
+      if (
+        transition.fromStatus !== undefined &&
+        current.status !== transition.fromStatus
+      ) {
+        throw new PersistenceNotFoundError();
+      }
 
+      const result = await client.query<AttachmentRow>(transition.sql, [
+        current.id,
+        current.owner_user_id,
+      ]);
       const row = result.rows[0];
+
       if (row === undefined) {
-        // A concurrent delete committed first; the object is already handled.
-        return {
-          record: toAttachmentRecord(current),
-          alreadyDeleted: true,
-        };
+        // A concurrent writer settled the row first; the caller decides whether
+        // that race is reported as the settled state or as not found.
+        if (transition.onMissingRow === 'settled') {
+          return { record: toAttachmentRecord(current), alreadySettled: true };
+        }
+        throw new PersistenceNotFoundError();
       }
 
-      return { record: toAttachmentRecord(row), alreadyDeleted: false };
+      return { record: toAttachmentRecord(row), alreadySettled: false };
     });
   }
 }
