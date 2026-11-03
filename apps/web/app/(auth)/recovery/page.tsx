@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useState } from 'react';
-import type { FormEvent } from 'react';
+import type { SubmitEvent } from 'react';
 import { authErrorMessage, postRecovery } from '../auth-client';
 import { FormMessage } from '../form-message';
 
@@ -18,7 +18,7 @@ export default function RecoveryPage() {
   const [status, setStatus] = useState('');
   const [pending, setPending] = useState(false);
 
-  async function onSubmit(event: FormEvent<HTMLFormElement>) {
+  async function onSubmit(event: SubmitEvent<HTMLFormElement>) {
     event.preventDefault();
     setPending(true);
     setError('');
