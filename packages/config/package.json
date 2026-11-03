@@ -3,15 +3,27 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
     "./tsconfig/base.json": "./tsconfig/base.json",
     "./eslint/base.mjs": "./eslint/base.mjs"
   },
   "files": [
+    "dist",
     "tsconfig",
     "eslint"
   ],
+  "sideEffects": false,
   "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json --watch --preserveWatchOutput",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint .",
     "test": "node --test test/*.test.mjs"
   },
   "dependencies": {

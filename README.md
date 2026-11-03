@@ -26,9 +26,11 @@ The foundation is a tooling-only exception to the P0 sequence. **H-009 remains o
 - A minimal Next.js 16, React 19, and Tailwind CSS 4 web shell with an honest foundation notice. It has no sign-in, chat, Bot, model, or Hermes behavior.
 - A NestJS 12 API with a loopback health endpoint on port 3001.
 - A separate NestJS headless worker entrypoint that opens no HTTP listener, performs no polling or provider connections, and exits cleanly on `SIGTERM` or `SIGINT`.
-- Shared `@habi/contracts` and `@habi/config` packages. The contract is type-only; the compiled runtime module is intentionally empty.
+- Shared `@habi/contracts` and `@habi/config` packages. The contract is type-only; the compiled runtime module is intentionally empty, and the config package provides a dependency-free environment validator that reports invalid keys without echoing values.
 - A local-only PostgreSQL 18 Compose service with loopback binding, a healthcheck, resource caps, and a named volume.
 - Smoke tests for the API health response, invalid API configuration, worker lifecycle and inertness, and the honest web page.
+- Root-context multi-stage Dockerfiles for the web shell, API, and worker, pinned to Node 24.20.0 and pnpm 12.5.1, running as non-root with production dependencies only.
+- A cold clean-install runner (`scripts/ci/clean-install.mjs`) that archives `HEAD`, installs with an isolated pnpm store, and runs build, typecheck, and test outside the repository.
 - GitHub Actions foundation verification, OpenCode review helper/security checks, and focused SonarQube workflow checks. Batched review is implemented; only an actual current batched run with complete manifest coverage for the reviewed SHA proves a review pass. The SonarQube scan is optional and configuration-gated.
 
 ### Not implemented
@@ -37,7 +39,7 @@ The foundation is a tooling-only exception to the P0 sequence. **H-009 remains o
 - Users, workspaces, Bots, conversations, messages, memory, attachments, or artifacts.
 - Model calls, provider selection, Hermes, or any agent runtime.
 - Database schema, migrations, ORM, durable queue, cache, or background jobs.
-- Release automation, application container images, Nginx, Cloudflare, backups, or production deployment.
+- Release automation, registry pushes, Compose deployment wiring, Nginx, Cloudflare, backups, or production deployment.
 - Bun launch paths or Bun benchmarks. Node.js is the baseline.
 
 The PostgreSQL service is tooling-only. The API and worker do not connect to it yet.
@@ -74,6 +76,20 @@ Run the API or web production entrypoints after a build:
 ```bash
 pnpm --filter @habi/backend start
 pnpm --filter @habi/web start
+```
+
+Build and run the container images (repository root context):
+
+```bash
+docker build -f apps/web/Dockerfile -t habi-web .
+docker build -f apps/backend/Dockerfile --target api -t habi-api .
+docker build -f apps/backend/Dockerfile --target worker -t habi-worker .
+```
+
+Verify a cold clean install from the committed tree:
+
+```bash
+node scripts/ci/clean-install.mjs
 ```
 
 Run the headless worker after building the backend:
