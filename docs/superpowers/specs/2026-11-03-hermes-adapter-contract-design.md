@@ -178,4 +178,66 @@ Rows 1, 2, 4, 8, 9, 11 have observations; rows 3 and 7 are partial; rows 5, 6, a
 | 10 | Is retry ever safe? | Pre-dispatch vs post-dispatch fault injection with dispatch state recorded |
 | 11 | What are the real idempotency and per-route details? | **Partially observed:** `Idempotency-Key` request header, `Idempotency-Replayed` response header, durable replay across restart; TTL/eviction, fingerprint-mismatch, and cross-scope behaviour remain untested |
 
-Acceptance-criterion mapping, all unmet: lifecycle evidence → rows 1–11; duplicate create → 2 and 11; cancellation terminal after reconnect → 4; restart transcript → 7; steering cannot expand permissions → 6 and 11; usage attributable to user, conversation, and run → 9; replaceable boundary → this document plus a direct-call sketch; explicit gaps → this section. Sequence diagrams, redacted event captures, restart and cancellation evidence, and the "Hermes remains the P1 path" decision note are also outstanding.
+Acceptance mapping: create and idempotent replay → rows 2 and 11 (observed); ordered events and terminal event → row 3 (partial); cancellation terminal after restart → row 4 (observed); restart behaviour → row 7 (terminal survives, in-flight lost); failure surfacing → row 8 (observed for 401); usage fields → row 9 (partial); replaceable boundary → this document plus the [harness-path decision](../research/2026-11-03-h004-harness-path-decision.md); explicit gaps → this section; sequence diagrams → §12.
+
+Still unmet: steering permission-expansion test (row 6), retry safety under injected faults (row 10), and usage attribution inside Habi, which needs product code that does not exist.
+
+## 12. Sequence diagrams
+
+Create, stream, and terminal completion:
+
+```mermaid
+sequenceDiagram
+    participant C as Habi API
+    participant A as Adapter
+    participant H as Hermes API server
+    C->>A: createRun(runId, idempotencyKey, ownerUserId, [] tools)
+    A->>H: POST /v1/runs (Idempotency-Key)
+    H-->>A: 202 {run_id, status: started}
+    A-->>C: CreateRunResult{dispatchState: dispatched}
+    C->>A: subscribe(runId, afterSeq=0)
+    A->>H: GET /v1/runs/{id}/events
+    H-->>A: message.delta seq 0
+    H-->>A: reasoning.available seq 1
+    H-->>A: run.completed seq 2 + usage
+    A-->>C: RunEvent(seq 0..2)
+    C->>A: getUsage(runId)
+    A-->>C: known input/output/total (+cached counters)
+```
+
+Cancel while running, then observe after restart:
+
+```mermaid
+sequenceDiagram
+    participant C as Habi API
+    participant A as Adapter
+    participant H as Hermes API server
+    C->>A: cancel(runId, reason: user)
+    A->>H: POST /v1/runs/{id}/stop
+    H-->>A: 200 {status: stopping}
+    A-->>C: CancelResult{status: cancelling}
+    A->>H: GET /v1/runs/{id}
+    H-->>A: {status: cancelled, usage: null}
+    A-->>C: terminal cancelled, usage unknown
+    Note over C,H: restart the harness
+    C->>A: recoverAfterRestart([runId])
+    A->>H: GET /v1/runs/{id}
+    H-->>A: 200 cancelled (terminal survives)
+```
+
+In-flight loss, the case Habi must never auto-retry:
+
+```mermaid
+sequenceDiagram
+    participant C as Habi API
+    participant A as Adapter
+    participant H as Hermes API server
+    C->>A: createRun(runId)
+    A->>H: POST /v1/runs
+    H-->>A: 202 running
+    Note over H: process killed (SIGKILL)
+    C->>A: recoverAfterRestart([runId])
+    A->>H: GET /v1/runs/{id}
+    H-->>A: 404 run_not_found
+    A-->>C: lost + dispatchState unknown -> terminal failed/execution_uncertain, no retry
+```
