@@ -1,10 +1,10 @@
 # Provider Access and Daily Allowance — Design (proposed H-001 amendment)
 
-- **Status:** Documentation-only proposal recording owner-approved direction and accounting defaults from 2026-10-28. Additional implementation safeguards and amendment wording in this document are proposed, not individually approved. This file is published as a **proposal**; publication does not amend the published H-001 baseline, and it does not authorize implementation, deployment, paid access, or vendor contact. H-003 and H-004 remain open, and #21 remains open. **P0 has not passed.**
+- **Status:** Amendment A1 **accepted by the owner on 2026-11-03** at planning fidelity, alongside acceptance of the single-user CommandCode scope. The remaining implementation safeguards stay proposed, not approved. Acceptance does **not** grant multi-user use: the shared key remains owner-only until CommandCode provides written permission, and it does not authorize implementation, deployment, paid access, or vendor contact. **P0 has not passed.**
 - **Date:** 2026-10-28 (actual date; all day-boundary statements use Asia/Manila).
 - **Phase:** P0 — Feasibility. Constrains H-001, H-003, H-004, H-008, and issues #16, #17, #21, #22.
 - **Scope:** Planning only. Describes a proposed platform-funded default CommandCode path, an optional per-user BYO path, and a daily token allowance that applies **only** to a shared key used by anyone other than the owner. No product capability, authentication, chat, provider call, or persistence exists today.
-- **Supersedes:** nothing. **Proposes** an amendment to the accepted [H-001 boundary](./2026-10-21-poc-boundary-and-journeys-design.md); until that amendment is formally accepted and recorded, the existing H-001 text remains authoritative and this document is a proposal plus a record of owner intent.
+- **Supersedes:** the earlier "proposal only" state. **Amends** the accepted [H-001 boundary](./2026-10-21-poc-boundary-and-journeys-design.md) via amendment A1 below, accepted by the owner on 2026-11-03. The no-sharing, no-resale, and no-silent-paid-fallback rules remain in force.
 - **Authority:** owner instructions in the 2026-10-28 session; the accepted [H-001 boundary](./2026-10-21-poc-boundary-and-journeys-design.md); the owner-approved [H-002 object model](./2026-10-22-object-and-context-model-design.md) (local revision); the owner-accepted [H-008 auth design](./2026-10-23-auth-architecture-and-sso-design.md) (local revision); and the CommandCode evidence in §14.
 
 ## 1. Current state and non-claims
@@ -29,7 +29,7 @@ Nothing here claims a working allowance, an enforced cap, a provider connection,
 
 These are recorded owner decisions. They are planning intent, not runtime behavior.
 
-## 3. Proposed H-001 amendment — pending formal acceptance
+## 3. H-001 amendment A1 — accepted 2026-11-03
 
 H-001 currently says, in the owner-requested BYO goal addition ([H-001 note:67-71](./2026-10-21-poc-boundary-and-journeys-design.md)):
 
@@ -37,7 +37,9 @@ H-001 currently says, in the owner-requested BYO goal addition ([H-001 note:67-7
 
 H-001 forbids sharing credentials or allowances across users and forbids **silent fallback** to paid/platform-funded access; it does not categorically forbid every explicitly chosen platform-funded service. A shared key for multiple users conflicts with its no-sharing boundary. This design does **not** reinterpret that clause away. It proposes the following amendment, to be accepted or rejected explicitly:
 
-> **Proposed amendment A1 (not yet accepted).** Habi may operate a **platform-funded CommandCode default key** for a **single-user owner POC**. Before the shared key serves any other person, it must be gated by a per-user daily token allowance, atomic pre-dispatch reservation, fail-closed unknown-usage handling, and written CommandCode authorization for multi-user use under an appropriate plan or agreement. BYO connections remain owner-isolated. Automatic paid fallback, pooled subscriptions, and resale of access remain prohibited.
+> **Amendment A1 (accepted by the owner 2026-11-03).** Habi may operate a **platform-funded CommandCode default key** for a **single-user owner POC**. Before the shared key serves any other person, it must be gated by a per-user daily token allowance, atomic pre-dispatch reservation, fail-closed unknown-usage handling, and written CommandCode authorization for multi-user use under an appropriate plan or agreement. BYO connections remain owner-isolated. Automatic paid fallback, pooled subscriptions, and resale of access remain prohibited.
+>
+> **Acceptance is conditional and does not enable multi-user use.** As of 2026-11-03 no written CommandCode permission exists, so the shared key stays owner-only and the allowance mechanics remain unimplemented requirements.
 
 Until A1 is accepted and recorded by the owner (and, where applicable, on the issue), the published H-001 baseline governs. If A1 is rejected, the shared-key default path must not proceed beyond the owner-only POC.
 
@@ -208,7 +210,7 @@ When committed usage plus reservations reaches the allowance, further shared-key
 
 | # | Issue | Owner |
 |---|---|---|
-| 1 | Formal acceptance or rejection of amendment A1 and its recording on H-001 | Owner |
+| 1 | ~~Formal acceptance or rejection of amendment A1 and its recording on H-001~~ — **accepted 2026-11-03**; implementation and multi-user permission remain open | Owner |
 | 2 | Written CommandCode authorization for any multi-user shared-key use, with plan/agreement identity | Owner / H-003 |
 | 3 | Written position on hosted per-user BYO | Owner / H-003 |
 | 4 | Per-request input/output cap, concurrency cap, minimum reservation, and admission policy | #22 with H-004 |
@@ -253,6 +255,7 @@ Supporting observations: [CommandCode per-user BYO assessment](../research/2026-
 ## 15. Acceptance status
 
 - **Approved direction (2026-10-28):** platform-funded default plus optional BYO; no token limit while only the owner uses it; 100,000 input-plus-output tokens per user per day before others gain access; reset at 00:00 Asia/Manila; stop at the limit and offer BYO; and block shared-key requests on unknown usage until reconciled. Multi-user use requires written CommandCode permission. These are planning decisions, not implementation approval.
+- **Amendment A1 accepted (2026-11-03):** the owner accepted amendment A1 at planning fidelity together with the [single-user CommandCode scope](../research/2026-11-03-h003-commandcode-scope-acceptance.md). Multi-user use remains disabled; no written CommandCode permission exists.
 - **Proposed safeguards:** identity and secret boundaries, reservation mechanics, detailed token-field mappings, partial-usage handling and the exact amendment text require further review; they were not individually approved merely by approving the direction above.
 - **Not approved:** any numeric request cap, schema, cipher, column, API shape, UI copy, implementation, deployment, paid access, vendor contact, or specific enforcement mechanism. Open items in §12 remain open.
 - **Not established:** CommandCode multi-user permission, CommandCode provider acceptance under H-003, H-004 compatibility, runtime security, or any P0 gate.

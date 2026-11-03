@@ -196,7 +196,7 @@ Habi, rather than Hermes, is intended to own identities, authorization, conversa
 
 - **Hermes** is the preferred harness in the plan, behind a replaceable adapter.
 - Direct model calls are an evaluated fallback option, not a silent default.
-- Initial model access remains **H-003 research**: the owner chose a personal CommandCode key for a single-user POC assumption, with OpenCode and ChatGPT also intended for evaluation. Cloudflare is parked; free OpenCode chat models are not supported in Hermes. No provider is accepted for Habi. H-003 must still resolve limits, data handling, quota behavior, and the applicable Hermes integration and permissions.
+- Initial model access is **H-003, accepted 2026-11-03 for a single-user POC only**: the owner's personal CommandCode key, with OpenCode and ChatGPT still candidates for later evaluation. Cloudflare is parked; free OpenCode chat models are not supported in Hermes. No provider is accepted for multi-user use, and exhaustion, billing, and privacy behavior remain residual risks.
 - Automatic paid fallback must remain off, and no platform-funded or pooled paid access may be introduced. A paid subscription or key is not assumed suitable for a multi-user general assistant.
 - No model key or provider credential may be placed in the repository, frontend, ordinary chat, or task logs.
 
@@ -282,17 +282,18 @@ Status meanings:
 - **Blocked** — Work cannot proceed. Record the blocker and what would unblock it.
 - **Done** — Acceptance criteria and the risk-based done rule are met with evidence. Code alone is not Done.
 
-No issue is currently **Ready** (board state checked 2026-11-03):
+Board state after the 2026-11-03 acceptances:
 
-- **H-001, H-002, H-008 — Done.** Planning accepted and recorded on their issues.
-- **H-003 — Blocked.** The original OpenCode Zen free-model objective is a recorded no-go; no replacement provider scope or exhaustion evidence is accepted. Unblock requires an owner-accepted replacement scope and an authorized provider-evidence path.
-- **H-007 — Blocked.** Sustained VM measurement and the GreenCloud CPU-policy clarification are parked by the owner. Unblock requires a bounded measurement window with abort thresholds and a resolved or explicitly accepted CPU-accounting risk.
-- **H-004, H-005, H-006 — Backlog.** Hard dependencies on H-003/H-004.
+- **H-001, H-002, H-003, H-007, H-008 — Done.**
+  - H-003 was accepted as a **single-user CommandCode POC only**; exhaustion and billing behavior remain unobserved residual risks, and multi-user use stays disabled.
+  - H-007 was accepted on a **bounded read-only VM window**; one API + one worker + the web shell fit alongside current workloads with the proposed container ceilings, and Node remains the launch runtime.
+- **H-004 — Ready.** The Hermes run-lifecycle spike is unblocked by H-003; execution still needs a pinned Hermes version and authorized provider calls.
+- **H-005, H-006 — Backlog.** Both depend on H-004.
 - **H-009–H-046 — Backlog.** Each carries the P0 phase gate.
 
 Creating or moving an issue does not authorize a later phase.
 
-*H-003 scope annotation (2026-10-28): the owner chose a personal CommandCode key for a single-user POC assumption; Cloudflare is parked. The remote issue still describes the earlier OpenCode/Zen free-model scope, and H-003 remains open and unaccepted. A platform-funded default with optional BYO and a 100,000-token daily allowance is a [published proposal](docs/superpowers/specs/2026-10-28-provider-access-and-daily-allowance-design.md), not an accepted H-001 amendment; shared multi-user use still requires written CommandCode permission.*
+*H-003 scope (2026-11-03): the owner accepted a **single-user CommandCode POC** and amendment A1 to the H-001 boundary at planning fidelity; Cloudflare is parked. The shared key stays owner-only until written CommandCode permission exists, and the allowance mechanics are accepted as requirements but are not implemented. See the [scope acceptance](docs/superpowers/research/2026-11-03-h003-commandcode-scope-acceptance.md).*
 
 ## Definition of done
 
@@ -304,7 +305,7 @@ Research issues are done only when they produce a decision record, evidence, and
 
 These decisions remain open and should be settled during P0. Recommendations are from the handoff, not approved decisions.
 
-1. Provider scope and quota behavior. **Still open.** Zen free is a no-go in Hermes; a personal CommandCode single-user POC is the current assumption. The shared-key allowance design is a proposal only.
+1. Provider scope and quota behavior. **Decided 2026-11-03 for a single-user POC:** Zen free is a no-go in Hermes; a personal CommandCode key is accepted for the owner only. Multi-user shared-key use remains undecided and disabled pending written CommandCode permission.
 2. Public registration versus invite-only. **Decided by H-008 (2026-10-23):** invite-only for email/password and SSO signup; email-bound invites.
 3. File types and maximum sizes for P2. **Still open**; no P2 upload feature is planned yet.
 4. Unlimited Bots versus a capped starting count. **Still open.**
