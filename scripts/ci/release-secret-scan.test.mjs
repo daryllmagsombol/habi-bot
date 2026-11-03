@@ -142,6 +142,40 @@ test('scanText ignores test fixtures, references, and placeholders', () => {
   assert.deepEqual(scanText('src/settings.ts', 'POSTGRES_PASSWORD=replace-with-a-local-only-password\n'), []);
 });
 
+test('scanText keeps the documented credential keyword set exactly', () => {
+  const value = 'a8f5f167f44f4964e6c998dee827110c';
+  assert.deepEqual(
+    scanText('src/settings.ts', `ACCESS_TOKEN = "${value}"\nclient_secret: '${value}'\n`).map(
+      (finding) => `${finding.rule}:${finding.line}`,
+    ),
+    ['assigned-credential:1', 'assigned-credential:2'],
+  );
+  assert.deepEqual(scanText('src/settings.ts', `apiKey = "${value}"\n`), [
+    { rule: 'assigned-credential', path: 'src/settings.ts', line: 1 },
+  ]);
+  assert.deepEqual(scanText('src/settings.ts', `key = "${value}"\n`), []);
+  assert.deepEqual(scanText('src/settings.ts', `apiSecret = "${value}"\n`), []);
+});
+
+test('variable-reference detection avoids super-linear backtracking on long values', () => {
+  // The previous `^[a-z]\w*[A-Z]\w*$` needed ~19s at this length because the
+  // failing `$` forced quadratic backtracking between the two `\w*` runs.
+  const pathological = `a${'B'.repeat(200_000)}-`;
+  const startedAt = process.hrtime.bigint();
+  assert.equal(isVariableReference(pathological), false);
+  const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+  assert.ok(elapsedMs < 1_000, `isVariableReference took ${elapsedMs.toFixed(1)}ms`);
+});
+
+test('scanText stays fast on a pathological long line', () => {
+  const longValue = `a${'B'.repeat(200_000)}-`;
+  const startedAt = process.hrtime.bigint();
+  const findings = scanText('src/settings.ts', `password = "${longValue}"\n`);
+  const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+  assert.deepEqual(findings, [{ rule: 'assigned-credential', path: 'src/settings.ts', line: 1 }]);
+  assert.ok(elapsedMs < 1_000, `scanText took ${elapsedMs.toFixed(1)}ms`);
+});
+
 test('scanRepository uses git tracked files only and skips binaries', () => {
   const repo = makeRepo({
     'README.md': 'clean\n',
