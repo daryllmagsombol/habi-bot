@@ -29,6 +29,7 @@ import { requireActorUserId, requireResourceId } from '../persistence/rows.js';
 import type { RunEventStore } from './run-event-store.js';
 import type {
   RunEventEnvelope,
+  RunEventReplayPage,
   RunEventStreamItem,
 } from './types.js';
 import { isTerminalRunEventType } from './types.js';
@@ -57,6 +58,49 @@ interface QueueWaiter {
 }
 
 /**
+ * The rejection reason itself when it is an `Error`, otherwise an `Error` that
+ * keeps the original message and string `code`. A non-Error rejection would
+ * lose the stack and surprise `await` callers.
+ */
+function toError(reason: unknown): Error {
+  if (reason instanceof Error) {
+    return reason;
+  }
+
+  const source =
+    typeof reason === 'object' && reason !== null
+      ? (reason as { message?: unknown; code?: unknown })
+      : null;
+  const error = new Error(failureMessage(reason, source));
+
+  if (typeof source?.code === 'string') {
+    Object.defineProperty(error, 'code', {
+      value: source.code,
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+  }
+
+  return error;
+}
+
+function failureMessage(
+  reason: unknown,
+  source: { message?: unknown } | null,
+): string {
+  if (typeof reason === 'string') {
+    return reason;
+  }
+
+  if (typeof source?.message === 'string') {
+    return source.message;
+  }
+
+  return 'run event stream failed';
+}
+
+/**
  * One instance represents one logical consumer (for example one client
  * connection and its reconnects). Its subscriptions share the dedupe set, so a
  * reconnect suppresses events this consumer already saw even when its cursor
@@ -74,7 +118,17 @@ export class RunEventStream {
   constructor(private readonly store: RunEventStore) {}
 
   subscribe(options: RunEventSubscribeOptions): RunEventSubscription {
-    return new RunEventSubscription(this.store, this.delivered, options);
+    const subscription = new RunEventSubscription(
+      this.store,
+      this.delivered,
+      options,
+    );
+
+    // Replay starts from `start()`, never from the constructor, so creating an
+    // object cannot launch asynchronous work on the caller's behalf.
+    subscription.start();
+
+    return subscription;
   }
 
   /** Diagnostic: how many sequences this instance remembers for one Run. */
@@ -97,7 +151,8 @@ class RunEventSubscription
   private afterSeq = 0;
   private done = false;
   private closed = false;
-  private error: unknown = null;
+  private started = false;
+  private error: Error | null = null;
   private notified = false;
   private wake: (() => void) | null = null;
   private unsubscribe: (() => void) | null = null;
@@ -115,34 +170,53 @@ class RunEventSubscription
 
     // Validate a cursor synchronously so a malformed cursor fails at subscribe
     // time rather than after ownership has been resolved.
-    if (options.cursor !== undefined) {
+    if (options.cursor === undefined) {
+      this.afterSeq = normalizeAfterSeq(options.afterSeq ?? 0);
+    } else {
       if (options.afterSeq !== undefined) {
         throw new PersistenceValidationError('invalid_input');
       }
 
       const decoded = decodeRunEventCursor(options.cursor);
+
       // A cursor bound to another Run is the same not-found as a foreign Run.
       if (decoded.runId !== this.runId) {
         throw new PersistenceNotFoundError();
       }
 
       this.afterSeq = decoded.afterSeq;
-    } else {
-      this.afterSeq = normalizeAfterSeq(options.afterSeq ?? 0);
     }
 
     const existing = delivered.get(this.runId);
     this.delivered = existing ?? new Set<number>();
     delivered.set(this.runId, this.delivered);
-
-    void this.start();
   }
 
   [Symbol.asyncIterator](): AsyncIterableIterator<RunEventStreamItem> {
     return this;
   }
 
+  /**
+   * Begins replay. Idempotent, and safe before or after `close()`: a closed
+   * subscription starts nothing, so construction stays synchronous and inert.
+   */
+  start(): void {
+    if (this.started) {
+      return;
+    }
+
+    this.started = true;
+
+    if (this.closed) {
+      return;
+    }
+
+    void this.replay();
+  }
+
   next(): Promise<IteratorResult<RunEventStreamItem>> {
+    this.start();
+
     if (this.items.length > 0) {
       return Promise.resolve({
         value: this.items.shift() as RunEventStreamItem,
@@ -178,23 +252,14 @@ class RunEventSubscription
     this.finish();
   }
 
-  private async start(): Promise<void> {
-    if (this.closed) {
-      return;
-    }
-
+  /**
+   * Drives replay until the terminal event, an abort, or a close. Any failure
+   * after the stream closed is a cancel, not an error, so it is swallowed.
+   */
+  private async replay(): Promise<void> {
     try {
-      if (this.signal?.aborted === true) {
-        this.close();
+      if (!this.listenForAbort()) {
         return;
-      }
-
-      if (this.signal !== null) {
-        const onAbort = () => {
-          this.close();
-        };
-        this.abortListener = onAbort;
-        this.signal.addEventListener('abort', onAbort, { once: true });
       }
 
       const position = await this.store.loadPosition(
@@ -215,93 +280,156 @@ class RunEventSubscription
 
       // Nothing left to observe: the terminal event is already at/before the
       // reconnect cursor.
-      if (
-        position.terminalEventSeq !== null
-        && position.terminalEventSeq <= this.afterSeq
-      ) {
-        this.finish();
+      if (this.stopAtTerminal(position.terminalEventSeq)) {
         return;
       }
 
-      // Attach before the first replay read so an append between read and wait
-      // is not missed. The hub carries no data; a wake-up just re-reads.
-      this.unsubscribe = this.store.hub.subscribe(this.runId, () => {
-        this.notified = true;
-        const wake = this.wake;
-        this.wake = null;
-        wake?.();
-      });
+      this.listenForAppends();
 
-      while (!this.closed) {
-        const page = await this.store.read(this.actorUserId, this.runId, {
-          afterSeq: this.afterSeq,
-          limit: this.limit,
-        });
-
-        if (this.closed) {
-          return;
-        }
-
-        if (page.events.length === 0 && page.lastEventSeq > this.afterSeq) {
-          // The allocator advanced but no row is readable for the requested
-          // range: retention removed it or the row set is inconsistent. Mark
-          // the hole and advance rather than spin forever.
-          this.pushGap(this.afterSeq + 1, page.lastEventSeq);
-          this.afterSeq = page.lastEventSeq;
-        }
-
-        for (const event of page.events) {
-          if (event.seq <= this.afterSeq) {
-            continue;
-          }
-
-          if (event.seq > this.afterSeq + 1) {
-            this.pushGap(this.afterSeq + 1, event.seq - 1);
-          }
-
-          this.afterSeq = event.seq;
-
-          if (this.remember(event)) {
-            this.push({ kind: 'event', event });
-          }
-
-          if (isTerminalRunEventType(event.type)) {
-            this.stopListening();
-            this.finish();
-            return;
-          }
-        }
-
-        if (page.hasMore) {
-          continue;
-        }
-
-        if (
-          page.terminalEventSeq !== null
-          && page.terminalEventSeq <= this.afterSeq
-        ) {
-          // The terminal event was deduped after reconnect.
-          this.stopListening();
-          this.finish();
-          return;
-        }
-
-        if (this.notified) {
-          this.notified = false;
-          continue;
-        }
-
-        await this.waitForNotification();
-
-        if (this.closed) {
-          return;
-        }
-      }
+      await this.replayUntilSettled();
     } catch (error) {
       if (!this.closed) {
         this.fail(error);
       }
     }
+  }
+
+  /** Replays pages until the terminal event, no `hasMore`, an abort, or error. */
+  private async replayUntilSettled(): Promise<void> {
+    while (!this.closed) {
+      const page = await this.store.read(this.actorUserId, this.runId, {
+        afterSeq: this.afterSeq,
+        limit: this.limit,
+      });
+
+      if (this.closed) {
+        return;
+      }
+
+      if (this.deliverPage(page)) {
+        return;
+      }
+
+      if (page.hasMore) {
+        continue;
+      }
+
+      if (this.stopAtTerminal(page.terminalEventSeq)) {
+        // The terminal event was deduped after reconnect.
+        return;
+      }
+
+      if (!(await this.waitForProgress())) {
+        return;
+      }
+    }
+  }
+
+  /**
+   * Delivers one page in `seq` order and reports whether a terminal event ended
+   * the stream. A gap is emitted before the event that follows it.
+   */
+  private deliverPage(page: RunEventReplayPage): boolean {
+    if (page.events.length === 0 && page.lastEventSeq > this.afterSeq) {
+      // The allocator advanced but no row is readable for the requested range:
+      // retention removed it or the row set is inconsistent. Mark the hole and
+      // advance rather than spin forever.
+      this.reportHole(this.afterSeq + 1, page.lastEventSeq);
+      this.afterSeq = page.lastEventSeq;
+    }
+
+    for (const event of page.events) {
+      if (event.seq <= this.afterSeq) {
+        continue;
+      }
+
+      this.reportHole(this.afterSeq + 1, event.seq - 1);
+
+      this.afterSeq = event.seq;
+
+      if (this.remember(event)) {
+        this.push({ kind: 'event', event });
+      }
+
+      if (isTerminalRunEventType(event.type)) {
+        this.end();
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * Waits for the next hub wake-up; false when the stream closed meanwhile. A
+   * notification published before the wait is consumed without blocking.
+   */
+  private async waitForProgress(): Promise<boolean> {
+    if (this.notified) {
+      this.notified = false;
+      return true;
+    }
+
+    await this.waitForNotification();
+
+    return !this.closed;
+  }
+
+  /** Attaches the abort listener; false when the signal already aborted. */
+  private listenForAbort(): boolean {
+    if (this.signal?.aborted === true) {
+      this.close();
+      return false;
+    }
+
+    if (this.signal !== null) {
+      const onAbort = () => {
+        this.close();
+      };
+      this.abortListener = onAbort;
+      this.signal.addEventListener('abort', onAbort, { once: true });
+    }
+
+    return true;
+  }
+
+  /**
+   * Attaches before the first replay read so an append between read and wait is
+   * not missed. The hub carries no data; a wake-up just re-reads.
+   */
+  private listenForAppends(): void {
+    this.unsubscribe = this.store.hub.subscribe(this.runId, () => {
+      this.notified = true;
+      const wake = this.wake;
+      this.wake = null;
+      wake?.();
+    });
+  }
+
+  /**
+   * Ends the stream when the terminal event is at or before the cursor; false
+   * when more events are still observable.
+   */
+  private stopAtTerminal(terminalEventSeq: number | null): boolean {
+    if (terminalEventSeq === null || terminalEventSeq > this.afterSeq) {
+      return false;
+    }
+
+    this.end();
+    return true;
+  }
+
+  /** Emits an explicit gap for a missing range; nothing when it is contiguous. */
+  private reportHole(fromSeq: number, toSeq: number): void {
+    if (fromSeq <= toSeq) {
+      this.pushGap(fromSeq, toSeq);
+    }
+  }
+
+  /** Stops listening and completes the iterator without an error. */
+  private end(): void {
+    this.stopListening();
+    this.finish();
   }
 
   private pushGap(fromSeq: number, toSeq: number): void {
@@ -358,10 +486,12 @@ class RunEventSubscription
     this.flushWaiters();
   }
 
-  private fail(error: unknown): void {
+  private fail(reason: unknown): void {
     if (this.done) {
       return;
     }
+
+    const error = toError(reason);
 
     this.error = error;
     this.done = true;
@@ -386,4 +516,3 @@ class RunEventSubscription
     }
   }
 }
-

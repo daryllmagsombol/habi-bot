@@ -54,7 +54,7 @@ export class RunEventHub {
       return;
     }
 
-    for (const listener of [...listeners]) {
+    for (const listener of listeners) {
       try {
         listener();
       } catch {
