@@ -14,9 +14,11 @@
     "lint": "turbo run lint",
     "test": "turbo run test",
     "test:verification": "node --test scripts/verify-foundation.test.mjs",
-    "verify:foundation": "node scripts/verify-foundation.mjs"
+    "verify:foundation": "node scripts/verify-foundation.mjs",
+    "coverage": "c8 --all --src apps/backend/src --src apps/web/app --src packages/config/src --src packages/contracts/src --reporter=lcov --reporter=text-summary pnpm -r run test"
   },
   "devDependencies": {
+    "c8": "12.0.0",
     "turbo": "2.11.9"
   }
 }

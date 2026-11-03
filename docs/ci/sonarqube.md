@@ -81,11 +81,11 @@ A failing or timed-out quality gate fails the analysis job. Missing configuratio
 
 ### Project gate (2026-11-03)
 
-The `habi-bot` project uses a project-specific gate named **Habi**, copied from Sonar way with the `new_coverage` condition removed. The built-in gate demanded 80% new-code coverage, but this repository has no LCOV property and no coverage mandate (see [Sonar engineering guidance](../SONAR_GUIDELINES.md)); that server condition contradicted repository policy rather than exposing a code defect.
+The `habi-bot` project uses a project-specific gate named **Habi**, copied from Sonar way. Coverage is measured and reported (see below) but the gate still has no coverage threshold: the built-in 80% new-code rule was removed because it was a server default, not a repository mandate. Adding a threshold is a deliberate owner decision, not a side effect of enabling reporting.
 
 Remaining conditions: `new_violations > 0`, `new_duplicated_lines_density > 3%`, `new_security_hotspots_reviewed < 100%`. This is server configuration, not repository policy, and it is not a quality-gate pass claim. Code findings are still fixed; no rule is disabled and no file is excluded to satisfy the gate.
 
-There is **no LCOV or coverage report property**. The repository's smoke tests are not source-mapped coverage and must not be presented as such. Do not claim a coverage or quality-gate pass from this lane. If coverage becomes a requirement, generate a real source-mapped report in a separate trusted job and wire it explicitly; do not fabricate a report or add a placeholder LCOV path.
+Coverage is **real and source-mapped**. `pnpm coverage` runs the workspace tests under `c8` with `--all`, writes `coverage/lcov.info`, and the scan consumes it through `sonar.javascript.lcov.reportPaths`. The SonarQube workflow installs, builds, and runs that command before scanning, so the reported number comes from executed tests over actual source paths. Do not fabricate a report, hand-write LCOV, or add a placeholder path; if a suite cannot be measured, report it as unmeasured rather than zero.
 
 ## Branch and pull-request detection
 

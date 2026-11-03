@@ -259,7 +259,7 @@ test('workflow pins actions and keeps read-only security settings', () => {
   assert.equal(
     (workflow.match(/steps\.preflight\.outputs\.configured == 'true'/g) ?? [])
       .length,
-    3,
+    5,
   );
   assert.ok(
     workflow.indexOf('Preflight SonarQube configuration') <
@@ -275,10 +275,12 @@ test('workflow pins actions and keeps read-only security settings', () => {
   assert.doesNotMatch(workflow, /id-token/);
   assert.doesNotMatch(workflow, /contents:\s*write/);
   assert.doesNotMatch(workflow, /self-hosted/);
-  assert.doesNotMatch(workflow, /pnpm install|npm install|yarn install|corepack/);
+  assert.match(workflow, /pnpm install --frozen-lockfile/);
+  assert.match(workflow, /pnpm coverage/);
+  assert.doesNotMatch(workflow, /\bnpm install|\byarn install/);
 });
 
-test('project properties keep scope narrow and avoid fake coverage', () => {
+test('project properties keep scope narrow and consume real coverage', () => {
   for (const source of [
     'apps/web/app',
     'apps/backend/src',
@@ -313,7 +315,7 @@ test('project properties keep scope narrow and avoid fake coverage', () => {
   }
 
   assert.doesNotMatch(properties, /sonar\.projectKey/);
-  assert.doesNotMatch(properties, /lcov/i);
+  assert.match(properties, /sonar\.javascript\.lcov\.reportPaths=coverage\/lcov\.info/);
   assert.doesNotMatch(properties, /sonar\.branch\.name|sonar\.pullrequest/);
   assert.doesNotMatch(
     `${workflow}\n${properties}\n${docs}`,
