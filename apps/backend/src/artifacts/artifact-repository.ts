@@ -270,16 +270,21 @@ async function assertCreateScope(
   }
 }
 
+/** The immutable columns of one appended version row. */
+interface NewVersionFields {
+  artifactId: string;
+  ownerUserId: string;
+  version: number;
+  content: string;
+  contentSha256: string;
+  byteSize: number;
+  createdBy: string;
+}
+
 /** Appends exactly one version row and returns what was recorded. */
 async function insertVersion(
   client: Queryable,
-  artifactId: string,
-  ownerUserId: string,
-  version: number,
-  content: string,
-  contentSha256: string,
-  byteSize: number,
-  createdBy: string,
+  fields: NewVersionFields,
 ): Promise<ArtifactVersionRow> {
   return requireRow(
     await client.query<ArtifactVersionRow>(
@@ -290,13 +295,13 @@ async function insertVersion(
        VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING ${VERSION_RETURNING}`,
       [
-        artifactId,
-        ownerUserId,
-        version,
-        content,
-        contentSha256,
-        byteSize,
-        createdBy,
+        fields.artifactId,
+        fields.ownerUserId,
+        fields.version,
+        fields.content,
+        fields.contentSha256,
+        fields.byteSize,
+        fields.createdBy,
       ],
     ),
   );
@@ -342,16 +347,15 @@ export class ArtifactRepository {
         ),
       );
 
-      const version = await insertVersion(
-        client,
+      const version = await insertVersion(client, {
         artifactId,
         ownerUserId,
-        1,
-        record.content,
+        version: 1,
+        content: record.content,
         contentSha256,
         byteSize,
-        ownerUserId,
-      );
+        createdBy: ownerUserId,
+      });
 
       return { artifact: toArtifact(artifact), version: toVersion(version) };
     });
@@ -383,16 +387,15 @@ export class ArtifactRepository {
       const nextStatus =
         record.status ?? toWritableStatus(current.status);
 
-      const version = await insertVersion(
-        client,
-        id,
+      const version = await insertVersion(client, {
+        artifactId: id,
         ownerUserId,
-        nextVersion,
-        record.content,
+        version: nextVersion,
+        content: record.content,
         contentSha256,
         byteSize,
-        ownerUserId,
-      );
+        createdBy: ownerUserId,
+      });
 
       const updated = requireRow(
         await client.query<ArtifactRow>(
@@ -489,7 +492,7 @@ export class ArtifactRepository {
 
     const hasMore = result.rows.length > options.limit;
     const rows = hasMore ? result.rows.slice(0, options.limit) : result.rows;
-    const last = rows[rows.length - 1];
+    const last = rows.at(-1);
 
     return {
       artifacts: rows.map(toArtifact),
@@ -539,7 +542,7 @@ export class ArtifactRepository {
 
     const hasMore = result.rows.length > options.limit;
     const rows = hasMore ? result.rows.slice(0, options.limit) : result.rows;
-    const last = rows[rows.length - 1];
+    const last = rows.at(-1);
 
     return {
       versions: rows.map(toVersionMetadata),
@@ -620,16 +623,15 @@ export class ArtifactRepository {
       );
       const nextVersion = this.nextVersion(current.current_version);
 
-      const copy = await insertVersion(
-        client,
-        id,
+      const copy = await insertVersion(client, {
+        artifactId: id,
         ownerUserId,
-        nextVersion,
-        source.content,
-        source.content_sha256,
-        source.byte_size,
-        ownerUserId,
-      );
+        version: nextVersion,
+        content: source.content,
+        contentSha256: source.content_sha256,
+        byteSize: source.byte_size,
+        createdBy: ownerUserId,
+      });
 
       const updated = requireRow(
         await client.query<ArtifactRow>(
