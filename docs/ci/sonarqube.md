@@ -9,7 +9,7 @@ This lane adds an optional, self-hosted SonarQube analysis workflow. It is **not
 - Analyzer-only TypeScript config: [`tsconfig.sonar.json`](../../tsconfig.sonar.json)
 - Focused checks: [`scripts/ci/sonarqube.test.mjs`](../../scripts/ci/sonarqube.test.mjs)
 
-The workflow analyzes the current repository as a static source tree. It does not install dependencies, run package lifecycle scripts, start the application, or deploy anything.
+The workflow installs dependencies, builds, and runs the workspace tests under c8 to produce a real coverage report before scanning. Those steps run without `SONAR_TOKEN`; the token appears only in the preflight and scan steps. It does not start the application for traffic, publish images, or deploy anything.
 
 ## Requirements
 
@@ -54,7 +54,7 @@ The preflight step runs before checkout. When `SONAR_HOST_URL`, `SONAR_PROJECT_K
 
 - Workflow permissions are `contents: read` only. No `id-token`, write permissions, or metadata writes.
 - `actions/checkout` uses `persist-credentials: false` and `fetch-depth: 0`.
-- No `pnpm install`, `npm install`, build, test, or package lifecycle step runs with `SONAR_TOKEN`.
+- `pnpm install`, build, and coverage steps run before the scan and never receive `SONAR_TOKEN`; the token is present only in the preflight and scan steps.
 - The token is not a job-level environment variable. It is present only in the preflight step and the scan step.
 - The workflow does not execute pull-request code as a shell script. The Sonar scanner analyzes the checked-out source statically.
 - The workflow has a 20-minute timeout and a concurrency group; PR runs cancel superseded PR runs.
@@ -81,11 +81,11 @@ A failing or timed-out quality gate fails the analysis job. Missing configuratio
 
 ### Project gate (2026-11-03)
 
-The `habi-bot` project uses a project-specific gate named **Habi**, copied from Sonar way with the `new_coverage` condition removed. The built-in gate demanded 80% new-code coverage, but this repository has no LCOV property and no coverage mandate (see [Sonar engineering guidance](../SONAR_GUIDELINES.md)); that server condition contradicted repository policy rather than exposing a code defect.
+The `habi-bot` project uses a project-specific gate named **Habi**, copied from Sonar way. Coverage is measured and reported (see below) but the gate still has no coverage threshold: the built-in 80% new-code rule was removed because it was a server default, not a repository mandate. Adding a threshold is a deliberate owner decision, not a side effect of enabling reporting.
 
 Remaining conditions: `new_violations > 0`, `new_duplicated_lines_density > 3%`, `new_security_hotspots_reviewed < 100%`. This is server configuration, not repository policy, and it is not a quality-gate pass claim. Code findings are still fixed; no rule is disabled and no file is excluded to satisfy the gate.
 
-There is **no LCOV or coverage report property**. The repository's smoke tests are not source-mapped coverage and must not be presented as such. Do not claim a coverage or quality-gate pass from this lane. If coverage becomes a requirement, generate a real source-mapped report in a separate trusted job and wire it explicitly; do not fabricate a report or add a placeholder LCOV path.
+Coverage is **real and source-mapped**. `pnpm coverage` runs the workspace tests under `c8` with `--all`, writes `coverage/lcov.info`, and the scan consumes it through `sonar.javascript.lcov.reportPaths`. The SonarQube workflow installs, builds, and runs that command before scanning, so the reported number comes from executed tests over actual source paths. Do not fabricate a report, hand-write LCOV, or add a placeholder path; if a suite cannot be measured, report it as unmeasured rather than zero.
 
 ## Branch and pull-request detection
 

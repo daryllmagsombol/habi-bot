@@ -10,13 +10,13 @@ Inspiration: [TransformLit AGENTS.md](https://github.com/daryllmagsombol/transfo
 
 - The SonarQube lane is optional and self-hosted. No live analysis pass is known, and this repository does not assert that a server project exists.
 - Missing `SONAR_HOST_URL`, `SONAR_PROJECT_KEY`, or `SONAR_TOKEN` skips the scan with a notice. A configured scan can pass or fail; an outage or quality-gate failure is not converted into a skip.
-- There is no LCOV property. Foundation smoke tests are not source-mapped coverage and must not be presented as coverage.
+- Coverage is real: `pnpm coverage` runs the tests under c8 and writes a source-mapped `coverage/lcov.info`, consumed by `sonar.javascript.lcov.reportPaths`. Foundation smoke tests are not coverage by themselves; the c8 run over the workspace suites is.
 - Do not copy arbitrary numeric thresholds from another product. If a server quality gate has thresholds, they are server configuration, not repository policy.
 - The findings log starts empty. A hypothesis, AI suggestion, or unreproduced report is not a recorded finding.
 
 ## What this file does not enforce
 
-- No mandatory 80% new-code coverage, 3% duplication, 100% hotspot, or arbitrary score threshold. Those are not Habi mandates, and no such server result is known.
+- No mandatory numeric coverage threshold, 3% duplication, 100% hotspot, or arbitrary score. Coverage is reported from executed tests; the gate threshold, if any, is an explicit owner decision rather than a copied default.
 - No blanket rule to rewrite every reported issue, and no quality-gate exclusion used merely to make a build pass.
 - No Prisma, GraphQL, Apollo, PWA, Oracle deployment, Jest-only, admin-panel, Bible-content, offline-first, or similar source-specific rules.
 - No mechanical formatting or naming mandate where the repository has no configured formatter or lint rule. Prefer the existing tools.
