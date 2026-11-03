@@ -9,7 +9,7 @@ This lane adds an optional, self-hosted SonarQube analysis workflow. It is **not
 - Analyzer-only TypeScript config: [`tsconfig.sonar.json`](../../tsconfig.sonar.json)
 - Focused checks: [`scripts/ci/sonarqube.test.mjs`](../../scripts/ci/sonarqube.test.mjs)
 
-The workflow analyzes the current repository as a static source tree. It does not install dependencies, run package lifecycle scripts, start the application, or deploy anything.
+The workflow installs dependencies, builds, and runs the workspace tests under c8 to produce a real coverage report before scanning. Those steps run without `SONAR_TOKEN`; the token appears only in the preflight and scan steps. It does not start the application for traffic, publish images, or deploy anything.
 
 ## Requirements
 
@@ -54,7 +54,7 @@ The preflight step runs before checkout. When `SONAR_HOST_URL`, `SONAR_PROJECT_K
 
 - Workflow permissions are `contents: read` only. No `id-token`, write permissions, or metadata writes.
 - `actions/checkout` uses `persist-credentials: false` and `fetch-depth: 0`.
-- No `pnpm install`, `npm install`, build, test, or package lifecycle step runs with `SONAR_TOKEN`.
+- `pnpm install`, build, and coverage steps run before the scan and never receive `SONAR_TOKEN`; the token is present only in the preflight and scan steps.
 - The token is not a job-level environment variable. It is present only in the preflight step and the scan step.
 - The workflow does not execute pull-request code as a shell script. The Sonar scanner analyzes the checked-out source statically.
 - The workflow has a 20-minute timeout and a concurrency group; PR runs cancel superseded PR runs.

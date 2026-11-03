@@ -382,6 +382,7 @@ test('docs describe required configuration and limitations', () => {
   }
 
   assert.match(docs, /Do not set `sonar\.branch\.name`/);
-  assert.match(docs, /No .*LCOV|no LCOV/i);
-  assert.match(docs, /does not install dependencies/i);
+  assert.match(docs, /pnpm coverage/);
+  assert.match(docs, /sonar\.javascript\.lcov\.reportPaths/);
+  assert.match(docs, /pnpm install, build, and coverage steps run before the scan/i);
 });
