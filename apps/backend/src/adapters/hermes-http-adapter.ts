@@ -77,6 +77,12 @@ export interface HermesHttpAdapterConfig {
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 const DEFAULT_EVENT_IDLE_TIMEOUT_MS = 30_000;
 
+/** `/` as a UTF-16 code unit, used by the linear normalizers below. */
+const SLASH_CODE_UNIT = 0x2f;
+
+const SSE_EVENT_PREFIX = 'event:';
+const SSE_DATA_PREFIX = 'data:';
+
 const PRE_WRITE_ERROR_CODES: ReadonlySet<string> = new Set([
   'ECONNREFUSED',
   'ENOTFOUND',
@@ -115,6 +121,12 @@ interface ParsedEvent {
   readonly event: RunEvent;
 }
 
+/** One complete server-sent-events frame: the text between blank lines. */
+interface SseFrame {
+  readonly eventName: string | undefined;
+  readonly dataLines: readonly string[];
+}
+
 interface BuiltRequest {
   readonly method: 'GET' | 'POST';
   readonly path: string;
@@ -143,7 +155,7 @@ export class HermesHttpAdapter implements HarnessAdapter {
   private closed = false;
 
   constructor(config: HermesHttpAdapterConfig) {
-    const baseUrl = config.baseUrl.trim().replace(/\/+$/, '');
+    const baseUrl = stripTrailingSlashes(config.baseUrl.trim());
 
     if (!/^https?:\/\/[^/]+/i.test(baseUrl)) {
       throw new HarnessAdapterError('invalid_request', 'not_dispatched', {
@@ -344,65 +356,10 @@ export class HermesHttpAdapter implements HarnessAdapter {
     this.assertOpen();
     const outcomes: RecoveryOutcome[] = [];
 
+    // Sequential on purpose: each run reconciles in the caller's order, and an
+    // auth rejection aborts the whole report rather than only its own run.
     for (const runId of input.runIds) {
-      const mapping = this.mappings.get(runId);
-
-      if (mapping === undefined || mapping.harnessRunId === null) {
-        outcomes.push(
-          lostOutcome(runId, mapping?.dispatchState ?? 'unknown'),
-        );
-        continue;
-      }
-
-      try {
-        const { body } = await this.fetchRunBody(runId);
-        const harnessStatus = this.resolveHarnessStatus(body);
-
-        if (harnessStatus === null) {
-          outcomes.push(lostOutcome(runId, 'unknown'));
-          continue;
-        }
-
-        if (harnessStatus === 'waiting_for_approval') {
-          const snapshot = this.snapshotFor(mapping, body, harnessStatus);
-          this.recordStatus(mapping, 'failed');
-          outcomes.push(confirmedTerminalOutcome(runId, snapshot));
-          continue;
-        }
-
-        const classification = classifyHarnessStatus(harnessStatus);
-
-        if (classification === 'confirmed_terminal') {
-          const snapshot = this.snapshotFor(mapping, body, harnessStatus);
-          this.recordStatus(mapping, harnessStatus);
-          outcomes.push(confirmedTerminalOutcome(runId, snapshot));
-          continue;
-        }
-
-        if (classification === 'still_running') {
-          const snapshot = this.snapshotFor(mapping, body, harnessStatus);
-          this.recordStatus(mapping, harnessStatus);
-          outcomes.push(
-            stillRunningOutcome(runId, snapshot, mapping.lastSeq),
-          );
-          continue;
-        }
-
-        outcomes.push(lostOutcome(runId, 'unknown'));
-      } catch (error) {
-        if (error instanceof HarnessAdapterError) {
-          if (error.code === 'auth_rejected') {
-            throw error;
-          }
-
-          if (error.httpStatus === 404) {
-            outcomes.push(lostOutcome(runId, mapping.dispatchState));
-            continue;
-          }
-        }
-
-        outcomes.push(lostOutcome(runId, 'unknown'));
-      }
+      outcomes.push(await this.recoverRun(runId));
     }
 
     return {
@@ -419,6 +376,74 @@ export class HermesHttpAdapter implements HarnessAdapter {
     }
 
     this.inflight.clear();
+  }
+
+  /**
+   * Reconciles one run after a restart. Returns the outcome for that run, and
+   * rethrows only an auth rejection, which must fail the whole report.
+   */
+  private async recoverRun(runId: Id<'Run'>): Promise<RecoveryOutcome> {
+    const mapping = this.mappings.get(runId);
+    const harnessRunId = mapping?.harnessRunId ?? null;
+
+    if (mapping === undefined || harnessRunId === null) {
+      // Nothing was dispatched for this instance, or the create response never
+      // carried a harness id: the run is lost with its recorded dispatch state.
+      return lostOutcome(runId, mapping?.dispatchState ?? 'unknown');
+    }
+
+    try {
+      return await this.reconcileRun(runId, mapping);
+    } catch (error) {
+      if (error instanceof HarnessAdapterError) {
+        if (error.code === 'auth_rejected') {
+          throw error;
+        }
+
+        if (error.httpStatus === 404) {
+          return lostOutcome(runId, mapping.dispatchState);
+        }
+      }
+
+      return lostOutcome(runId, 'unknown');
+    }
+  }
+
+  private async reconcileRun(
+    runId: Id<'Run'>,
+    mapping: RunMapping,
+  ): Promise<RecoveryOutcome> {
+    const { body } = await this.fetchRunBody(runId);
+    const harnessStatus = this.resolveHarnessStatus(body);
+
+    if (harnessStatus === null) {
+      return lostOutcome(runId, 'unknown');
+    }
+
+    if (harnessStatus === 'waiting_for_approval') {
+      const snapshot = this.snapshotFor(mapping, body, harnessStatus);
+      this.recordStatus(mapping, 'failed');
+
+      return confirmedTerminalOutcome(runId, snapshot);
+    }
+
+    const classification = classifyHarnessStatus(harnessStatus);
+
+    if (classification === 'confirmed_terminal') {
+      const snapshot = this.snapshotFor(mapping, body, harnessStatus);
+      this.recordStatus(mapping, harnessStatus);
+
+      return confirmedTerminalOutcome(runId, snapshot);
+    }
+
+    if (classification === 'still_running') {
+      const snapshot = this.snapshotFor(mapping, body, harnessStatus);
+      this.recordStatus(mapping, harnessStatus);
+
+      return stillRunningOutcome(runId, snapshot, mapping.lastSeq);
+    }
+
+    return lostOutcome(runId, 'unknown');
   }
 
   private async dispatchCreateRun(req: CreateRunRequest): Promise<CreateRunResult> {
@@ -489,8 +514,7 @@ export class HermesHttpAdapter implements HarnessAdapter {
     this.assertOpen();
     const mapping = this.requireMapping(req.runId);
     const harnessRunId = this.requireHarnessRunId(mapping);
-    const afterSeq =
-      Number.isFinite(req.afterSeq) && req.afterSeq > 0 ? Math.floor(req.afterSeq) : 0;
+    const afterSeq = normalizeAfterSeq(req.afterSeq);
     let lastApplied =
       this.appliedSeq.get(req.runId) ?? (afterSeq > 0 ? afterSeq : -1);
 
@@ -521,113 +545,28 @@ export class HermesHttpAdapter implements HarnessAdapter {
 
     try {
       arm(this.requestTimeoutMs);
-      const response = await fetch(
-        `${this.baseUrl}/v1/runs/${encodeURIComponent(harnessRunId)}/events?after_seq=${afterSeq}`,
-        {
-          method: 'GET',
-          headers: this.headers({
-            accept: 'text/event-stream',
-            'cache-control': 'no-cache',
-          }),
-          signal: controller.signal,
-        },
+      reader = await this.openEventReader(
+        harnessRunId,
+        afterSeq,
+        controller,
+        mapping.dispatchState,
       );
-
-      if (!response.ok) {
-        await drain(response);
-        throw failureForHttpStatus(response.status, mapping.dispatchState);
-      }
-
-      if (response.body === null) {
-        throw new HarnessAdapterError('provider_error', mapping.dispatchState, {
-          message: 'harness events response had no body',
-        });
-      }
-
-      reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let eventName: string | undefined;
-      let dataLines: string[] = [];
-      let sawTerminal = false;
-
       arm(this.eventIdleTimeoutMs);
 
-      while (!sawTerminal) {
-        const chunk = await reader.read();
+      for await (const frame of this.readFrames(reader, () =>
+        arm(this.eventIdleTimeoutMs),
+      )) {
+        const next = this.acceptFrame(req.runId, mapping, frame, lastApplied);
 
-        if (chunk.done) {
+        if (next === null) {
+          continue;
+        }
+
+        lastApplied = next.seq;
+        yield next.event;
+
+        if (TERMINAL_EVENT_TYPES.has(next.event.type)) {
           break;
-        }
-
-        arm(this.eventIdleTimeoutMs);
-        buffer += decoder.decode(chunk.value, { stream: true });
-
-        while (buffer.includes('\n')) {
-          const newline = buffer.indexOf('\n');
-          let line = buffer.slice(0, newline);
-          buffer = buffer.slice(newline + 1);
-
-          if (line.endsWith('\r')) {
-            line = line.slice(0, -1);
-          }
-
-          if (line === '') {
-            const parsed = parseEvent(mapping, eventName, dataLines, lastApplied, this.now);
-            eventName = undefined;
-            dataLines = [];
-
-            if (parsed === null) {
-              continue;
-            }
-
-            const next = applyEvent(parsed, lastApplied);
-
-            if (next === null) {
-              continue;
-            }
-
-            lastApplied = next.seq;
-            this.appliedSeq.set(req.runId, next.seq);
-            recordSeq(mapping, next.seq);
-            yield next.event;
-
-            if (TERMINAL_EVENT_TYPES.has(next.event.type)) {
-              sawTerminal = true;
-              break;
-            }
-
-            continue;
-          }
-
-          if (line.startsWith(':')) {
-            continue;
-          }
-
-          if (line.startsWith('event:')) {
-            eventName = line.slice('event:'.length).trim();
-            continue;
-          }
-
-          if (line.startsWith('data:')) {
-            dataLines.push(line.slice('data:'.length).replace(/^ /, ''));
-          }
-        }
-      }
-
-      // A well-formed stream ends an event with a blank line. Flush any
-      // remainder so a truncated final event is not silently dropped.
-      if (!sawTerminal && dataLines.length > 0) {
-        const parsed = parseEvent(mapping, eventName, dataLines, lastApplied, this.now);
-
-        if (parsed !== null) {
-          const next = applyEvent(parsed, lastApplied);
-
-          if (next !== null) {
-            this.appliedSeq.set(req.runId, next.seq);
-            recordSeq(mapping, next.seq);
-            yield next.event;
-          }
         }
       }
     } catch (error) {
@@ -646,6 +585,103 @@ export class HermesHttpAdapter implements HarnessAdapter {
         // The stream is already closed; nothing to release.
       }
     }
+  }
+
+  /** Opens the SSE stream and returns its reader, mapping failures exactly. */
+  private async openEventReader(
+    harnessRunId: string,
+    afterSeq: number,
+    controller: AbortController,
+    dispatchState: DispatchState,
+  ): Promise<ReadableStreamDefaultReader<Uint8Array>> {
+    const response = await fetch(
+      `${this.baseUrl}/v1/runs/${encodeURIComponent(harnessRunId)}/events?after_seq=${afterSeq}`,
+      {
+        method: 'GET',
+        headers: this.headers({
+          accept: 'text/event-stream',
+          'cache-control': 'no-cache',
+        }),
+        signal: controller.signal,
+      },
+    );
+
+    if (!response.ok) {
+      await drain(response);
+      throw failureForHttpStatus(response.status, dispatchState);
+    }
+
+    if (response.body === null) {
+      throw new HarnessAdapterError('provider_error', dispatchState, {
+        message: 'harness events response had no body',
+      });
+    }
+
+    return response.body.getReader();
+  }
+
+  /**
+   * Yields complete SSE frames in stream order, re-arming the idle timer after
+   * each chunk so a stalled upstream is bounded. Ends with a flush so a
+   * truncated final event is not silently dropped.
+   */
+  private async *readFrames(
+    reader: ReadableStreamDefaultReader<Uint8Array>,
+    rearm: () => void,
+  ): AsyncGenerator<SseFrame> {
+    const parser = new SseFrameParser();
+    const decoder = new TextDecoder();
+    let chunk = await reader.read();
+
+    while (!chunk.done) {
+      rearm();
+
+      for (const frame of parser.push(decoder.decode(chunk.value, { stream: true }))) {
+        yield frame;
+      }
+
+      chunk = await reader.read();
+    }
+
+    const pending = parser.flush();
+
+    if (pending !== null) {
+      yield pending;
+    }
+  }
+
+  /**
+   * Maps one frame to an event and commits its sequence, or returns null when
+   * the frame is unparseable, out of order, or (runId, seq) was already seen.
+   */
+  private acceptFrame(
+    runId: string,
+    mapping: RunMapping,
+    frame: SseFrame,
+    lastApplied: number,
+  ): ParsedEvent | null {
+    const parsed = parseEvent(
+      mapping,
+      frame.eventName,
+      frame.dataLines,
+      lastApplied,
+      this.now,
+    );
+
+    if (parsed === null) {
+      return null;
+    }
+
+    const next = applyEvent(parsed, lastApplied);
+
+    if (next === null) {
+      return null;
+    }
+
+    this.appliedSeq.set(runId, next.seq);
+    recordSeq(mapping, next.seq);
+
+    return next;
   }
 
   private async fetchRunBody(
@@ -899,6 +935,23 @@ function positive(value: number | undefined, fallback: number): number {
   return value !== undefined && Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
+/**
+ * Removes every trailing `/` in one forward scan.
+ *
+ * A pattern such as `/\/+$/` backtracks quadratically on a long run of slashes
+ * that does not end the string, and `baseUrl` is caller-supplied
+ * configuration, so this scans once with no regex and no backtracking.
+ */
+function stripTrailingSlashes(value: string): string {
+  let end = value.length;
+
+  while (end > 0 && value.charCodeAt(end - 1) === SLASH_CODE_UNIT) {
+    end -= 1;
+  }
+
+  return value.slice(0, end);
+}
+
 function isNonEmpty(value: string | undefined): boolean {
   return typeof value === 'string' && value.trim().length > 0;
 }
@@ -977,11 +1030,12 @@ export function toUsageRecord(
       // The sum is defensible but was not reported, so the record is partial.
       total = input + output;
       usageStatus = 'partial';
-    } else if (reportedTotal !== input + output) {
+    } else if (reportedTotal === input + output) {
+      usageStatus = 'known';
+    } else {
+      // A reported total that contradicts its parts is not trustworthy.
       usageStatus = 'unknown';
       total = null;
-    } else {
-      usageStatus = 'known';
     }
   } else {
     usageStatus = 'partial';
@@ -1000,6 +1054,101 @@ export function toUsageRecord(
     costStatus: 'unknown',
     raw: usage,
   };
+}
+
+/**
+ * Incremental server-sent-events frame reader.
+ *
+ * Every accumulated chunk is scanned once: newlines are located with
+ * `indexOf` from the previous position and only the unconsumed tail is
+ * retained, so a single oversized line costs one pass over the bytes. No
+ * regex or nested rescan is involved, so untrusted stream content cannot
+ * trigger backtracking.
+ */
+class SseFrameParser {
+  private buffer = '';
+  private eventName: string | undefined;
+  private dataLines: string[] = [];
+
+  /** Returns every frame completed by `text`, in stream order. */
+  push(text: string): SseFrame[] {
+    const buffer = this.buffer.length === 0 ? text : this.buffer + text;
+    const frames: SseFrame[] = [];
+    let start = 0;
+    let newline = buffer.indexOf('\n');
+
+    while (newline !== -1) {
+      const line = stripTrailingCarriageReturn(buffer.slice(start, newline));
+      start = newline + 1;
+
+      const frame = this.consumeLine(line);
+
+      if (frame !== null) {
+        frames.push(frame);
+      }
+
+      newline = buffer.indexOf('\n', start);
+    }
+
+    this.buffer = buffer.slice(start);
+
+    return frames;
+  }
+
+  /** Returns a truncated final frame, if the stream ended mid-event. */
+  flush(): SseFrame | null {
+    return this.takeFrame();
+  }
+
+  private consumeLine(line: string): SseFrame | null {
+    if (line.length === 0) {
+      return this.takeFrame();
+    }
+
+    if (line.startsWith(':')) {
+      return null;
+    }
+
+    if (line.startsWith(SSE_EVENT_PREFIX)) {
+      this.eventName = line.slice(SSE_EVENT_PREFIX.length).trim();
+
+      return null;
+    }
+
+    if (line.startsWith(SSE_DATA_PREFIX)) {
+      this.dataLines.push(
+        withoutSingleLeadingSpace(line.slice(SSE_DATA_PREFIX.length)),
+      );
+    }
+
+    return null;
+  }
+
+  /** Emits the pending frame and always resets, including a data-less event. */
+  private takeFrame(): SseFrame | null {
+    const frame: SseFrame | null =
+      this.dataLines.length === 0
+        ? null
+        : { eventName: this.eventName, dataLines: this.dataLines };
+
+    this.eventName = undefined;
+    this.dataLines = [];
+
+    return frame;
+  }
+}
+
+function stripTrailingCarriageReturn(line: string): string {
+  return line.endsWith('\r') ? line.slice(0, -1) : line;
+}
+
+function withoutSingleLeadingSpace(value: string): string {
+  return value.startsWith(' ') ? value.slice(1) : value;
+}
+
+/** Clamps a caller-supplied resume point; non-finite or negative means 0. */
+function normalizeAfterSeq(afterSeq: number): number {
+  return Number.isFinite(afterSeq) && afterSeq > 0 ? Math.floor(afterSeq) : 0;
 }
 
 function parseEvent(

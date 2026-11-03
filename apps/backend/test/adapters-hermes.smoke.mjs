@@ -298,6 +298,67 @@ describe('Hermes HTTP adapter', () => {
     assert.equal(streamCall.search, '?after_seq=0');
   });
 
+  test('a pathological baseUrl slash run is normalized without backtracking', async (t) => {
+    // 200k slashes followed by a non-slash tail is the worst case for the
+    // `/\/+$/` pattern this replaced: it backtracked quadratically at every
+    // start index. The linear scan must stay far under a second.
+    const started = process.hrtime.bigint();
+    const pathological = new HermesHttpAdapter({
+      baseUrl: `${stub.base}${'/'.repeat(200_000)}x`,
+      gatewayKey: GATEWAY_KEY,
+    });
+    await pathological.close();
+    const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
+
+    assert.ok(elapsedMs < 1000, `baseUrl normalization took ${elapsedMs.toFixed(0)}ms`);
+
+    // Behavior is preserved: trailing slashes are still stripped, so the
+    // create call reaches the stub origin path exactly once.
+    installCreateHandler(stub);
+    const adapter = createAdapter(stub, { baseUrl: `${stub.base}////` });
+    t.after(() => adapter.close());
+
+    const created = await adapter.createRun(createRequest());
+    assert.equal(created.harnessRunId, HARNESS_RUN_ID);
+    assert.equal(stub.callsTo('/v1/runs').length, 1);
+  });
+
+  test('a 200k-character event line is skipped in linear time', async (t) => {
+    installCreateHandler(stub);
+    const adapter = createAdapter(stub);
+    t.after(() => adapter.close());
+
+    await adapter.createRun(createRequest());
+
+    // One oversized, unparseable data line followed by a normal terminal
+    // event: the stream must ignore the noise and still deliver the event.
+    const noise = 'x'.repeat(200_000);
+    stub.setHandler(({ req, res, url }) => {
+      if (req.method === 'GET' && url.pathname === `/v1/runs/${HARNESS_RUN_ID}/events`) {
+        res.writeHead(200, {
+          'content-type': 'text/event-stream',
+          'cache-control': 'no-cache',
+        });
+        res.write(`event: message.delta\ndata: ${noise}\n\n`);
+        res.write(
+          `event: run.completed\ndata: ${JSON.stringify({ seq: 1, type: 'run.completed' })}\n\n`,
+        );
+        res.end();
+        return;
+      }
+
+      jsonResponse(res, 404, { code: 'not_found' });
+    });
+
+    const started = process.hrtime.bigint();
+    const events = await collect(adapter.subscribe({ runId: RUN_ID, afterSeq: 0 }));
+    const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
+
+    assert.ok(elapsedMs < 1000, `SSE parse took ${elapsedMs.toFixed(0)}ms`);
+    assert.deepEqual(events.map((event) => event.seq), [1]);
+    assert.equal(events[0].type, 'run.completed');
+  });
+
   test('rejects non-empty allowedTools before dispatch', async (t) => {
     installCreateHandler(stub);
     const adapter = createAdapter(stub);
