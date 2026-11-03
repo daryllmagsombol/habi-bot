@@ -126,8 +126,24 @@ export class RequestMetrics {
   }
 }
 
+/** Characters the Prometheus text format requires an escape for. */
+const LABEL_SPECIAL_CHARACTERS = /[\n"\\]/g;
+
+/** Escapes one label character: backslash, newline, and double quote. */
+function escapeLabelCharacter(character: string): string {
+  if (character === '"') {
+    return String.raw`\"`;
+  }
+
+  if (character === '\n') {
+    return String.raw`\n`;
+  }
+
+  return String.raw`\\`;
+}
+
 function escapeLabelValue(value: string): string {
-  return value.replace(/\\/g, '\\\\').replace(/\n/g, '\\n').replace(/"/g, '\\"');
+  return value.replaceAll(LABEL_SPECIAL_CHARACTERS, escapeLabelCharacter);
 }
 
 function formatNumber(value: number): string {

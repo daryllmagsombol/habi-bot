@@ -105,8 +105,8 @@ export function redact(value: unknown): unknown {
 export function sanitizeErrorMessage(message: string): string {
   const flattened = flattenControlCharacters(message).trim();
   const scrubbed = flattened
-    .replace(/\b(Bearer|Basic|Digest)\s+[A-Za-z0-9._~+/=-]+/gi, '$1 [redacted]')
-    .replace(
+    .replaceAll(/\b(Bearer|Basic|Digest)\s+[a-z0-9._~+/=-]+/gi, '$1 [redacted]')
+    .replaceAll(
       /\b(password|passwd|secret|token|api[-_]?key)=([^&\s]+)/gi,
       '$1=[redacted]',
     );
@@ -288,9 +288,7 @@ function redactContainer(
   depth: number,
 ): unknown {
   if (object instanceof Date) {
-    return Number.isNaN(object.getTime())
-      ? INVALID_DATE
-      : object.toISOString();
+    return redactDate(object);
   }
 
   if (object instanceof Error) {
@@ -298,57 +296,85 @@ function redactContainer(
   }
 
   if (Array.isArray(object)) {
-    const limit = Math.min(object.length, MAX_ARRAY_ITEMS);
-    const items: unknown[] = [];
-
-    for (let index = 0; index < limit; index += 1) {
-      items.push(redactValue(object[index], ancestors, depth + 1));
-    }
-
-    if (object.length > MAX_ARRAY_ITEMS) {
-      items.push(TRUNCATED);
-    }
-
-    return items;
+    return redactArray(object, ancestors, depth);
   }
 
   if (object instanceof Set) {
-    const values: unknown[] = [];
-
-    for (const entry of object) {
-      if (values.length >= MAX_ARRAY_ITEMS) {
-        values.push(TRUNCATED);
-        break;
-      }
-
-      values.push(redactValue(entry, ancestors, depth + 1));
-    }
-
-    return values;
+    return redactSet(object, ancestors, depth);
   }
 
   if (object instanceof Map) {
-    const entries: Record<string, unknown> = {};
-    let count = 0;
-
-    for (const [key, entry] of object) {
-      if (count >= MAX_OBJECT_KEYS) {
-        entries[TRUNCATED_KEY] = true;
-        break;
-      }
-
-      entries[truncate(String(key), 64)] = redactValue(
-        entry,
-        ancestors,
-        depth + 1,
-      );
-      count += 1;
-    }
-
-    return entries;
+    return redactMap(object, ancestors, depth);
   }
 
   return redactObject(object as Record<string, unknown>, ancestors, depth);
+}
+
+function redactDate(value: Date): string {
+  return Number.isNaN(value.getTime()) ? INVALID_DATE : value.toISOString();
+}
+
+function redactArray(
+  value: readonly unknown[],
+  ancestors: WeakSet<object>,
+  depth: number,
+): unknown[] {
+  const limit = Math.min(value.length, MAX_ARRAY_ITEMS);
+  const items: unknown[] = [];
+
+  for (let index = 0; index < limit; index += 1) {
+    items.push(redactValue(value[index], ancestors, depth + 1));
+  }
+
+  if (value.length > MAX_ARRAY_ITEMS) {
+    items.push(TRUNCATED);
+  }
+
+  return items;
+}
+
+function redactSet(
+  value: ReadonlySet<unknown>,
+  ancestors: WeakSet<object>,
+  depth: number,
+): unknown[] {
+  const items: unknown[] = [];
+
+  for (const entry of value) {
+    if (items.length >= MAX_ARRAY_ITEMS) {
+      items.push(TRUNCATED);
+      break;
+    }
+
+    items.push(redactValue(entry, ancestors, depth + 1));
+  }
+
+  return items;
+}
+
+function redactMap(
+  value: ReadonlyMap<unknown, unknown>,
+  ancestors: WeakSet<object>,
+  depth: number,
+): Record<string, unknown> {
+  const entries: Record<string, unknown> = {};
+  let count = 0;
+
+  for (const [key, entry] of value) {
+    if (count >= MAX_OBJECT_KEYS) {
+      entries[TRUNCATED_KEY] = true;
+      break;
+    }
+
+    entries[truncate(String(key), 64)] = redactValue(
+      entry,
+      ancestors,
+      depth + 1,
+    );
+    count += 1;
+  }
+
+  return entries;
 }
 
 function redactObject(

@@ -38,8 +38,12 @@ export interface ObservabilityConfig {
 
 export interface ObservabilityModuleOptions {
   readonly service: string;
-  /** Defaults to `HABI_LOG_LEVEL` when valid, otherwise `info`. */
-  readonly level?: LogLevel | string;
+  /**
+   * Wiring-time level: any raw string (environment/config input) is accepted
+   * and narrowed by `parseLogLevel`. Defaults to `HABI_LOG_LEVEL` when valid,
+   * otherwise `info`.
+   */
+  readonly level?: string;
   readonly write?: (line: string) => void;
   readonly now?: () => number;
 }
