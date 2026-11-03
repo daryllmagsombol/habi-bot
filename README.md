@@ -196,8 +196,8 @@ Habi, rather than Hermes, is intended to own identities, authorization, conversa
 
 - **Hermes** is the preferred harness in the plan, behind a replaceable adapter.
 - Direct model calls are an evaluated fallback option, not a silent default.
-- Initial model access is planned around **OpenCode Zen free models**, selected only after H-003 verifies the current model ID, limits, data handling, and Hermes compatibility.
-- Automatic paid fallback must remain off. An OpenCode Go key is not assumed suitable for a multi-user general assistant.
+- Initial model access remains **H-003 research**: the owner chose a personal CommandCode key for a single-user POC assumption, with OpenCode and ChatGPT also intended for evaluation. Cloudflare is parked; free OpenCode chat models are not supported in Hermes. No provider is accepted for Habi. H-003 must still resolve limits, data handling, quota behavior, and the applicable Hermes integration and permissions.
+- Automatic paid fallback must remain off, and no platform-funded or pooled paid access may be introduced. A paid subscription or key is not assumed suitable for a multi-user general assistant.
 - No model key or provider credential may be placed in the repository, frontend, ordinary chat, or task logs.
 
 ### Deployment constraints — planned
@@ -290,6 +290,8 @@ Only three issues are initially **Ready**:
 
 Every other issue starts in Backlog. Creating or moving an issue does not authorize a later phase.
 
+*H-003 scope annotation (2026-10-28): the owner chose a personal CommandCode key for a single-user POC assumption; Cloudflare is parked. The remote issue still describes the earlier OpenCode/Zen free-model scope, and H-003 remains open and unaccepted.*
+
 ## Definition of done
 
 A task is done when code, tests appropriate to the risk, user-visible behavior, observability, and documentation are complete. Security-sensitive changes need cross-user tests. Evidence must be attached to the issue: commands, test output, screenshots where relevant, and a clear pass/fail.
@@ -300,7 +302,7 @@ Research issues are done only when they produce a decision record, evidence, and
 
 These decisions remain open and should be settled during P0. Recommendations are from the handoff, not approved decisions.
 
-1. Confirm the exact OpenCode Zen free endpoint and model, and what happens when quotas are exhausted.
+1. Confirm the exact OpenCode Zen free endpoint and model, and what happens when quotas are exhausted. *Repository annotation (2026-10-28): Zen free is a no-go in Hermes; a personal CommandCode single-user POC is under evaluation. The remote issue still states the Zen/OpenCode scope.*
 2. Decide public registration versus invite-only for the first deployment. The handoff recommends invite-only on the shared VM until abuse controls are proven.
 3. Decide which file types and maximum sizes P2 initially accepts. The handoff recommends text/Markdown and text PDFs first.
 4. Decide whether a user can create unlimited Bots or starts with a small capped count.
