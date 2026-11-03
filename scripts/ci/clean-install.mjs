@@ -327,7 +327,7 @@ export function inspectLockfiles(treeDir) {
   };
 }
 
-const NODE_SCRIPT_EXTENSION = /\.(?:c|m)?js$/i;
+const NODE_SCRIPT_EXTENSION = /\.[cm]?js$/i;
 
 /**
  * A launcher is an absolute executable plus arguments that must always precede
@@ -402,8 +402,10 @@ export function displayCommand(launcher, args = []) {
   return [command.executable, ...command.args].join(' ');
 }
 
+const SHELL_SINGLE_QUOTE_ESCAPE = String.raw`'\''`;
+
 function shellQuote(value) {
-  return `'${value.replaceAll("'", "'\\''")}'`;
+  return `'${value.replaceAll("'", SHELL_SINGLE_QUOTE_ESCAPE)}'`;
 }
 
 /**
