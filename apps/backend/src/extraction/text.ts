@@ -52,16 +52,34 @@ function isLowSurrogate(codeUnit: number): boolean {
   return codeUnit >= 0xdc00 && codeUnit <= 0xdfff;
 }
 
+/**
+ * True when the gap at `index` falls between a surrogate pair's two halves, that
+ * is, when `index - 1` holds the high half and `index` holds the low half.
+ *
+ * `codePointAt(index - 1)` reports a complete pair as one astral code point
+ * (above `0xFFFF`) and leaves an unpaired high half inside the high-surrogate
+ * range, so both forms identify a high half before the gap. `codePointAt(index)`
+ * reports the low half as its own code unit because a low surrogate never starts
+ * a pair on its own. Lone surrogates therefore never look like a pair.
+ */
+function splitsSurrogatePair(text: string, index: number): boolean {
+  const previous = text.codePointAt(index - 1);
+  const next = text.codePointAt(index);
+
+  if (previous === undefined || next === undefined) {
+    return false;
+  }
+
+  return (previous > 0xffff || isHighSurrogate(previous)) && isLowSurrogate(next);
+}
+
 /** Moves a cut left when it would land between a surrogate pair's halves. */
 function cutBackward(text: string, index: number): number {
   if (index <= 0 || index >= text.length) {
     return index;
   }
 
-  const previous = text.charCodeAt(index - 1);
-  const next = text.charCodeAt(index);
-
-  return isHighSurrogate(previous) && isLowSurrogate(next) ? index - 1 : index;
+  return splitsSurrogatePair(text, index) ? index - 1 : index;
 }
 
 /** Moves a start right when it would land between a surrogate pair's halves. */
@@ -70,10 +88,7 @@ function advanceForward(text: string, index: number): number {
     return index;
   }
 
-  const previous = text.charCodeAt(index - 1);
-  const current = text.charCodeAt(index);
-
-  return isHighSurrogate(previous) && isLowSurrogate(current) ? index + 1 : index;
+  return splitsSurrogatePair(text, index) ? index + 1 : index;
 }
 
 function isSentenceTerminator(character: string): boolean {
@@ -99,7 +114,7 @@ export function normalizeExtractedText(value: string): string {
     throw new ExtractionError('invalid_content');
   }
 
-  return value.replace(/\r\n?/g, '\n').normalize('NFKC');
+  return value.replaceAll(/\r\n?/g, '\n').normalize('NFKC');
 }
 
 /**
