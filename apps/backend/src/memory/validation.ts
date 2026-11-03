@@ -21,11 +21,11 @@ export const MEMORY_CONTENT_MAX_LENGTH = 4_000;
 export const DEFAULT_MEMORY_PAGE_SIZE = 50;
 
 const MAX_MEMORY_OFFSET = Number.MAX_SAFE_INTEGER;
-const MEMORY_STATUSES: readonly MemoryStatus[] = [
+const MEMORY_STATUSES: ReadonlySet<string> = new Set<MemoryStatus>([
   'proposed',
   'accepted',
   'deleted',
-];
+]);
 
 /**
  * C0/C1 controls except tab (`\u0009`) and line feed (`\u000a`). Carriage
@@ -110,10 +110,7 @@ export function normalizeRecallMemoriesOptions(
 }
 
 function normalizeStatus(value: unknown): MemoryStatus {
-  if (
-    typeof value !== 'string' ||
-    !MEMORY_STATUSES.includes(value as MemoryStatus)
-  ) {
+  if (typeof value !== 'string' || !MEMORY_STATUSES.has(value)) {
     throw new PersistenceValidationError('invalid_input');
   }
 

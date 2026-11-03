@@ -127,6 +127,21 @@ function toMemory(row: MemoryRow): Memory {
 }
 
 /**
+ * Audit action for one D2 gate transition. The gate and the direction together
+ * select the recorded action, so approval and revocation stay distinguishable.
+ */
+function toApprovalAuditAction(
+  gate: ApprovalGate,
+  approved: boolean,
+): MemoryAuditAction {
+  if (gate === 'bot') {
+    return approved ? 'approve_bot' : 'revoke_bot';
+  }
+
+  return approved ? 'approve_conversation' : 'revoke_conversation';
+}
+
+/**
  * Appends one audit row. This is the only audit write in the module, so the
  * convention is enforced by construction rather than by a database trigger.
  */
@@ -241,11 +256,11 @@ export class MemoryRepository {
     const values: unknown[] = [ownerUserId];
     const conditions = ['m.owner_user_id = $1'];
 
-    if (normalized.status !== null) {
+    if (normalized.status === null) {
+      conditions.push('m.deleted_at IS NULL');
+    } else {
       values.push(normalized.status);
       conditions.push(`m.status = $${values.length}`);
-    } else {
-      conditions.push('m.deleted_at IS NULL');
     }
 
     if (normalized.botId !== null) {
@@ -377,14 +392,7 @@ export class MemoryRepository {
       );
 
       const row = requireRow(result);
-      const action: MemoryAuditAction =
-        gate === 'bot'
-          ? nextApproval
-            ? 'approve_bot'
-            : 'revoke_bot'
-          : nextApproval
-            ? 'approve_conversation'
-            : 'revoke_conversation';
+      const action = toApprovalAuditAction(gate, nextApproval);
 
       await insertAudit(
         client,
