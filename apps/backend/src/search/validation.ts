@@ -57,7 +57,7 @@ export function normalizeSearchQuery(value: unknown): NormalizedSearchQuery {
     throw new PersistenceValidationError('invalid_input');
   }
 
-  const text = stripControlCharacters(value).replace(/\s+/g, ' ').trim();
+  const text = stripControlCharacters(value).replaceAll(/\s+/g, ' ').trim();
 
   if (text.length < MIN_SEARCH_QUERY_LENGTH || text.length > MAX_SEARCH_QUERY_LENGTH) {
     throw new PersistenceValidationError('invalid_input');

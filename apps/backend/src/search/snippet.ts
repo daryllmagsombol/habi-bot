@@ -22,7 +22,7 @@ const HTML_ESCAPES: Readonly<Record<string, string>> = {
 };
 
 export function escapeHtml(value: string): string {
-  return value.replace(/[&<>"']/g, (character) => HTML_ESCAPES[character] ?? character);
+  return value.replaceAll(/[&<>"']/g, (character) => HTML_ESCAPES[character] ?? character);
 }
 
 /**
@@ -49,14 +49,12 @@ export function toSnippet(headline: string): string {
       break;
     }
 
-    parts.push(escapeHtml(remainder.slice(0, start)));
     parts.push(
-      `<mark>${escapeHtml(
-        remainder.slice(start + SNIPPET_HIT_START.length, end),
-      )}</mark>`,
+      escapeHtml(remainder.slice(0, start)),
+      `<mark>${escapeHtml(remainder.slice(start + SNIPPET_HIT_START.length, end))}</mark>`,
     );
     remainder = remainder.slice(end + SNIPPET_HIT_END.length);
   }
 
-  return parts.join('').replace(/\s+/g, ' ').trim();
+  return parts.join('').replaceAll(/\s+/g, ' ').trim();
 }
