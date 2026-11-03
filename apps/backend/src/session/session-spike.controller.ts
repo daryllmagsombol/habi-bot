@@ -34,7 +34,7 @@ import {
 import { readBearerToken, readUserAgent, requestNow, requireSession } from './session-request.js';
 import type { SessionRequest } from './session-request.js';
 import { SessionService, toSessionView } from './session.service.js';
-import type { IssuedSession, SessionView } from './session.service.js';
+import type { IssuedSession, SessionObserver, SessionView } from './session.service.js';
 
 /** Test fixtures only. Real authentication is #14. */
 const FIXTURE_TOKENS: ReadonlyMap<string, string> = new Map([
@@ -86,11 +86,18 @@ export class SessionSpikeController {
     }
 
     const at = requestNow(request);
-    const issued = this.sessions.create(
-      userId,
-      { userAgent: readUserAgent(request), ip: request.ip },
-      at,
-    );
+    const observer: SessionObserver = {};
+    const userAgent = readUserAgent(request);
+
+    if (userAgent !== undefined) {
+      observer.userAgent = userAgent;
+    }
+
+    if (typeof request.ip === 'string') {
+      observer.ip = request.ip;
+    }
+
+    const issued = this.sessions.create(userId, observer, at);
 
     writeSessionCookie(response, issued, at);
     response.setHeader('x-csrf-token', issued.csrfToken);
