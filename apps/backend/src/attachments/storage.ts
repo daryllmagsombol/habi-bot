@@ -19,7 +19,14 @@
  * the stored object is removed.
  */
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
+import {
+  type FileHandle,
+  mkdir,
+  open,
+  readFile,
+  rename,
+  unlink,
+} from 'node:fs/promises';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { isUuid } from '../persistence/cursor.js';
 import { PersistenceValidationError } from '../persistence/errors.js';
@@ -99,6 +106,66 @@ export function isAttachmentStorageKey(value: unknown): value is string {
   return typeof value === 'string' && STORAGE_KEY_PATTERN.test(value);
 }
 
+/** Rejects a size ceiling that is not a non-negative safe integer. */
+function requireMaxBytes(maxBytes: number): void {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
+    throw new TypeError('Attachment size ceiling is invalid.');
+  }
+}
+
+/** Writes one chunk completely, retrying partial writes. No progress fails. */
+async function writeAll(handle: FileHandle, chunk: Uint8Array): Promise<void> {
+  let offset = 0;
+  while (offset < chunk.byteLength) {
+    const { bytesWritten } = await handle.write(
+      chunk,
+      offset,
+      chunk.byteLength - offset,
+    );
+
+    if (bytesWritten <= 0) {
+      throw new Error('Attachment storage write made no progress.');
+    }
+
+    offset += bytesWritten;
+  }
+}
+
+/**
+ * Streams `source` into `handle` exactly once, enforcing `maxBytes` as bytes
+ * arrive and hashing what was written. Empty chunks are skipped.
+ */
+async function writeStream(
+  handle: FileHandle,
+  source: AsyncIterable<Uint8Array>,
+  maxBytes: number,
+): Promise<AttachmentObjectInfo> {
+  const hash = createHash('sha256');
+  let byteSize = 0;
+
+  for await (const chunk of source) {
+    if (!(chunk instanceof Uint8Array)) {
+      throw new PersistenceValidationError('invalid_input');
+    }
+
+    if (chunk.byteLength === 0) {
+      continue;
+    }
+
+    byteSize += chunk.byteLength;
+    if (byteSize > maxBytes) {
+      // The stream is abandoned here; the caller removes the partial temp file
+      // and no metadata row exists for an oversized upload.
+      throw new PersistenceValidationError('invalid_input');
+    }
+
+    hash.update(chunk);
+    await writeAll(handle, chunk);
+  }
+
+  return { byteSize, sha256: hash.digest('hex') };
+}
+
 /**
  * Local filesystem implementation rooted at an injected absolute directory.
  * The directory is created with owner-only permissions when `initialize` runs;
@@ -129,9 +196,7 @@ export class LocalAttachmentStorage implements AttachmentStorage {
     source: AsyncIterable<Uint8Array>,
     maxBytes: number,
   ): Promise<AttachmentObjectInfo> {
-    if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
-      throw new TypeError('Attachment size ceiling is invalid.');
-    }
+    requireMaxBytes(maxBytes);
 
     const objectPath = this.objectPath(locator);
     const directory = dirname(objectPath);
@@ -140,51 +205,18 @@ export class LocalAttachmentStorage implements AttachmentStorage {
     // The temporary name lives in the destination directory so rename is
     // atomic on the same filesystem and never crosses a mount boundary.
     const temporaryPath = join(directory, `.upload-${randomUUID()}.tmp`);
-    const hash = createHash('sha256');
-    let byteSize = 0;
-    let handle: Awaited<ReturnType<typeof open>> | undefined;
+    let handle: FileHandle | undefined;
 
     try {
       handle = await open(temporaryPath, 'wx', 0o600);
-
-      for await (const chunk of source) {
-        if (!(chunk instanceof Uint8Array)) {
-          throw new PersistenceValidationError('invalid_input');
-        }
-
-        if (chunk.byteLength === 0) {
-          continue;
-        }
-
-        byteSize += chunk.byteLength;
-        if (byteSize > maxBytes) {
-          // The stream is abandoned here; the partial temp file is removed
-          // below and no metadata row exists for an oversized upload.
-          throw new PersistenceValidationError('invalid_input');
-        }
-
-        hash.update(chunk);
-
-        let offset = 0;
-        while (offset < chunk.byteLength) {
-          const { bytesWritten } = await handle.write(
-            chunk,
-            offset,
-            chunk.byteLength - offset,
-          );
-
-          if (bytesWritten <= 0) {
-            throw new Error('Attachment storage write made no progress.');
-          }
-
-          offset += bytesWritten;
-        }
-      }
+      const info = await writeStream(handle, source, maxBytes);
 
       await handle.sync();
       await handle.close();
       handle = undefined;
       await rename(temporaryPath, objectPath);
+
+      return info;
     } catch (error) {
       if (handle !== undefined) {
         await handle.close().catch(() => {});
@@ -192,8 +224,6 @@ export class LocalAttachmentStorage implements AttachmentStorage {
       await unlink(temporaryPath).catch(() => {});
       throw error;
     }
-
-    return { byteSize, sha256: hash.digest('hex') };
   }
 
   async getObject(
