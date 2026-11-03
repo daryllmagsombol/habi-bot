@@ -11,18 +11,13 @@ export function isUuid(value: unknown): value is string {
 
 /** Opaque cursor for a message `seq`; the value itself is not an access key. */
 export function encodeMessageCursor(seq: number): string {
-  return Buffer.from(`${MESSAGE_CURSOR_PREFIX}${seq}`, 'utf8').toString('base64url');
+  return writeCursor(MESSAGE_CURSOR_PREFIX, seq);
 }
 
 /** Decodes a message cursor, rejecting anything that is not a positive integer. */
 export function decodeMessageCursor(cursor: string): number {
-  const decoded = decodeBase64Url(cursor);
+  const rawSeq = readCursorPayload(cursor, MESSAGE_CURSOR_PREFIX);
 
-  if (!decoded?.startsWith(MESSAGE_CURSOR_PREFIX)) {
-    throw new PersistenceValidationError('invalid_cursor');
-  }
-
-  const rawSeq = decoded.slice(MESSAGE_CURSOR_PREFIX.length);
   if (!/^[1-9]\d*$/.test(rawSeq)) {
     throw new PersistenceValidationError('invalid_cursor');
   }
@@ -40,42 +35,63 @@ export interface ConversationCursor {
   id: string;
 }
 
-/** Opaque keyset cursor for `(updated_at DESC, id DESC)` conversation listing. */
-export function encodeConversationCursor(cursor: ConversationCursor): string {
-  return Buffer.from(
-    JSON.stringify({ u: cursor.updatedAt, i: cursor.id }),
-    'utf8',
-  ).toString('base64url');
+/** Writes an opaque base64url cursor; the payload is a hint, never an access key. */
+export function writeCursor(prefix: string, payload: unknown): string {
+  return Buffer.from(`${prefix}${JSON.stringify(payload)}`, 'utf8').toString(
+    'base64url',
+  );
 }
 
-export function decodeConversationCursor(cursor: string): ConversationCursor {
+/** Strips the prefix from an opaque cursor, rejecting unreadable input. */
+export function readCursorPayload(cursor: string, prefix: string): string {
   const decoded = decodeBase64Url(cursor);
 
-  if (decoded === null) {
+  if (decoded === null || !decoded.startsWith(prefix)) {
     throw new PersistenceValidationError('invalid_cursor');
   }
 
+  return decoded.slice(prefix.length);
+}
+
+/**
+ * Reads the `{u,i}` keyset payload shared by `(updated_at DESC, id DESC)`
+ * listings. The timestamp text is returned unchanged; callers decide whether to
+ * round-trip it through `Date`.
+ */
+export function readTimestampIdCursor(payload: string): ConversationCursor {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(decoded);
+    parsed = JSON.parse(payload);
   } catch {
     throw new PersistenceValidationError('invalid_cursor');
   }
 
+  if (typeof parsed !== 'object' || parsed === null) {
+    throw new PersistenceValidationError('invalid_cursor');
+  }
+
+  const { u, i } = parsed as Record<string, unknown>;
   if (
-    typeof parsed !== 'object' ||
-    parsed === null ||
-    !('u' in parsed) ||
-    !('i' in parsed) ||
-    typeof parsed.u !== 'string' ||
-    typeof parsed.i !== 'string' ||
-    !isUuid(parsed.i) ||
-    Number.isNaN(Date.parse(parsed.u))
+    typeof u !== 'string' ||
+    typeof i !== 'string' ||
+    !isUuid(i) ||
+    Number.isNaN(Date.parse(u))
   ) {
     throw new PersistenceValidationError('invalid_cursor');
   }
 
-  return { updatedAt: new Date(parsed.u).toISOString(), id: parsed.i };
+  return { updatedAt: u, id: i };
+}
+
+/** Opaque keyset cursor for `(updated_at DESC, id DESC)` conversation listing. */
+export function encodeConversationCursor(cursor: ConversationCursor): string {
+  return writeCursor('', { u: cursor.updatedAt, i: cursor.id });
+}
+
+export function decodeConversationCursor(cursor: string): ConversationCursor {
+  const parsed = readTimestampIdCursor(readCursorPayload(cursor, ''));
+
+  return { updatedAt: new Date(parsed.updatedAt).toISOString(), id: parsed.id };
 }
 
 function decodeBase64Url(value: string): string | null {

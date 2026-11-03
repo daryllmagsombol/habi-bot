@@ -19,17 +19,19 @@ import { withTransaction } from '../persistence/database.js';
 import type { Queryable } from '../persistence/database.js';
 import {
   PersistenceConflictError,
-  PersistenceNotFoundError,
   isUniqueViolation,
   uniqueViolationConstraint,
 } from '../persistence/errors.js';
 import {
+  loadOwnedRow,
   requireActorUserId,
   requireResourceId,
   requireRow,
   toIso,
   toNullableIso,
   type NullableTimestamp,
+  type OwnedRowStatements,
+  type ScopedLoadOptions,
   type Timestamp,
 } from '../persistence/rows.js';
 import { encodeSkillCursor } from './cursor.js';
@@ -88,36 +90,75 @@ interface BotStateRow {
 const SKILL_COLUMNS = `id, bot_id, name, description, body_markdown, version,
   status, archived_at, created_at, updated_at, deleted_at`;
 
-/** Owner-scoped live row. A tombstone is visible only to `delete`. */
+const SKILL_VERSION_COLUMNS = `v.skill_id, v.version, v.name, v.description,
+  v.body_markdown, v.created_at`;
+
+/** Every skill statement binds the resource id to `$1` and the actor to `$2`. */
+const SKILL_OWNER_SCOPE = `id = $1
+    AND owner_user_id = $2`;
+
+/** Owner-scoped live rows; a tombstone is visible only to `delete`. */
+const SKILL_LIVE_SCOPE = `${SKILL_OWNER_SCOPE}
+    AND deleted_at IS NULL`;
+
+/** Owner-scoped row that has not been tombstoned. */
 const SKILL_BY_ID_LIVE = `SELECT ${SKILL_COLUMNS}
    FROM skills
-  WHERE id = $1
-    AND owner_user_id = $2
-    AND deleted_at IS NULL`;
+  WHERE ${SKILL_LIVE_SCOPE}`;
 
 /** Owner-scoped row including a tombstone; still never a foreign row. */
 const SKILL_BY_ID_ANY = `SELECT ${SKILL_COLUMNS}
    FROM skills
-  WHERE id = $1
-    AND owner_user_id = $2`;
+  WHERE ${SKILL_OWNER_SCOPE}`;
 
-const SKILL_VERSION_COLUMNS = `v.skill_id, v.version, v.name, v.description,
-  v.body_markdown, v.created_at`;
+/** Resolves an owned live skill without reading its mutable columns. */
+const SKILL_EXISTS_LIVE = `SELECT id
+   FROM skills
+  WHERE ${SKILL_LIVE_SCOPE}`;
+
+const SKILL_STATEMENTS: OwnedRowStatements = {
+  live: SKILL_BY_ID_LIVE,
+  withDeleted: SKILL_BY_ID_ANY,
+};
 
 /** Both statuses are editable and attachable; archived/deleted are not. */
 const LIVE_STATUSES = `('draft', 'active')`;
 
+/**
+ * Shared tail for edits that must hit a live draft or active skill. Each caller
+ * supplies its own `SET` list and bound values; never a foreign row.
+ */
+const SKILL_EDITABLE_TAIL = `WHERE ${SKILL_LIVE_SCOPE}
+    AND status IN ${LIVE_STATUSES}
+  RETURNING ${SKILL_COLUMNS}`;
+
+/**
+ * Immutable history rows joined to their still-live owning skill. `$1`/`$2`
+ * bind the skill id and actor; callers append their own filter and ordering.
+ */
+const SKILL_VERSION_SOURCE = `FROM skill_versions v
+   JOIN skills s
+     ON s.id = v.skill_id
+    AND s.owner_user_id = v.owner_user_id
+  WHERE v.skill_id = $1
+    AND v.owner_user_id = $2
+    AND s.deleted_at IS NULL`;
+
+const SKILL_STATUSES = [
+  'draft',
+  'active',
+  'archived',
+  'deleted',
+] as const;
+
 function toStatus(value: string): SkillStatus {
-  if (
-    value !== 'draft' &&
-    value !== 'active' &&
-    value !== 'archived' &&
-    value !== 'deleted'
-  ) {
+  const status = SKILL_STATUSES.find((candidate) => candidate === value);
+
+  if (status === undefined) {
     throw new Error('Persisted skill has an unexpected lifecycle status.');
   }
 
-  return value;
+  return status;
 }
 
 function toSkill(row: SkillRow): Skill {
@@ -145,6 +186,34 @@ function toSkillVersion(row: SkillVersionRow): SkillVersion {
     bodyMarkdown: row.body_markdown,
     createdAt: toIso(row.created_at),
   };
+}
+
+/**
+ * Loads one owner-scoped skill. A missing, foreign, malformed, or (unless
+ * `includeDeleted`) tombstoned id is the same non-enumerating not-found.
+ */
+async function loadSkill(
+  queryable: Queryable,
+  actorUserId: string,
+  skillId: string,
+  options: ScopedLoadOptions = {},
+): Promise<SkillRow> {
+  return loadOwnedRow<SkillRow>(
+    queryable,
+    actorUserId,
+    skillId,
+    SKILL_STATEMENTS,
+    options,
+  );
+}
+
+/** Splits a `limit + 1` read into its page and whether another page exists. */
+function toPage<T>(rows: T[], limit: number): { page: T[]; hasMore: boolean } {
+  if (rows.length <= limit) {
+    return { page: rows, hasMore: false };
+  }
+
+  return { page: rows.slice(0, limit), hasMore: true };
 }
 
 /**
@@ -195,23 +264,6 @@ async function insertVersion(
 }
 
 /**
- * Loads and locks one owner-scoped skill. A missing, foreign, tombstoned, or
- * malformed id is the same not-found.
- */
-async function loadForUpdate(
-  client: PoolClient,
-  ownerUserId: string,
-  skillId: string,
-): Promise<SkillRow> {
-  return requireRow(
-    await client.query<SkillRow>(`${SKILL_BY_ID_LIVE} FOR UPDATE`, [
-      skillId,
-      ownerUserId,
-    ]),
-  );
-}
-
-/**
  * Proves the target Bot exists, is live, is owned by the actor, and is active.
  * Deleted/missing/foreign Bots collapse to not-found; an archived Bot is an
  * owned but unavailable target.
@@ -221,19 +273,16 @@ async function requireAttachableBot(
   ownerUserId: string,
   botId: string,
 ): Promise<void> {
-  const result = await client.query<BotStateRow>(
-    `SELECT status
-       FROM bots
-      WHERE id = $1
-        AND owner_user_id = $2
-        AND deleted_at IS NULL`,
-    [botId, ownerUserId],
+  const row = requireRow(
+    await client.query<BotStateRow>(
+      `SELECT status
+         FROM bots
+        WHERE id = $1
+          AND owner_user_id = $2
+          AND deleted_at IS NULL`,
+      [botId, ownerUserId],
+    ),
   );
-
-  const row = result.rows[0];
-  if (row === undefined) {
-    throw new PersistenceNotFoundError();
-  }
 
   if (row.status !== 'active') {
     throw new PersistenceConflictError('bot_unavailable');
@@ -248,6 +297,30 @@ function requireEditable(skill: SkillRow): void {
 
 export class SkillRepository {
   constructor(private readonly pool: Pool) {}
+
+  /**
+   * Runs one owner-scoped edit under the skill row lock: the row must exist,
+   * be owned, be live, and be editable. A unique violation maps to its
+   * owner-visible conflict; anything else propagates unchanged.
+   */
+  private async edit(
+    ownerUserId: string,
+    skillId: string,
+    apply: (client: PoolClient, current: SkillRow) => Promise<Skill>,
+  ): Promise<Skill> {
+    try {
+      return await withTransaction(this.pool, async (client) => {
+        const current = await loadSkill(client, ownerUserId, skillId, {
+          forUpdate: true,
+        });
+        requireEditable(current);
+
+        return apply(client, current);
+      });
+    } catch (error) {
+      throw toSkillConflict(error);
+    }
+  }
 
   /**
    * Creates a skill and its version-1 snapshot in one transaction. A Bot
@@ -298,14 +371,7 @@ export class SkillRepository {
 
   /** Reads one live (draft/active/archived) skill owned by the actor. */
   async get(actorUserId: string, skillId: string): Promise<Skill> {
-    const ownerUserId = requireActorUserId(actorUserId);
-    const id = requireResourceId(skillId);
-
-    return toSkill(
-      requireRow(
-        await this.pool.query<SkillRow>(SKILL_BY_ID_LIVE, [id, ownerUserId]),
-      ),
-    );
+    return toSkill(await loadSkill(this.pool, actorUserId, skillId));
   }
 
   /**
@@ -328,8 +394,7 @@ export class SkillRepository {
       conditions.push("status = 'deleted'");
     } else {
       values.push(normalized.status);
-      conditions.push(`status = $${values.length}`);
-      conditions.push('deleted_at IS NULL');
+      conditions.push(`status = $${values.length}`, 'deleted_at IS NULL');
     }
 
     if (normalized.botId === null) {
@@ -361,12 +426,11 @@ export class SkillRepository {
       values,
     );
 
-    const hasMore = result.rows.length > normalized.limit;
-    const rows = hasMore ? result.rows.slice(0, normalized.limit) : result.rows;
-    const last = rows.at(-1);
+    const { page, hasMore } = toPage(result.rows, normalized.limit);
+    const last = page.at(-1);
 
     return {
-      skills: rows.map(toSkill),
+      skills: page.map(toSkill),
       nextCursor:
         hasMore && last !== undefined
           ? encodeSkillCursor({
@@ -390,48 +454,40 @@ export class SkillRepository {
     const id = requireResourceId(skillId);
     const patch = normalizeUpdateSkillInput(input);
 
-    try {
-      return await withTransaction(this.pool, async (client) => {
-        const current = await loadForUpdate(client, ownerUserId, id);
-        requireEditable(current);
+    return this.edit(ownerUserId, id, async (client, current) => {
+      const nextVersion = current.version + 1;
+      const next = {
+        name: patch.name ?? current.name,
+        description: patch.description ?? current.description,
+        bodyMarkdown: patch.bodyMarkdown ?? current.body_markdown,
+      };
 
-        const nextVersion = current.version + 1;
-
-        await insertVersion(client, ownerUserId, {
-          id: current.id,
-          version: nextVersion,
-          name: patch.name ?? current.name,
-          description: patch.description ?? current.description,
-          bodyMarkdown: patch.bodyMarkdown ?? current.body_markdown,
-        });
-
-        const result = await client.query<SkillRow>(
-          `UPDATE skills
-              SET name = $3,
-                  description = $4,
-                  body_markdown = $5,
-                  version = $6,
-                  updated_at = now()
-            WHERE id = $1
-              AND owner_user_id = $2
-              AND deleted_at IS NULL
-              AND status IN ${LIVE_STATUSES}
-            RETURNING ${SKILL_COLUMNS}`,
-          [
-            id,
-            ownerUserId,
-            patch.name ?? current.name,
-            patch.description ?? current.description,
-            patch.bodyMarkdown ?? current.body_markdown,
-            nextVersion,
-          ],
-        );
-
-        return toSkill(requireRow(result));
+      await insertVersion(client, ownerUserId, {
+        id: current.id,
+        version: nextVersion,
+        ...next,
       });
-    } catch (error) {
-      throw toSkillConflict(error);
-    }
+
+      const result = await client.query<SkillRow>(
+        `UPDATE skills
+            SET name = $3,
+                description = $4,
+                body_markdown = $5,
+                version = $6,
+                updated_at = now()
+          ${SKILL_EDITABLE_TAIL}`,
+        [
+          id,
+          ownerUserId,
+          next.name,
+          next.description,
+          next.bodyMarkdown,
+          nextVersion,
+        ],
+      );
+
+      return toSkill(requireRow(result));
+    });
   }
 
   /**
@@ -450,9 +506,7 @@ export class SkillRepository {
                 WHEN status = 'archived' THEN updated_at
                 ELSE now()
               END
-        WHERE id = $1
-          AND owner_user_id = $2
-          AND deleted_at IS NULL
+        WHERE ${SKILL_LIVE_SCOPE}
         RETURNING ${SKILL_COLUMNS}`,
       [id, ownerUserId],
     );
@@ -469,12 +523,10 @@ export class SkillRepository {
     const id = requireResourceId(skillId);
 
     return withTransaction(this.pool, async (client) => {
-      const current = requireRow(
-        await client.query<SkillRow>(`${SKILL_BY_ID_ANY} FOR UPDATE`, [
-          id,
-          ownerUserId,
-        ]),
-      );
+      const current = await loadSkill(client, ownerUserId, id, {
+        includeDeleted: true,
+        forUpdate: true,
+      });
 
       if (current.status === 'deleted') {
         return toSkill(current);
@@ -486,8 +538,7 @@ export class SkillRepository {
                 archived_at = NULL,
                 deleted_at = now(),
                 updated_at = now()
-          WHERE id = $1
-            AND owner_user_id = $2
+          WHERE ${SKILL_OWNER_SCOPE}
             AND status <> 'deleted'
           RETURNING ${SKILL_COLUMNS}`,
         [id, ownerUserId],
@@ -510,37 +561,26 @@ export class SkillRepository {
     const id = requireResourceId(skillId);
     const targetBotId = requireResourceId(botId);
 
-    try {
-      return await withTransaction(this.pool, async (client) => {
-        const current = await loadForUpdate(client, ownerUserId, id);
-        requireEditable(current);
+    return this.edit(ownerUserId, id, async (client, current) => {
+      // Check the Bot before the idempotent early return: an archived or
+      // deleted Bot is not a valid attachment target even if the skill is
+      // already attached to it.
+      await requireAttachableBot(client, ownerUserId, targetBotId);
 
-        // Check the Bot before the idempotent early return: an archived or
-        // deleted Bot is not a valid attachment target even if the skill is
-        // already attached to it.
-        await requireAttachableBot(client, ownerUserId, targetBotId);
+      if (current.bot_id === targetBotId) {
+        return toSkill(current);
+      }
 
-        if (current.bot_id === targetBotId) {
-          return toSkill(current);
-        }
+      const result = await client.query<SkillRow>(
+        `UPDATE skills
+            SET bot_id = $3,
+                updated_at = now()
+          ${SKILL_EDITABLE_TAIL}`,
+        [id, ownerUserId, targetBotId],
+      );
 
-        const result = await client.query<SkillRow>(
-          `UPDATE skills
-              SET bot_id = $3,
-                  updated_at = now()
-            WHERE id = $1
-              AND owner_user_id = $2
-              AND deleted_at IS NULL
-              AND status IN ${LIVE_STATUSES}
-            RETURNING ${SKILL_COLUMNS}`,
-          [id, ownerUserId, targetBotId],
-        );
-
-        return toSkill(requireRow(result));
-      });
-    } catch (error) {
-      throw toSkillConflict(error);
-    }
+      return toSkill(requireRow(result));
+    });
   }
 
   /**
@@ -552,7 +592,9 @@ export class SkillRepository {
     const id = requireResourceId(skillId);
 
     return withTransaction(this.pool, async (client) => {
-      const current = await loadForUpdate(client, ownerUserId, id);
+      const current = await loadSkill(client, ownerUserId, id, {
+        forUpdate: true,
+      });
       requireEditable(current);
 
       if (current.bot_id === null) {
@@ -563,11 +605,7 @@ export class SkillRepository {
         `UPDATE skills
             SET bot_id = NULL,
                 updated_at = now()
-          WHERE id = $1
-            AND owner_user_id = $2
-            AND deleted_at IS NULL
-            AND status IN ${LIVE_STATUSES}
-          RETURNING ${SKILL_COLUMNS}`,
+          ${SKILL_EDITABLE_TAIL}`,
         [id, ownerUserId],
       );
 
@@ -589,13 +627,7 @@ export class SkillRepository {
     const normalized = normalizeListSkillVersionsOptions(options);
 
     requireRow(
-      await this.pool.query<SkillRow>(
-        `SELECT id FROM skills
-          WHERE id = $1
-            AND owner_user_id = $2
-            AND deleted_at IS NULL`,
-        [id, ownerUserId],
-      ),
+      await this.pool.query<SkillRow>(SKILL_EXISTS_LIVE, [id, ownerUserId]),
     );
 
     const values: unknown[] = [id, ownerUserId];
@@ -610,26 +642,17 @@ export class SkillRepository {
 
     const result = await this.pool.query<SkillVersionRow>(
       `SELECT ${SKILL_VERSION_COLUMNS}
-         FROM skill_versions v
-         JOIN skills s
-           ON s.id = v.skill_id
-          AND s.owner_user_id = v.owner_user_id
-        WHERE v.skill_id = $1
-          AND v.owner_user_id = $2
-          AND s.deleted_at IS NULL${versionFilter}
+         ${SKILL_VERSION_SOURCE}${versionFilter}
         ORDER BY v.version DESC
         LIMIT $${values.length}`,
       values,
     );
 
-    const hasMore = result.rows.length > normalized.limit;
-    const rows = hasMore
-      ? result.rows.slice(0, normalized.limit)
-      : result.rows;
-    const last = rows.at(-1);
+    const { page, hasMore } = toPage(result.rows, normalized.limit);
+    const last = page.at(-1);
 
     return {
-      versions: rows.map(toSkillVersion),
+      versions: page.map(toSkillVersion),
       nextBeforeVersion: hasMore && last !== undefined ? last.version : null,
     };
   }
@@ -647,14 +670,8 @@ export class SkillRepository {
       requireRow(
         await this.pool.query<SkillVersionRow>(
           `SELECT ${SKILL_VERSION_COLUMNS}
-             FROM skill_versions v
-             JOIN skills s
-               ON s.id = v.skill_id
-              AND s.owner_user_id = v.owner_user_id
-            WHERE v.skill_id = $1
-              AND v.owner_user_id = $2
-              AND v.version = $3
-              AND s.deleted_at IS NULL`,
+             ${SKILL_VERSION_SOURCE}
+            AND v.version = $3`,
           [id, ownerUserId, version],
         ),
       ),
