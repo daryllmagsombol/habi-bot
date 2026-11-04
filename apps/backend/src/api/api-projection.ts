@@ -23,7 +23,7 @@ function firstNonBlankLine(value: string): string {
 
 export function purposeFragment(bot: BotProfile): string {
   const source = bot.description.trim() || firstNonBlankLine(bot.instructionsMarkdown);
-  const collapsed = source.replace(/\s+/g, ' ').trim();
+  const collapsed = source.replaceAll(/\s+/g, ' ').trim();
 
   return Array.from(collapsed).slice(0, PURPOSE_FRAGMENT_MAX_LENGTH).join('');
 }
