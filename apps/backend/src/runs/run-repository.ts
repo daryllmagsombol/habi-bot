@@ -71,12 +71,137 @@ const RUN_BY_IDEMPOTENCY_KEY = `SELECT ${RUN_COLUMNS}
 
 const NON_TERMINAL_STATUSES = ['queued', 'running', 'retry_wait'] as const;
 
+/**
+ * Single-Run atomic claim. `unknown` is the conservative "a provider call may
+ * be sent" state, so only one dispatcher can move a reservation out of
+ * `not_dispatched`; a concurrent or repeated caller updates nothing.
+ */
+const CLAIM_RUN = `UPDATE runs
+   SET dispatch_state = 'unknown',
+       updated_at = now()
+ WHERE id = $1
+   AND owner_user_id = $2
+   AND status = 'queued'
+   AND dispatch_state = 'not_dispatched'
+ RETURNING ${RUN_COLUMNS}`;
+
+/**
+ * Reverts an undispatched claim after a failure that provably never reached the
+ * provider. Never touches an accepted dispatch.
+ */
+const RELEASE_CLAIM = `UPDATE runs
+   SET dispatch_state = 'not_dispatched',
+       updated_at = now()
+ WHERE id = $1
+   AND owner_user_id = $2
+   AND status = 'queued'
+   AND dispatch_state = 'unknown'
+ RETURNING id`;
+
+/**
+ * Recovery scan. `LIMIT NULL` means no limit. The lease predicate deliberately
+ * excludes `queued` + `not_dispatched`, which is still dispatchable work.
+ */
+const RECOVERY_ROWS = `SELECT ${RUN_COLUMNS}
+   FROM runs
+  WHERE status = ANY($1::text[])
+    AND ($2::uuid IS NULL OR owner_user_id = $2::uuid)
+    AND ($3::uuid[] IS NULL OR id = ANY($3::uuid[]))
+    AND (
+      $4::bigint IS NULL
+      OR (
+        updated_at <= now() - ($4::bigint * interval '1 millisecond')
+        AND (
+          status = 'running'
+          OR status = 'retry_wait'
+          OR (status = 'queued' AND dispatch_state <> 'not_dispatched')
+        )
+      )
+    )
+    AND NOT (id = ANY($5::uuid[]))
+  ORDER BY created_at ASC, id ASC
+  LIMIT $6::bigint`;
+
+const RESERVATION_BY_RUN = `SELECT id, state
+   FROM usage_reservations
+  WHERE run_id = $1
+    AND owner_user_id = $2`;
+
+const CONVERSATION_BOT = `SELECT bot_id
+   FROM conversations
+  WHERE id = $1
+    AND owner_user_id = $2
+    AND deleted_at IS NULL`;
+
+const MESSAGE_SEQ_BY_ID = `SELECT seq
+   FROM messages
+  WHERE id = $1
+    AND conversation_id = $2
+    AND owner_user_id = $3
+    AND deleted_at IS NULL`;
+
+const MESSAGE_SEQ_BEFORE_RUN = `SELECT max(seq) AS seq
+   FROM messages
+  WHERE conversation_id = $1
+    AND owner_user_id = $2
+    AND deleted_at IS NULL
+    AND created_at <= (
+      SELECT created_at
+        FROM runs
+       WHERE id = $3
+         AND owner_user_id = $2
+    )`;
+
+const CONTEXT_MESSAGES = `SELECT id, role, content
+   FROM messages
+  WHERE owner_user_id = $1
+    AND conversation_id = $2
+    AND deleted_at IS NULL
+    AND status <> 'deleted'
+    AND seq <= $3
+  ORDER BY seq ASC
+  LIMIT $4`;
+
 export interface InsertQueuedRunInput {
   ownerUserId: string;
   conversationId: string;
   idempotencyKey: string;
   requestFingerprint: string;
+  /**
+   * Server-generated id. Admission reserves the allowance before the Run row
+   * exists, so the reservation and the row must agree on the same id. Omitted
+   * uses the table default.
+   */
+  runId?: string;
 }
+
+export interface RunReservationRef {
+  id: string;
+  state: 'reserved' | 'settled' | 'released' | 'unknown';
+}
+
+export interface RunContextMessageRow {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+/**
+ * Bounded recovery scan. `staleAfterMs` selects only rows whose lease expired
+ * *and* that may already have been claimed or dispatched; a fresh
+ * `queued`/`not_dispatched` reservation is excluded because the claim loop can
+ * still dispatch it.
+ */
+export interface RecoveryScanFilter {
+  ownerUserId: string | null;
+  runIds: readonly string[] | null;
+  staleAfterMs: number | null;
+  excludeRunIds: readonly string[];
+  limit: number | null;
+}
+
+/** Hard ceiling matching the run-controller context bound. */
+export const MAX_CONTEXT_MESSAGES = 200;
 
 export interface TerminalizeRunInput {
   runId: string;
@@ -200,6 +325,7 @@ export class RunRepository {
   async insertQueued(input: InsertQueuedRunInput): Promise<RunRow | null> {
     const result = await this.pool.query<RunRow>(
       `INSERT INTO runs (
+         id,
          owner_user_id,
          conversation_id,
          idempotency_key,
@@ -209,7 +335,10 @@ export class RunRepository {
          usage_status,
          usage_cost_status
        )
-       VALUES ($1, $2, $3, $4, 'queued', 'not_dispatched', 'unknown', 'unknown')
+       VALUES (
+         COALESCE($5::uuid, gen_random_uuid()),
+         $1, $2, $3, $4, 'queued', 'not_dispatched', 'unknown', 'unknown'
+       )
        ON CONFLICT (owner_user_id, idempotency_key) DO NOTHING
        RETURNING ${RUN_COLUMNS}`,
       [
@@ -217,10 +346,36 @@ export class RunRepository {
         requireResourceId(input.conversationId),
         input.idempotencyKey,
         input.requestFingerprint,
+        input.runId === undefined ? null : requireResourceId(input.runId),
       ],
     );
 
     return result.rows[0] ?? null;
+  }
+
+  /**
+   * Atomically moves one owned reservation into the single-dispatch claim.
+   * Returns null when the Run is terminal, already claimed, or already
+   * dispatched, so the caller returns the stored row instead of calling the
+   * provider a second time.
+   */
+  async claimRun(runId: string, ownerUserId: string): Promise<RunRow | null> {
+    const result = await this.pool.query<RunRow>(CLAIM_RUN, [
+      requireResourceId(runId),
+      requireActorUserId(ownerUserId),
+    ]);
+
+    return result.rows[0] ?? null;
+  }
+
+  /** Reverts an undispatched claim after a provably pre-provider failure. */
+  async releaseClaim(runId: string, ownerUserId: string): Promise<boolean> {
+    const result = await this.pool.query(RELEASE_CLAIM, [
+      requireResourceId(runId),
+      requireActorUserId(ownerUserId),
+    ]);
+
+    return result.rows.length > 0;
   }
 
   /**
@@ -357,22 +512,147 @@ export class RunRepository {
   }
 
   /**
-   * Non-terminal rows for restart reconciliation. Passing an owner narrows the
-   * scan to that user; the caller never derives ownership from a payload id.
+   * Recovery scan. With no lease bound this is the historical full sweep over
+   * every non-terminal row, including fresh reservations; callers that run
+   * alongside a live claim loop must pass a lease filter.
    */
-  async listNonTerminal(actorUserId: string | null): Promise<RunRow[]> {
-    const ownerUserId =
-      actorUserId === null ? null : requireActorUserId(actorUserId);
-
-    const result = await this.pool.query<RunRow>(
-      `SELECT ${RUN_COLUMNS}
-         FROM runs
-        WHERE status = ANY($1::text[])
-          AND ($2::uuid IS NULL OR owner_user_id = $2::uuid)
-        ORDER BY created_at ASC, id ASC`,
-      [NON_TERMINAL_STATUSES, ownerUserId],
-    );
+  async listForRecovery(filter: RecoveryScanFilter): Promise<RunRow[]> {
+    const result = await this.pool.query<RunRow>(RECOVERY_ROWS, [
+      NON_TERMINAL_STATUSES,
+      filter.ownerUserId,
+      filter.runIds,
+      filter.staleAfterMs,
+      filter.excludeRunIds,
+      filter.limit,
+    ]);
 
     return result.rows;
   }
+
+  /**
+   * Non-terminal rows for restart reconciliation. Passing an owner narrows the
+   * scan to that user; the caller never derives ownership from a payload id.
+   */
+  listNonTerminal(actorUserId: string | null): Promise<RunRow[]> {
+    return this.listForRecovery({
+      ownerUserId:
+        actorUserId === null ? null : requireActorUserId(actorUserId),
+      runIds: null,
+      staleAfterMs: null,
+      excludeRunIds: [],
+      limit: null,
+    });
+  }
+
+  /** The allowance hold for one Run, if admission created one. */
+  async findReservation(
+    runId: string,
+    ownerUserId: string,
+  ): Promise<RunReservationRef | null> {
+    const result = await this.pool.query<RunReservationRef>(
+      RESERVATION_BY_RUN,
+      [requireResourceId(runId), requireActorUserId(ownerUserId)],
+    );
+
+    return result.rows[0] ?? null;
+  }
+
+  /** Bot identity for a persisted Run, resolved through the owned conversation. */
+  async loadConversationBot(
+    ownerUserId: string,
+    conversationId: string,
+  ): Promise<string | null> {
+    const result = await this.pool.query<{ bot_id: string }>(CONVERSATION_BOT, [
+      requireResourceId(conversationId),
+      requireActorUserId(ownerUserId),
+    ]);
+
+    return result.rows[0]?.bot_id ?? null;
+  }
+
+  /**
+   * Rebuilds the Habi-selected context for a persisted Run. The bound is the
+   * message that produced the Run when the API's `api-message:<id>` key is
+   * present, otherwise the latest message written before the Run row. No
+   * memory or Bot content is re-selected here.
+   */
+  async loadContextMessages(
+    ownerUserId: string,
+    conversationId: string,
+    runId: string,
+    idempotencyKey: string,
+  ): Promise<RunContextMessageRow[]> {
+    const owner = requireActorUserId(ownerUserId);
+    const conversation = requireResourceId(conversationId);
+    const triggerSeq = await this.loadTriggerSeq(
+      owner,
+      conversation,
+      requireResourceId(runId),
+      idempotencyKey,
+    );
+
+    if (triggerSeq === null) {
+      return [];
+    }
+
+    const result = await this.pool.query<RunContextMessageRow>(CONTEXT_MESSAGES, [
+      owner,
+      conversation,
+      triggerSeq,
+      MAX_CONTEXT_MESSAGES,
+    ]);
+
+    return result.rows;
+  }
+
+  private async loadTriggerSeq(
+    ownerUserId: string,
+    conversationId: string,
+    runId: string,
+    idempotencyKey: string,
+  ): Promise<number | null> {
+    const messageId = triggerMessageId(idempotencyKey);
+
+    if (messageId !== null) {
+      const byId = await this.pool.query<{ seq: string }>(MESSAGE_SEQ_BY_ID, [
+        messageId,
+        conversationId,
+        ownerUserId,
+      ]);
+      const row = byId.rows[0];
+
+      if (row !== undefined) {
+        return Number(row.seq);
+      }
+    }
+
+    // Fallback: the conversation's last message at the Run's creation instant.
+    // `$3` is the Run id, so a foreign Run cannot widen the bound.
+    const byTime = await this.pool.query<{ seq: string | null }>(
+      MESSAGE_SEQ_BEFORE_RUN,
+      [conversationId, ownerUserId, runId],
+    );
+
+    const seq = byTime.rows[0]?.seq;
+
+    return seq === null || seq === undefined ? null : Number(seq);
+  }
+}
+
+const API_MESSAGE_KEY_PREFIX = 'api-message:';
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The H-018 API encodes the triggering message id in the Run's idempotency key.
+ * Anything else falls back to the time bound; a malformed suffix is ignored.
+ */
+export function triggerMessageId(idempotencyKey: string): string | null {
+  if (!idempotencyKey.startsWith(API_MESSAGE_KEY_PREFIX)) {
+    return null;
+  }
+
+  const suffix = idempotencyKey.slice(API_MESSAGE_KEY_PREFIX.length);
+
+  return UUID_PATTERN.test(suffix) ? suffix : null;
 }

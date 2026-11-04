@@ -13,3 +13,16 @@ export class RunIdempotencyConflictError extends Error {
     this.name = 'RunIdempotencyConflictError';
   }
 }
+
+/**
+ * The persisted Run cannot produce a provider request: its conversation is
+ * missing/not owned, or no context message exists at the Run's trigger bound.
+ * This is a permanent input failure, so dispatch terminalizes it without ever
+ * calling the adapter.
+ */
+export class RunContextError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RunContextError';
+  }
+}
