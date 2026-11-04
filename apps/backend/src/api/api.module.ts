@@ -5,28 +5,21 @@
  * otherwise, so the default app has no `/api` surface and no database pool from
  * this slice.
  *
- * It provides its own H-017 session core instead of importing
- * `SessionSpikeModule` or `AuthModule`, so enabling the chat surface does not
- * also expose fixture-login or auth-spike routes. The session service is
- * in-memory, exactly like the contract slice it reuses.
+ * The session core is imported from `SessionCoreModule` and is the same
+ * instance the auth and SSO surfaces use. Importing `AuthModule` or
+ * `SessionSpikeModule` here would expose login/fixture routes behind the chat
+ * flag, so the shared module is imported directly instead. The session service
+ * remains in-memory, exactly like the contract slice it reuses.
  */
 import { Module } from '@nestjs/common';
-import { SESSION_CLOCK, SessionService, systemClock } from '../session/session.service.js';
-import { SessionAuthGuard } from '../session/session-auth.guard.js';
-import { SessionCsrfGuard } from '../session/session-csrf.guard.js';
+import { SessionCoreModule } from '../session/session-core.module.js';
 import { ApiController } from './api.controller.js';
 import { ApiErrorFilter } from './api-errors.js';
 import { ApiRuntime } from './api-runtime.js';
 
 @Module({
+  imports: [SessionCoreModule],
   controllers: [ApiController],
-  providers: [
-    SessionService,
-    { provide: SESSION_CLOCK, useValue: systemClock },
-    SessionAuthGuard,
-    SessionCsrfGuard,
-    ApiErrorFilter,
-    ApiRuntime,
-  ],
+  providers: [ApiErrorFilter, ApiRuntime],
 })
 export class P1ApiModule {}
