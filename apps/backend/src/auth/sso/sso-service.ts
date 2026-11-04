@@ -40,11 +40,14 @@ import type { SsoProviderConfig } from './sso-config.js';
 import type {
   SsoCallbackInput,
   SsoCallbackResult,
+  SsoIdentity,
   SsoLinkStartInput,
   SsoLinkedIdentity,
+  SsoPendingAuthorization,
   SsoProvider,
   SsoProviderId,
   SsoServiceOptions,
+  SsoSessionPort,
   SsoStartInput,
   SsoStartResult,
   SsoUnlinkInput,
@@ -120,6 +123,66 @@ export function safeReturnPath(raw: unknown): string {
   }
 
   return raw;
+}
+
+interface CallbackCredentials {
+  readonly state: string;
+  readonly code: string;
+  readonly bindingSecret: string;
+}
+
+function readCallbackCredentials(input: SsoCallbackInput): CallbackCredentials {
+  // A provider error (user cancelled, access denied) is never echoed. It is
+  // one uniform failure so provider text cannot reach a response or a log.
+  if (input.providerError !== undefined) {
+    throw new SsoError('sso_failed');
+  }
+
+  const { state, code, bindingSecret } = input;
+
+  if (
+    state === undefined ||
+    code === undefined ||
+    bindingSecret === undefined ||
+    !TOKEN_SHAPE.test(state) ||
+    !TOKEN_SHAPE.test(bindingSecret) ||
+    !CODE_SHAPE.test(code)
+  ) {
+    throw new SsoError('sso_state_invalid');
+  }
+
+  return { state, code, bindingSecret };
+}
+
+/** A link callback must prove the same live session that started the link. */
+function assertLinkSession(
+  sessions: SsoSessionPort,
+  pending: SsoPendingAuthorization,
+  sessionSecret: string | undefined,
+  at: number,
+): void {
+  const session =
+    sessionSecret === undefined ? undefined : sessions.validate(sessionSecret, at);
+
+  if (
+    session === undefined ||
+    pending.userId === null ||
+    pending.sessionHash === null ||
+    session.userId !== pending.userId ||
+    !constantTimeEquals(pending.sessionHash, hashToken(sessionSecret ?? ''))
+  ) {
+    throw new SsoError('unauthenticated');
+  }
+}
+
+/** Only a provider-trusted address may create or link an account. */
+function verifiedEmailOf(identity: SsoIdentity): string | undefined {
+  const canonicalEmail =
+    identity.email === undefined ? undefined : canonicalizeEmail(identity.email);
+
+  return identity.emailVerified && canonicalEmail !== undefined
+    ? canonicalEmail
+    : undefined;
 }
 
 export class SsoService {
@@ -230,27 +293,70 @@ export class SsoService {
       at,
     );
 
-    // A provider error (user cancelled, access denied) is never echoed. It is
-    // one uniform failure so provider text cannot reach a response or a log.
-    if (input.providerError !== undefined) {
+    const credentials = readCallbackCredentials(input);
+    const pending = await this.resolvePending(
+      provider,
+      credentials.state,
+      credentials.bindingSecret,
+      at,
+    );
+
+    if (pending.purpose === 'link') {
+      assertLinkSession(this.sessions, pending, input.sessionSecret, at);
+    }
+
+    const tokens = await this.callProvider(() =>
+      provider.exchangeCode({
+        code: credentials.code,
+        codeVerifier: pending.codeVerifier,
+        redirectUri: pending.redirectUri,
+      }),
+    );
+
+    const identity = await this.callProvider(() =>
+      provider.readIdentity({ tokens, nonce: pending.nonce }),
+    );
+
+    if (identity.provider !== provider.id) {
       throw new SsoError('sso_failed');
     }
 
-    const state = input.state;
-    const code = input.code;
-    const bindingSecret = input.bindingSecret;
+    const verifiedEmail = verifiedEmailOf(identity);
 
-    if (
-      state === undefined ||
-      code === undefined ||
-      bindingSecret === undefined ||
-      !TOKEN_SHAPE.test(state) ||
-      !TOKEN_SHAPE.test(bindingSecret) ||
-      !CODE_SHAPE.test(code)
-    ) {
-      throw new SsoError('sso_state_invalid');
+    if (pending.purpose === 'link') {
+      return this.completeLinkCallback(pending, identity, verifiedEmail, provider, at);
     }
 
+    return this.completeLoginCallback(
+      pending,
+      identity,
+      verifiedEmail,
+      provider,
+      input,
+      at,
+    );
+  }
+
+  async listIdentities(userId: string): Promise<SsoLinkedIdentity[]> {
+    return this.repository.listIdentities(userId);
+  }
+
+  async unlink(input: SsoUnlinkInput): Promise<void> {
+    // The provider must be configured; a disabled provider has no route at all.
+    this.provider(input.providerId);
+    await this.repository.unlinkIdentity({
+      userId: input.userId,
+      provider: input.providerId,
+      at: new Date(this.now()),
+    });
+  }
+
+  private async resolvePending(
+    provider: SsoProvider,
+    state: string,
+    bindingSecret: string,
+    at: number,
+  ): Promise<SsoPendingAuthorization> {
     const pending = await this.repository.findPending(
       hashToken(state),
       provider.id,
@@ -272,65 +378,44 @@ export class SsoService {
       throw new SsoError('sso_state_invalid');
     }
 
-    if (pending.purpose === 'link') {
-      const session =
-        input.sessionSecret === undefined
-          ? undefined
-          : this.sessions.validate(input.sessionSecret, at);
+    return pending;
+  }
 
-      if (
-        session === undefined ||
-        pending.userId === null ||
-        pending.sessionHash === null ||
-        session.userId !== pending.userId ||
-        !constantTimeEquals(pending.sessionHash, hashToken(input.sessionSecret ?? ''))
-      ) {
-        throw new SsoError('unauthenticated');
-      }
+  private async completeLinkCallback(
+    pending: SsoPendingAuthorization,
+    identity: SsoIdentity,
+    verifiedEmail: string | undefined,
+    provider: SsoProvider,
+    at: number,
+  ): Promise<SsoCallbackResult> {
+    if (pending.userId === null) {
+      throw new SsoError('sso_state_invalid');
     }
 
-    const tokens = await this.callProvider(() =>
-      provider.exchangeCode({
-        code,
-        codeVerifier: pending.codeVerifier,
-        redirectUri: pending.redirectUri,
-      }),
-    );
-
-    const identity = await this.callProvider(() =>
-      provider.readIdentity({ tokens, nonce: pending.nonce }),
-    );
-
-    if (identity.provider !== provider.id) {
-      throw new SsoError('sso_failed');
+    if (verifiedEmail === undefined) {
+      throw new SsoError('sso_email_unverified');
     }
 
-    const canonicalEmail =
-      identity.email === undefined ? undefined : canonicalizeEmail(identity.email);
-    const verifiedEmail =
-      identity.emailVerified && canonicalEmail !== undefined ? canonicalEmail : undefined;
+    await this.repository.completeLink({
+      pendingId: pending.id,
+      provider: provider.id,
+      subject: identity.subject,
+      email: verifiedEmail,
+      userId: pending.userId,
+      at: new Date(at),
+    });
 
-    if (pending.purpose === 'link') {
-      if (pending.userId === null) {
-        throw new SsoError('sso_state_invalid');
-      }
+    return { kind: 'link', provider: provider.id, returnTo: pending.returnTo };
+  }
 
-      if (verifiedEmail === undefined) {
-        throw new SsoError('sso_email_unverified');
-      }
-
-      await this.repository.completeLink({
-        pendingId: pending.id,
-        provider: provider.id,
-        subject: identity.subject,
-        email: verifiedEmail,
-        userId: pending.userId,
-        at: new Date(at),
-      });
-
-      return { kind: 'link', provider: provider.id, returnTo: pending.returnTo };
-    }
-
+  private async completeLoginCallback(
+    pending: SsoPendingAuthorization,
+    identity: SsoIdentity,
+    verifiedEmail: string | undefined,
+    provider: SsoProvider,
+    input: SsoCallbackInput,
+    at: number,
+  ): Promise<SsoCallbackResult> {
     const account = await this.repository.completeLogin({
       pendingId: pending.id,
       provider: provider.id,
@@ -365,20 +450,6 @@ export class SsoService {
       },
       returnTo: pending.returnTo,
     };
-  }
-
-  async listIdentities(userId: string): Promise<SsoLinkedIdentity[]> {
-    return this.repository.listIdentities(userId);
-  }
-
-  async unlink(input: SsoUnlinkInput): Promise<void> {
-    // The provider must be configured; a disabled provider has no route at all.
-    this.provider(input.providerId);
-    await this.repository.unlinkIdentity({
-      userId: input.userId,
-      provider: input.providerId,
-      at: new Date(this.now()),
-    });
   }
 
   private provider(id: SsoProviderId): SsoProvider {

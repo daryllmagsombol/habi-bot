@@ -38,6 +38,12 @@ import type {
   UnlinkIdentityInput,
 } from './sso-types.js';
 
+/**
+ * `timestamptz`/`timestamp` columns arrive either as `Date` (pg typings) or as
+ * text, depending on the query path.
+ */
+type DbTime = Date | string;
+
 interface PendingRow {
   id: string;
   provider: SsoProviderId;
@@ -50,24 +56,29 @@ interface PendingRow {
   user_id: string | null;
   session_hash: string | null;
   invite_token_hash: string | null;
-  consumed_at: Date | string | null;
-  expires_at: Date | string;
+  consumed_at: DbTime | null;
+  expires_at: DbTime;
 }
 
 interface IdentityRow {
   id: string;
   user_id: string;
-  revoked_at: Date | string | null;
+  revoked_at: DbTime | null;
 }
 
 interface InviteRow {
   id: string;
   email: string;
-  expires_at: Date | string;
-  used_at: Date | string | null;
+  expires_at: DbTime;
+  used_at: DbTime | null;
 }
 
-function asTime(value: Date | string): number {
+interface AccountRow {
+  readonly id: string;
+  readonly email: string;
+}
+
+function asTime(value: DbTime): number {
   return value instanceof Date ? value.getTime() : Date.parse(value);
 }
 
@@ -101,8 +112,7 @@ async function lockPending(
   const row = result.rows[0];
 
   if (
-    row === undefined ||
-    row.consumed_at !== null ||
+    row?.consumed_at !== null ||
     asTime(row.expires_at) <= at.getTime() ||
     row.purpose !== purpose
   ) {
@@ -128,6 +138,240 @@ async function consumePending(
   if (consumed.rowCount !== 1) {
     throw stateInvalid();
   }
+}
+
+function assertPendingProvider(pending: PendingRow, provider: SsoProviderId): void {
+  if (pending.provider !== provider) {
+    throw stateInvalid();
+  }
+}
+
+/**
+ * Resolves an already-bound identity. A revoked identity is a deliberate unlink
+ * and must not sign in again; a missing or inactive account fails the login.
+ * Returns `undefined` when no identity exists yet, so the caller can create one.
+ */
+async function resolveExistingLoginIdentity(
+  client: PoolClient,
+  pendingId: string,
+  input: CompleteSsoLoginInput,
+): Promise<CompleteSsoLoginResult | undefined> {
+  const identityResult = await client.query<IdentityRow>(
+    `SELECT id, user_id, revoked_at
+       FROM sso_identities
+      WHERE provider = $1 AND subject = $2
+      FOR UPDATE`,
+    [input.provider, input.subject],
+  );
+  const existing = identityResult.rows[0];
+
+  if (existing === undefined) {
+    return undefined;
+  }
+
+  if (existing.revoked_at !== null) {
+    throw new SsoError('sso_failed');
+  }
+
+  const account = await lockActiveAccountForLogin(client, existing.user_id);
+
+  await client.query(
+    'UPDATE sso_identities SET last_login_at = $2 WHERE id = $1',
+    [existing.id, input.at],
+  );
+  await consumePending(client, pendingId, input.at);
+
+  return { userId: account.id, email: account.email, created: false };
+}
+
+async function lockActiveAccountForLogin(
+  client: PoolClient,
+  userId: string,
+): Promise<AccountRow> {
+  const result = await client.query<AccountRow>(
+    `SELECT id, email
+       FROM users
+      WHERE id = $1
+        AND status = 'active'
+        AND deleted_at IS NULL
+        AND email IS NOT NULL
+      FOR UPDATE`,
+    [userId],
+  );
+  const account = result.rows[0];
+
+  if (account === undefined) {
+    throw new SsoError('sso_failed');
+  }
+
+  return account;
+}
+
+/**
+ * A new account may only be created from a verified address and a valid,
+ * email-bound invite. An unverified provider address is refused before any
+ * account lookup, so the response cannot reveal one. The invite row is locked
+ * for the rest of the transaction.
+ */
+async function lockRedeemableInvite(
+  client: PoolClient,
+  input: CompleteSsoLoginInput,
+  pending: PendingRow,
+): Promise<InviteRow> {
+  if (input.email === undefined) {
+    throw new SsoError('sso_email_unverified');
+  }
+
+  const collision = await client.query(
+    `SELECT id FROM users WHERE email = $1 AND status = 'active' LIMIT 1`,
+    [input.email],
+  );
+
+  if (collision.rowCount !== 0) {
+    throw signupUnavailable();
+  }
+
+  if (pending.invite_token_hash === null) {
+    throw signupUnavailable();
+  }
+
+  const inviteResult = await client.query<InviteRow>(
+    `SELECT id, email, expires_at, used_at
+       FROM invites
+      WHERE token_hash = $1
+      FOR UPDATE`,
+    [pending.invite_token_hash],
+  );
+  const invite = inviteResult.rows[0];
+
+  if (
+    invite?.used_at !== null ||
+    asTime(invite.expires_at) <= input.at.getTime() ||
+    invite.email !== input.email
+  ) {
+    throw signupUnavailable();
+  }
+
+  return invite;
+}
+
+/** Inserts the account and its identity; either unique collision is refused. */
+async function createInvitedAccount(
+  client: PoolClient,
+  input: CompleteSsoLoginInput,
+  email: string,
+): Promise<AccountRow> {
+  let account: AccountRow;
+
+  try {
+    const inserted = await client.query<AccountRow>(
+      `INSERT INTO users (email, email_verified_at)
+       VALUES ($1, $2)
+       RETURNING id, email`,
+      [email, input.at],
+    );
+    const row = inserted.rows[0];
+
+    if (row === undefined) {
+      throw signupUnavailable();
+    }
+
+    account = row;
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      throw signupUnavailable();
+    }
+
+    throw error;
+  }
+
+  try {
+    await client.query(
+      `INSERT INTO sso_identities (
+         user_id, provider, subject, email, email_trusted, last_login_at
+       ) VALUES ($1, $2, $3, $4, true, $5)`,
+      [account.id, input.provider, input.subject, email, input.at],
+    );
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      throw signupUnavailable();
+    }
+
+    throw error;
+  }
+
+  return account;
+}
+
+async function consumeInvite(
+  client: PoolClient,
+  inviteId: string,
+  at: Date,
+): Promise<void> {
+  const consumed = await client.query(
+    'UPDATE invites SET used_at = $2 WHERE id = $1 AND used_at IS NULL',
+    [inviteId, at],
+  );
+
+  if (consumed.rowCount !== 1) {
+    throw signupUnavailable();
+  }
+}
+
+/**
+ * The verified provider email must be this account's canonical email. This is
+ * what stops an authenticated attacker from attaching their own provider
+ * identity to someone else's account.
+ */
+function assertLinkableToAccount(
+  account: { readonly email: string | null },
+  email: string,
+): void {
+  if (account.email === null || account.email !== email) {
+    throw linkUnavailable();
+  }
+}
+
+function assertIdentityOwnedByUser(identity: IdentityRow, userId: string): void {
+  if (identity.user_id !== userId) {
+    throw linkUnavailable();
+  }
+}
+
+async function insertLinkedIdentity(
+  client: PoolClient,
+  input: CompleteSsoLinkInput,
+): Promise<void> {
+  try {
+    await client.query(
+      `INSERT INTO sso_identities (
+         user_id, provider, subject, email, email_trusted, last_login_at
+       ) VALUES ($1, $2, $3, $4, true, $5)`,
+      [input.userId, input.provider, input.subject, input.email, input.at],
+    );
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      throw linkUnavailable();
+    }
+
+    throw error;
+  }
+}
+
+async function relinkIdentity(
+  client: PoolClient,
+  identityId: string,
+  input: CompleteSsoLinkInput,
+): Promise<void> {
+  await client.query(
+    `UPDATE sso_identities
+        SET email = $2,
+            email_trusted = true,
+            revoked_at = NULL,
+            last_login_at = $3
+      WHERE id = $1`,
+    [identityId, input.email, input.at],
+  );
 }
 
 export class SsoRepository implements SsoRepositoryPort {
@@ -200,48 +444,16 @@ export class SsoRepository implements SsoRepositoryPort {
     return withTransaction(this.pool, async (client) => {
       const pending = await lockPending(client, input.pendingId, input.at, 'login');
 
-      if (pending.provider !== input.provider) {
-        throw stateInvalid();
-      }
+      assertPendingProvider(pending, input.provider);
 
-      const identity = await client.query<IdentityRow>(
-        `SELECT id, user_id, revoked_at
-           FROM sso_identities
-          WHERE provider = $1 AND subject = $2
-          FOR UPDATE`,
-        [input.provider, input.subject],
+      const existing = await resolveExistingLoginIdentity(
+        client,
+        input.pendingId,
+        input,
       );
-      const existing = identity.rows[0];
 
       if (existing !== undefined) {
-        // A revoked identity is a deliberate unlink; it must not sign in again.
-        if (existing.revoked_at !== null) {
-          throw new SsoError('sso_failed');
-        }
-
-        const user = await client.query<{ id: string; email: string }>(
-          `SELECT id, email
-             FROM users
-            WHERE id = $1
-              AND status = 'active'
-              AND deleted_at IS NULL
-              AND email IS NOT NULL
-            FOR UPDATE`,
-          [existing.user_id],
-        );
-        const account = user.rows[0];
-
-        if (account === undefined) {
-          throw new SsoError('sso_failed');
-        }
-
-        await client.query(
-          'UPDATE sso_identities SET last_login_at = $2 WHERE id = $1',
-          [existing.id, input.at],
-        );
-        await consumePending(client, input.pendingId, input.at);
-
-        return { userId: account.id, email: account.email, created: false };
+        return existing;
       }
 
       // Closed registration refuses a new account but not an existing identity,
@@ -250,92 +462,10 @@ export class SsoRepository implements SsoRepositoryPort {
         throw new SsoError('registration_closed');
       }
 
-      // New identity: an account can only be created from a verified address and
-      // a valid, email-bound invite. An unverified provider address is refused
-      // before any account lookup, so the response cannot reveal one.
-      if (input.email === undefined) {
-        throw new SsoError('sso_email_unverified');
-      }
+      const invite = await lockRedeemableInvite(client, input, pending);
+      const account = await createInvitedAccount(client, input, invite.email);
 
-      const collision = await client.query(
-        `SELECT id FROM users WHERE email = $1 AND status = 'active' LIMIT 1`,
-        [input.email],
-      );
-
-      if (collision.rowCount !== 0) {
-        throw signupUnavailable();
-      }
-
-      if (pending.invite_token_hash === null) {
-        throw signupUnavailable();
-      }
-
-      const inviteResult = await client.query<InviteRow>(
-        `SELECT id, email, expires_at, used_at
-           FROM invites
-          WHERE token_hash = $1
-          FOR UPDATE`,
-        [pending.invite_token_hash],
-      );
-      const invite = inviteResult.rows[0];
-
-      if (
-        invite === undefined ||
-        invite.used_at !== null ||
-        asTime(invite.expires_at) <= input.at.getTime() ||
-        invite.email !== input.email
-      ) {
-        throw signupUnavailable();
-      }
-
-      let account: { id: string; email: string };
-
-      try {
-        const inserted = await client.query<{ id: string; email: string }>(
-          `INSERT INTO users (email, email_verified_at)
-           VALUES ($1, $2)
-           RETURNING id, email`,
-          [input.email, input.at],
-        );
-        const row = inserted.rows[0];
-
-        if (row === undefined) {
-          throw signupUnavailable();
-        }
-
-        account = row;
-      } catch (error) {
-        if (isUniqueViolation(error)) {
-          throw signupUnavailable();
-        }
-
-        throw error;
-      }
-
-      try {
-        await client.query(
-          `INSERT INTO sso_identities (
-             user_id, provider, subject, email, email_trusted, last_login_at
-           ) VALUES ($1, $2, $3, $4, true, $5)`,
-          [account.id, input.provider, input.subject, input.email, input.at],
-        );
-      } catch (error) {
-        if (isUniqueViolation(error)) {
-          throw signupUnavailable();
-        }
-
-        throw error;
-      }
-
-      const consumedInvite = await client.query(
-        'UPDATE invites SET used_at = $2 WHERE id = $1 AND used_at IS NULL',
-        [invite.id, input.at],
-      );
-
-      if (consumedInvite.rowCount !== 1) {
-        throw signupUnavailable();
-      }
-
+      await consumeInvite(client, invite.id, input.at);
       await consumePending(client, input.pendingId, input.at);
 
       return { userId: account.id, email: account.email, created: true };
@@ -346,9 +476,7 @@ export class SsoRepository implements SsoRepositoryPort {
     await withTransaction(this.pool, async (client) => {
       const pending = await lockPending(client, input.pendingId, input.at, 'link');
 
-      if (pending.provider !== input.provider) {
-        throw stateInvalid();
-      }
+      assertPendingProvider(pending, input.provider);
 
       const userResult = await client.query<{ id: string; email: string | null }>(
         `SELECT id, email
@@ -365,12 +493,7 @@ export class SsoRepository implements SsoRepositoryPort {
         throw linkUnavailable();
       }
 
-      // The verified provider email must be this account's canonical email. This
-      // is what stops an authenticated attacker from attaching their own provider
-      // identity to someone else's account.
-      if (user.email === null || user.email !== input.email) {
-        throw linkUnavailable();
-      }
+      assertLinkableToAccount(user, input.email);
 
       const identityResult = await client.query<IdentityRow>(
         `SELECT id, user_id, revoked_at
@@ -381,35 +504,11 @@ export class SsoRepository implements SsoRepositoryPort {
       );
       const identity = identityResult.rows[0];
 
-      if (identity !== undefined) {
-        if (identity.user_id !== input.userId) {
-          throw linkUnavailable();
-        }
-
-        await client.query(
-          `UPDATE sso_identities
-              SET email = $2,
-                  email_trusted = true,
-                  revoked_at = NULL,
-                  last_login_at = $3
-            WHERE id = $1`,
-          [identity.id, input.email, input.at],
-        );
+      if (identity === undefined) {
+        await insertLinkedIdentity(client, input);
       } else {
-        try {
-          await client.query(
-            `INSERT INTO sso_identities (
-               user_id, provider, subject, email, email_trusted, last_login_at
-             ) VALUES ($1, $2, $3, $4, true, $5)`,
-            [input.userId, input.provider, input.subject, input.email, input.at],
-          );
-        } catch (error) {
-          if (isUniqueViolation(error)) {
-            throw linkUnavailable();
-          }
-
-          throw error;
-        }
+        assertIdentityOwnedByUser(identity, input.userId);
+        await relinkIdentity(client, identity.id, input);
       }
 
       await consumePending(client, input.pendingId, input.at);
@@ -444,8 +543,8 @@ export class SsoRepository implements SsoRepositoryPort {
       provider: SsoProviderId;
       email: string | null;
       email_trusted: boolean;
-      created_at: Date | string;
-      last_login_at: Date | string | null;
+      created_at: DbTime;
+      last_login_at: DbTime | null;
     }>(
       `SELECT provider, email, email_trusted, created_at, last_login_at
          FROM sso_identities

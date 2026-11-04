@@ -55,6 +55,50 @@ async function readJsonObject(response: Response): Promise<Record<string, unknow
   return parsed as Record<string, unknown>;
 }
 
+function readDebuggedUserId(
+  debug: Record<string, unknown>,
+  clientId: string,
+): string {
+  const data = debug.data;
+
+  if (typeof data !== 'object' || data === null || Array.isArray(data)) {
+    fail();
+  }
+
+  const record = data as Record<string, unknown>;
+
+  if (record.is_valid !== true) {
+    fail();
+  }
+
+  // The token must have been minted for this app, not another one.
+  if (record.app_id !== clientId) {
+    fail();
+  }
+
+  const userId = record.user_id;
+
+  if (typeof userId !== 'string' || userId.length === 0) {
+    fail();
+  }
+
+  return userId;
+}
+
+function readProfileEmail(profile: Record<string, unknown>): string | undefined {
+  const email = profile.email;
+
+  if (
+    typeof email !== 'string' ||
+    email.trim().length === 0 ||
+    email.length > 254
+  ) {
+    return undefined;
+  }
+
+  return email;
+}
+
 export class FacebookSsoProvider implements SsoProvider {
   readonly id: SsoProviderId = 'facebook';
   readonly displayName: string;
@@ -109,33 +153,24 @@ export class FacebookSsoProvider implements SsoProvider {
       code_verifier: input.codeVerifier,
     });
 
-    let payload: Record<string, unknown>;
+    const tokenPayload = await this.requestJson(this.config.tokenEndpoint, {
+      method: 'POST',
+      headers: {
+        accept: 'application/json',
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      body: body.toString(),
+      signal: AbortSignal.timeout(10000),
+    });
 
-    try {
-      const response = await this.fetchImpl(this.config.tokenEndpoint, {
-        method: 'POST',
-        headers: {
-          accept: 'application/json',
-          'content-type': 'application/x-www-form-urlencoded',
-        },
-        body: body.toString(),
-        signal: AbortSignal.timeout(10000),
-      });
-
-      payload = await readJsonObject(response);
-    } catch (error) {
-      if (error instanceof SsoError) {
-        throw error;
-      }
-
+    if (
+      typeof tokenPayload.access_token !== 'string' ||
+      tokenPayload.access_token.length === 0
+    ) {
       fail();
     }
 
-    if (typeof payload.access_token !== 'string' || payload.access_token.length === 0) {
-      fail();
-    }
-
-    return { accessToken: payload.access_token };
+    return { accessToken: tokenPayload.access_token };
   }
 
   async readIdentity(input: { tokens: SsoTokenSet; nonce: string }): Promise<SsoIdentity> {
@@ -145,96 +180,15 @@ export class FacebookSsoProvider implements SsoProvider {
       fail();
     }
 
-    const debugEndpoint = this.config.debugTokenEndpoint;
-    const profileEndpoint = this.config.profileEndpoint;
-
-    if (debugEndpoint === undefined || profileEndpoint === undefined) {
-      fail();
-    }
-
-    const debugBody = new URLSearchParams({
-      input_token: accessToken,
-      access_token: `${this.config.clientId}|${this.config.clientSecret}`,
-    });
-
-    let debug: Record<string, unknown>;
-
-    try {
-      const response = await this.fetchImpl(debugEndpoint, {
-        method: 'POST',
-        headers: {
-          accept: 'application/json',
-          'content-type': 'application/x-www-form-urlencoded',
-        },
-        body: debugBody.toString(),
-        signal: AbortSignal.timeout(10000),
-      });
-
-      debug = await readJsonObject(response);
-    } catch (error) {
-      if (error instanceof SsoError) {
-        throw error;
-      }
-
-      fail();
-    }
-
-    const data = debug.data;
-
-    if (typeof data !== 'object' || data === null || Array.isArray(data)) {
-      fail();
-    }
-
-    const record = data as Record<string, unknown>;
-
-    if (record.is_valid !== true) {
-      fail();
-    }
-
-    if (record.app_id !== this.config.clientId) {
-      fail();
-    }
-
-    const tokenUserId = record.user_id;
-
-    if (typeof tokenUserId !== 'string' || tokenUserId.length === 0) {
-      fail();
-    }
-
-    const profileUrl = new URL(profileEndpoint);
-    profileUrl.searchParams.set('fields', 'id,email');
-
-    let profile: Record<string, unknown>;
-
-    try {
-      const response = await this.fetchImpl(profileUrl, {
-        method: 'GET',
-        headers: {
-          accept: 'application/json',
-          authorization: `Bearer ${accessToken}`,
-        },
-        signal: AbortSignal.timeout(10000),
-      });
-
-      profile = await readJsonObject(response);
-    } catch (error) {
-      if (error instanceof SsoError) {
-        throw error;
-      }
-
-      fail();
-    }
+    const endpoints = this.requireEndpoints();
+    const tokenUserId = await this.debugAccessToken(accessToken, endpoints.debug);
+    const profile = await this.readProfile(accessToken, endpoints.profile);
 
     if (profile.id !== tokenUserId) {
       fail();
     }
 
-    const email =
-      typeof profile.email === 'string' &&
-      profile.email.trim().length > 0 &&
-      profile.email.length <= 254
-        ? profile.email
-        : undefined;
+    const email = readProfileEmail(profile);
 
     return {
       provider: this.id,
@@ -243,5 +197,71 @@ export class FacebookSsoProvider implements SsoProvider {
       // No provider claim can establish ownership of the address.
       emailVerified: false,
     };
+  }
+
+  private requireEndpoints(): { readonly debug: string; readonly profile: string } {
+    const debug = this.config.debugTokenEndpoint;
+    const profile = this.config.profileEndpoint;
+
+    if (debug === undefined || profile === undefined) {
+      fail();
+    }
+
+    return { debug, profile };
+  }
+
+  private async requestJson(
+    url: string | URL,
+    init: RequestInit,
+  ): Promise<Record<string, unknown>> {
+    try {
+      const response = await this.fetchImpl(url, init);
+
+      return await readJsonObject(response);
+    } catch (error) {
+      if (error instanceof SsoError) {
+        throw error;
+      }
+
+      fail();
+    }
+  }
+
+  /** Returns the subject the debugged token was issued for, after app checks. */
+  private async debugAccessToken(accessToken: string, endpoint: string): Promise<string> {
+    const body = new URLSearchParams({
+      input_token: accessToken,
+      access_token: `${this.config.clientId}|${this.config.clientSecret}`,
+    });
+
+    const debug = await this.requestJson(endpoint, {
+      method: 'POST',
+      headers: {
+        accept: 'application/json',
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      body: body.toString(),
+      signal: AbortSignal.timeout(10000),
+    });
+
+    return readDebuggedUserId(debug, this.config.clientId);
+  }
+
+  private async readProfile(
+    accessToken: string,
+    endpoint: string,
+  ): Promise<Record<string, unknown>> {
+    const profileUrl = new URL(endpoint);
+
+    profileUrl.searchParams.set('fields', 'id,email');
+
+    return this.requestJson(profileUrl, {
+      method: 'GET',
+      headers: {
+        accept: 'application/json',
+        authorization: `Bearer ${accessToken}`,
+      },
+      signal: AbortSignal.timeout(10000),
+    });
   }
 }

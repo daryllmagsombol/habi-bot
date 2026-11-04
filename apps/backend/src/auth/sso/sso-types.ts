@@ -16,7 +16,7 @@ import type { AuthSessionPort } from '../auth-session-port.js';
 import type { FixedWindowRateLimiter } from '../rate-limit.js';
 import type { SsoConfig, SsoProviderId } from './sso-config.js';
 
-export type { SsoProviderId };
+export type { SsoProviderId } from './sso-config.js';
 
 export type SsoPurpose = 'login' | 'link';
 

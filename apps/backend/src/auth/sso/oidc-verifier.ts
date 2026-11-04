@@ -110,10 +110,196 @@ function audienceMatches(audience: unknown, clientId: string): boolean {
   }
 
   if (Array.isArray(audience)) {
-    return audience.some((value) => value === clientId);
+    return audience.includes(clientId);
   }
 
   return false;
+}
+
+interface TokenSegments {
+  readonly header: string;
+  readonly payload: string;
+  readonly signature: string;
+}
+
+function splitToken(idToken: string): TokenSegments {
+  if (
+    typeof idToken !== 'string' ||
+    idToken.length === 0 ||
+    idToken.length > MAX_TOKEN_LENGTH
+  ) {
+    fail();
+  }
+
+  const segments = idToken.split('.');
+
+  if (segments.length !== 3) {
+    fail();
+  }
+
+  const [header, payload, signature] = segments;
+
+  if (
+    header === undefined ||
+    payload === undefined ||
+    signature === undefined ||
+    !BASE64URL_SEGMENT.test(signature)
+  ) {
+    fail();
+  }
+
+  return { header, payload, signature };
+}
+
+function assertAlgorithm(header: Record<string, unknown>): void {
+  if (typeof header.alg !== 'string' || !ALLOWED_ALGORITHMS.has(header.alg)) {
+    fail();
+  }
+}
+
+/** Never let a token select its own key material. */
+function assertNoEmbeddedKeyMaterial(header: Record<string, unknown>): void {
+  if (header.jwk !== undefined || header.jku !== undefined || header.x5u !== undefined) {
+    fail();
+  }
+}
+
+function assertTokenType(header: Record<string, unknown>): void {
+  if (header.typ !== undefined && header.typ !== 'JWT') {
+    fail();
+  }
+}
+
+function readKeyId(header: Record<string, unknown>): string {
+  const kid = header.kid;
+
+  if (!isNonEmptyString(kid)) {
+    fail();
+  }
+
+  return kid;
+}
+
+function assertIssuer(claim: unknown, issuer: string): void {
+  if (claim !== issuer) {
+    fail();
+  }
+}
+
+function assertAudience(claim: unknown, clientId: string): void {
+  if (!audienceMatches(claim, clientId)) {
+    fail();
+  }
+}
+
+/** OIDC Core §3.1.3.7: when multiple audiences are present, `azp` names the
+ * authorized party and must be this client. */
+function assertAuthorizedParty(claim: unknown, clientId: string): void {
+  if (claim !== undefined && claim !== clientId) {
+    fail();
+  }
+}
+
+function readClaimTime(claim: unknown): number | undefined {
+  return typeof claim === 'number' && Number.isFinite(claim) ? claim : undefined;
+}
+
+function assertNotExpired(claim: unknown, now: number): void {
+  const expiresAt = readClaimTime(claim);
+
+  if (expiresAt === undefined || now >= expiresAt * 1000) {
+    fail();
+  }
+}
+
+function assertIssuedAtNotInFuture(claim: unknown, now: number): void {
+  const issuedAt = readClaimTime(claim);
+
+  if (issuedAt === undefined || issuedAt * 1000 > now + CLOCK_SKEW_MS) {
+    fail();
+  }
+}
+
+function assertNonce(expected: string, provided: unknown): void {
+  if (!constantTimeEquals(expected, provided)) {
+    fail();
+  }
+}
+
+function readSubject(payload: Record<string, unknown>): string {
+  const subject = payload.sub;
+
+  if (!isNonEmptyString(subject) || subject.length > 255) {
+    fail();
+  }
+
+  return subject;
+}
+
+function readEmail(payload: Record<string, unknown>): string | undefined {
+  return isNonEmptyString(payload.email) && payload.email.length <= 254
+    ? payload.email
+    : undefined;
+}
+
+function readEmailVerified(payload: Record<string, unknown>): boolean {
+  return payload.email_verified === true || payload.email_verified === 'true';
+}
+
+function readRawKeys(payload: unknown): readonly unknown[] {
+  if (typeof payload !== 'object' || payload === null) {
+    fail();
+  }
+
+  const rawKeys = (payload as { keys?: unknown }).keys;
+
+  if (!Array.isArray(rawKeys) || rawKeys.length === 0 || rawKeys.length > MAX_KEY_COUNT) {
+    fail();
+  }
+
+  return rawKeys;
+}
+
+function createSigningKey(jwk: JsonWebKeyRecord): KeyObject | undefined {
+  if (jwk.use !== undefined && jwk.use !== 'sig') {
+    return undefined;
+  }
+
+  if (jwk.alg !== undefined && jwk.alg !== 'RS256') {
+    return undefined;
+  }
+
+  if (typeof jwk.n !== 'string' || typeof jwk.e !== 'string') {
+    return undefined;
+  }
+
+  try {
+    return createPublicKey({
+      key: { kty: 'RSA', n: jwk.n, e: jwk.e },
+      format: 'jwk',
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+function readSigningKey(
+  rawKey: unknown,
+): { readonly keyId: string; readonly key: KeyObject } | undefined {
+  if (typeof rawKey !== 'object' || rawKey === null) {
+    return undefined;
+  }
+
+  const jwk = rawKey as JsonWebKeyRecord;
+  const keyId = jwk.kid;
+
+  if (!isNonEmptyString(keyId) || jwk.kty !== 'RSA') {
+    return undefined;
+  }
+
+  const key = createSigningKey(jwk);
+
+  return key === undefined ? undefined : { keyId, key };
 }
 
 export class OidcVerifier {
@@ -133,118 +319,46 @@ export class OidcVerifier {
   }
 
   async verify(idToken: string, nonce: string): Promise<OidcClaims> {
-    if (
-      typeof idToken !== 'string' ||
-      idToken.length === 0 ||
-      idToken.length > MAX_TOKEN_LENGTH
-    ) {
-      fail();
-    }
+    const segments = splitToken(idToken);
 
-    const segments = idToken.split('.');
+    const header = decodeJsonSegment(segments.header);
 
-    if (segments.length !== 3) {
-      fail();
-    }
+    assertAlgorithm(header);
+    assertNoEmbeddedKeyMaterial(header);
+    assertTokenType(header);
 
-    const [encodedHeader, encodedPayload, encodedSignature] = segments;
-
-    if (
-      encodedHeader === undefined ||
-      encodedPayload === undefined ||
-      encodedSignature === undefined ||
-      !BASE64URL_SEGMENT.test(encodedSignature)
-    ) {
-      fail();
-    }
-
-    const header = decodeJsonSegment(encodedHeader);
-
-    if (typeof header.alg !== 'string' || !ALLOWED_ALGORITHMS.has(header.alg)) {
-      fail();
-    }
-
-    // Never let a token select its own key material.
-    if (header.jwk !== undefined || header.jku !== undefined || header.x5u !== undefined) {
-      fail();
-    }
-
-    if (header.typ !== undefined && header.typ !== 'JWT') {
-      fail();
-    }
-
-    const kid = header.kid;
-
-    if (!isNonEmptyString(kid)) {
-      fail();
-    }
-
-    const signature = Buffer.from(encodedSignature, 'base64url');
-    const signedData = Buffer.from(`${encodedHeader}.${encodedPayload}`, 'ascii');
+    const kid = readKeyId(header);
+    const signature = Buffer.from(segments.signature, 'base64url');
+    const signedData = Buffer.from(
+      `${segments.header}.${segments.payload}`,
+      'ascii',
+    );
     const key = await this.resolveKey(kid);
 
     if (!verifySignature('RSA-SHA256', signedData, key, signature)) {
       fail();
     }
 
-    const payload = decodeJsonSegment(encodedPayload);
+    const payload = decodeJsonSegment(segments.payload);
 
-    if (payload.iss !== this.issuer) {
-      fail();
-    }
-
-    if (!audienceMatches(payload.aud, this.audience)) {
-      fail();
-    }
-
-    // OIDC Core §3.1.3.7: when multiple audiences are present, `azp` names the
-    // authorized party and must be this client.
-    if (payload.azp !== undefined && payload.azp !== this.audience) {
-      fail();
-    }
+    assertIssuer(payload.iss, this.issuer);
+    assertAudience(payload.aud, this.audience);
+    assertAuthorizedParty(payload.azp, this.audience);
 
     const now = this.now();
-    const expiresAt = payload.exp;
-    const issuedAt = payload.iat;
 
-    if (
-      typeof expiresAt !== 'number' ||
-      !Number.isFinite(expiresAt) ||
-      now >= expiresAt * 1000
-    ) {
-      fail();
-    }
+    assertNotExpired(payload.exp, now);
+    assertIssuedAtNotInFuture(payload.iat, now);
+    assertNonce(nonce, payload.nonce);
 
-    if (
-      typeof issuedAt !== 'number' ||
-      !Number.isFinite(issuedAt) ||
-      issuedAt * 1000 > now + CLOCK_SKEW_MS
-    ) {
-      fail();
-    }
-
-    if (!constantTimeEquals(nonce, payload.nonce)) {
-      fail();
-    }
-
-    const subject = payload.sub;
-
-    if (!isNonEmptyString(subject) || subject.length > 255) {
-      fail();
-    }
-
-    const email =
-      isNonEmptyString(payload.email) && payload.email.length <= 254
-        ? payload.email
-        : undefined;
-    const emailVerified =
-      payload.email_verified === true || payload.email_verified === 'true';
+    const subject = readSubject(payload);
+    const email = readEmail(payload);
 
     return {
       subject,
       issuer: this.issuer,
       ...(email === undefined ? {} : { email }),
-      emailVerified,
+      emailVerified: readEmailVerified(payload),
     };
   }
 
@@ -280,8 +394,27 @@ export class OidcVerifier {
   }
 
   private async refreshKeys(): Promise<ReadonlyMap<string, KeyObject>> {
-    let payload: unknown;
+    const rawKeys = readRawKeys(await this.fetchJwks());
+    const keys = new Map<string, KeyObject>();
 
+    for (const rawKey of rawKeys) {
+      const signingKey = readSigningKey(rawKey);
+
+      if (signingKey !== undefined) {
+        keys.set(signingKey.keyId, signingKey.key);
+      }
+    }
+
+    if (keys.size === 0) {
+      fail();
+    }
+
+    this.cache = { fetchedAt: this.now(), keys };
+
+    return keys;
+  }
+
+  private async fetchJwks(): Promise<unknown> {
     try {
       const response = await this.fetchImpl(this.jwksUri, {
         method: 'GET',
@@ -299,7 +432,7 @@ export class OidcVerifier {
         fail();
       }
 
-      payload = JSON.parse(text);
+      return JSON.parse(text);
     } catch (error) {
       if (error instanceof SsoError) {
         throw error;
@@ -307,62 +440,5 @@ export class OidcVerifier {
 
       fail();
     }
-
-    if (typeof payload !== 'object' || payload === null) {
-      fail();
-    }
-
-    const rawKeys = (payload as { keys?: unknown }).keys;
-
-    if (!Array.isArray(rawKeys) || rawKeys.length === 0 || rawKeys.length > MAX_KEY_COUNT) {
-      fail();
-    }
-
-    const keys = new Map<string, KeyObject>();
-
-    for (const rawKey of rawKeys) {
-      if (typeof rawKey !== 'object' || rawKey === null) {
-        continue;
-      }
-
-      const jwk = rawKey as JsonWebKeyRecord;
-      const keyId = jwk.kid;
-
-      if (!isNonEmptyString(keyId) || jwk.kty !== 'RSA') {
-        continue;
-      }
-
-      if (jwk.use !== undefined && jwk.use !== 'sig') {
-        continue;
-      }
-
-      if (jwk.alg !== undefined && jwk.alg !== 'RS256') {
-        continue;
-      }
-
-      if (typeof jwk.n !== 'string' || typeof jwk.e !== 'string') {
-        continue;
-      }
-
-      try {
-        keys.set(
-          keyId,
-          createPublicKey({
-            key: { kty: 'RSA', n: jwk.n, e: jwk.e },
-            format: 'jwk',
-          }),
-        );
-      } catch {
-        continue;
-      }
-    }
-
-    if (keys.size === 0) {
-      fail();
-    }
-
-    this.cache = { fetchedAt: this.now(), keys };
-
-    return keys;
   }
 }
