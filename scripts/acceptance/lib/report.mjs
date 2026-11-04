@@ -22,7 +22,12 @@ const STATUS_RANK = { pass: 0, blocked: 1, fail: 2 };
 const SENSITIVE_KEY =
   /(?:password|passwd|secret|token|cookie|authorization|api[_-]?key|gateway[_-]?key|session(?:id|secret)?$)/i;
 
-const URL_CREDENTIALS = /([a-z][a-z0-9+.-]*:\/\/)[^/\s@]+@/gi;
+// Anchored to a token boundary on purpose. Without the leading delimiter the
+// scheme repetition can restart at every character of a long alphanumeric run,
+// which is quadratic: measured 6.0 s for 100 kB of letters, versus 1 ms here.
+// Evidence strings are ours, but a provider or upstream error can reach a
+// report, so the scanner must stay linear on hostile input.
+const URL_CREDENTIALS = /(^|[\s"'(\[<=,;])([a-z][a-z0-9+.-]*:\/\/)[^/\s@]+@/gi;
 const SESSION_COOKIE = /\b(?:__Host-)?habi_session=[^;\s]+/g;
 const BEARER = /\bBearer\s+[A-Za-z0-9._~+/=-]+/g;
 
@@ -61,9 +66,9 @@ export function redact(value, key = '') {
     }
 
     return value
-      .replace(URL_CREDENTIALS, '$1[redacted]@')
-      .replace(SESSION_COOKIE, 'habi_session=[redacted]')
-      .replace(BEARER, 'Bearer [redacted]');
+      .replaceAll(URL_CREDENTIALS, '$1$2[redacted]@')
+      .replaceAll(SESSION_COOKIE, 'habi_session=[redacted]')
+      .replaceAll(BEARER, 'Bearer [redacted]');
   }
 
   // Counts and booleans are evidence, never credentials, even when their key
@@ -207,129 +212,131 @@ export function selectScenarios(scenarios, filter) {
 
 function escapeCell(value) {
   return String(value ?? '')
-    .replaceAll('|', '\\|')
+    .replaceAll('|', String.raw`\|`)
     .replaceAll('\n', ' ');
+}
+
+function scenarioCounts(checks) {
+  const counts = { pass: 0, fail: 0, blocked: 0 };
+
+  for (const check of checks) {
+    counts[check.status] += 1;
+  }
+
+  return counts;
+}
+
+function renderMatrixRow(scenario) {
+  const counts = scenarioCounts(scenario.checks);
+  const blockers =
+    scenario.blockers === undefined ? '' : escapeCell(scenario.blockers.join('; '));
+
+  return (
+    `| ${escapeCell(scenario.id)} — ${escapeCell(scenario.title)} | ` +
+    `**${scenario.status}** | ${counts.pass}/${counts.fail}/${counts.blocked} | ` +
+    `${blockers} |`
+  );
+}
+
+function renderMatrix(scenarios) {
+  return [
+    '## Matrix',
+    '',
+    '| Scenario | Status | Checks (pass/fail/blocked) | Blockers |',
+    '| --- | --- | --- | --- |',
+    ...scenarios.map(renderMatrixRow),
+    '',
+  ];
+}
+
+function renderCheckRow(check) {
+  return `| ${escapeCell(check.name)} | ${check.status} | ${escapeCell(check.detail ?? '')} |`;
+}
+
+/** A labelled bullet list, prefixed by the blank line that separates it. */
+function renderBulletSection(label, items) {
+  return ['', label, ...items.map((item) => `- ${item}`)];
+}
+
+function renderScenarioDetail(scenario) {
+  return [
+    `### ${scenario.id} — ${scenario.title}`,
+    '',
+    `Status: **${scenario.status}**`,
+    '',
+    '| Check | Status | Detail |',
+    '| --- | --- | --- |',
+    ...scenario.checks.map(renderCheckRow),
+    ...(scenario.blockers === undefined
+      ? []
+      : renderBulletSection('Blockers:', scenario.blockers)),
+    ...(scenario.residualRisks === undefined
+      ? []
+      : renderBulletSection('Residual risks:', scenario.residualRisks)),
+    '',
+  ];
+}
+
+function renderEnvironment(environment) {
+  const rows = Object.entries(environment)
+    .filter(([key]) => key !== 'configKeys')
+    .map(([key, value]) => `| ${escapeCell(key)} | ${escapeCell(value)} |`);
+  const configKeys = Object.entries(environment.configKeys ?? {}).map(
+    ([key, presence]) => `- \`${key}\`: ${presence}`,
+  );
+
+  return [
+    '## Frozen environment',
+    '',
+    '| Key | Value |',
+    '| --- | --- |',
+    ...rows,
+    '',
+    'Configuration keys (presence only; values are never recorded):',
+    '',
+    ...configKeys,
+    '',
+  ];
 }
 
 export function renderMarkdown(report) {
   const summary = summarize(report.scenarios);
-  const lines = [];
-
-  lines.push('# P1 acceptance report');
-  lines.push('');
-  lines.push(`Generated: ${report.generatedAt}`);
-  lines.push('');
-  lines.push('## Result');
-  lines.push('');
-  lines.push('```');
-  lines.push(summary.line);
-  lines.push('```');
-  lines.push('');
-  lines.push(
+  const lines = [
+    '# P1 acceptance report',
+    '',
+    `Generated: ${report.generatedAt}`,
+    '',
+    '## Result',
+    '',
+    '```',
+    summary.line,
+    '```',
+    '',
     'The harness never declares a P1 go. A run with zero failures and some ' +
       'blocked scenarios is incomplete evidence; the exit decision belongs to ' +
       'the owner.',
-  );
-  lines.push('');
-  lines.push('## Matrix');
-  lines.push('');
-  lines.push('| Scenario | Status | Checks (pass/fail/blocked) | Blockers |');
-  lines.push('| --- | --- | --- | --- |');
-
-  for (const scenario of report.scenarios) {
-    const counts = { pass: 0, fail: 0, blocked: 0 };
-
-    for (const check of scenario.checks) {
-      counts[check.status] += 1;
-    }
-
-    lines.push(
-      `| ${escapeCell(scenario.id)} — ${escapeCell(scenario.title)} | ` +
-        `**${scenario.status}** | ${counts.pass}/${counts.fail}/${counts.blocked} | ` +
-        `${scenario.blockers === undefined ? '' : escapeCell(scenario.blockers.join('; '))} |`,
-    );
-  }
-
-  lines.push('');
-  lines.push('## Scenario detail');
-  lines.push('');
-
-  for (const scenario of report.scenarios) {
-    lines.push(`### ${scenario.id} — ${scenario.title}`);
-    lines.push('');
-    lines.push(`Status: **${scenario.status}**`);
-    lines.push('');
-    lines.push('| Check | Status | Detail |');
-    lines.push('| --- | --- | --- |');
-
-    for (const check of scenario.checks) {
-      lines.push(
-        `| ${escapeCell(check.name)} | ${check.status} | ${escapeCell(check.detail ?? '')} |`,
-      );
-    }
-
-    if (scenario.blockers !== undefined) {
-      lines.push('');
-      lines.push('Blockers:');
-
-      for (const blocker of scenario.blockers) {
-        lines.push(`- ${blocker}`);
-      }
-    }
-
-    if (scenario.residualRisks !== undefined) {
-      lines.push('');
-      lines.push('Residual risks:');
-
-      for (const risk of scenario.residualRisks) {
-        lines.push(`- ${risk}`);
-      }
-    }
-
-    lines.push('');
-  }
-
-  lines.push('## Frozen environment');
-  lines.push('');
-  lines.push('| Key | Value |');
-  lines.push('| --- | --- |');
-
-  for (const [key, value] of Object.entries(report.environment)) {
-    if (key === 'configKeys') {
-      continue;
-    }
-
-    lines.push(`| ${escapeCell(key)} | ${escapeCell(value)} |`);
-  }
-
-  lines.push('');
-  lines.push('Configuration keys (presence only; values are never recorded):');
-  lines.push('');
-
-  for (const [key, presence] of Object.entries(report.environment.configKeys ?? {})) {
-    lines.push(`- \`${key}\`: ${presence}`);
-  }
-
-  lines.push('');
-  lines.push('## Evidence handling');
-  lines.push('');
-  lines.push(
+    '',
+    ...renderMatrix(report.scenarios),
+    '## Scenario detail',
+    '',
+    ...report.scenarios.flatMap(renderScenarioDetail),
+    ...renderEnvironment(report.environment),
+    '## Evidence handling',
+    '',
     'Evidence records request/response status, error codes, ids, and counts. ' +
       'Passwords, session cookies, CSRF tokens, provider keys, and connection ' +
       'string credentials are redacted before the report is written. The ' +
       'report lives outside the repository tree.',
-  );
-  lines.push('');
-  lines.push('## What this run does not prove');
-  lines.push('');
-  lines.push(
+    '',
+    '## What this run does not prove',
+    '',
     'This harness runs against a disposable local PostgreSQL container and ' +
       'local stub harness, not a deployed staging VM. Deployed-stack behavior, ' +
       'real provider throughput, real SSO registrations, and host resource ' +
       'impact remain unverified unless their scenarios are marked pass with ' +
       'that environment configured.',
-  );
-  lines.push('');
+    '',
+  ];
 
   return `${lines.join('\n')}\n`;
 }

@@ -13,7 +13,6 @@ import {
   BACKEND_ROOT,
   REPOSITORY_ROOT,
   captureOutput,
-  getFreePort,
   requireBackendModule,
   run,
   stopChild,

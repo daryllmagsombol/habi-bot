@@ -37,7 +37,6 @@ export const isolationScenario = {
     const world = await ctx.ensureWorld();
     const p1 = await ctx.ensureP1();
     const requestA = createClient(p1.base, p1.sessionFor(world.users.A));
-    const requestB = createClient(p1.base, p1.sessionFor(world.users.B));
 
     await runCheck(checks, 'bot list is owner scoped', async () => {
       const result = await requestA('/api/bots');

@@ -206,9 +206,9 @@ function printMatrix(report) {
     );
 
     for (const check of scenario.checks) {
-      console.log(
-        `  ${check.status.padEnd(8)} ${check.name}${check.detail === undefined ? '' : ` — ${check.detail}`}`,
-      );
+      const detail = check.detail === undefined ? '' : ` — ${check.detail}`;
+
+      console.log(`  ${check.status.padEnd(8)} ${check.name}${detail}`);
     }
   }
 
@@ -217,72 +217,44 @@ function printMatrix(report) {
   console.log('');
 }
 
-async function main() {
-  let options;
-
+/** Parses argv, or reports the usage error and returns null. */
+function readOptions(argv) {
   try {
-    options = parseArgs(process.argv.slice(2));
+    return parseArgs(argv);
   } catch (error) {
     console.error(`acceptance: ${error.message}`);
     console.error(usage());
-    process.exitCode = 2;
-    return;
+    return null;
   }
+}
 
-  if (options.help === true) {
-    console.log(usage());
-    return;
+function printScenarioList() {
+  for (const scenario of scenarios) {
+    console.log(`${scenario.id}\t${scenario.title}`);
   }
+}
 
-  if (options.list === true) {
-    for (const scenario of scenarios) {
-      console.log(`${scenario.id}\t${scenario.title}`);
-    }
-    return;
-  }
-
-  let buildNote;
-
-  try {
-    buildNote = ensureBuild(options.build);
-  } catch (error) {
-    console.error(`acceptance: ${error.message}`);
-    process.exitCode = 2;
-    return;
-  }
-
-  const outDir =
-    options.outDir ?? (await mkdtemp(join(tmpdir(), 'habi-acceptance-report-')));
-  await mkdir(outDir, { recursive: true });
-
-  const selected = selectScenarios(scenarios, options.filter);
-  const context = await createContext({ outDir, keep: options.keep });
-  let scenariosToRun = selected;
-
-  if (context.dockerReady !== true) {
-    scenariosToRun = selected.filter((scenario) => scenario.id === 'vm-impact');
-  }
-
-  const results = [];
+/**
+ * Runs the selected scenarios and always tears the context down. Without
+ * Docker only `vm-impact` can run; the rest are reported as blocked.
+ */
+async function executeScenarios(context, selected, { keep = false } = {}) {
+  const dockerReady = context.dockerReady === true;
+  const scenariosToRun = dockerReady
+    ? selected
+    : selected.filter((scenario) => scenario.id === 'vm-impact');
+  const runResults = [];
 
   try {
     for (const scenario of scenariosToRun) {
       process.stderr.write(`acceptance: running ${scenario.id}...\n`);
-      results.push(await runScenario(scenario, context));
+      runResults.push(await runScenario(scenario, context));
       process.stderr.write(
-        `acceptance: ${scenario.id} ${results.at(-1).status}\n`,
+        `acceptance: ${scenario.id} ${runResults.at(-1).status}\n`,
       );
     }
-
-    if (context.dockerReady !== true) {
-      for (const scenario of selected) {
-        if (scenario.id !== 'vm-impact') {
-          results.push(blockedByDocker(scenario));
-        }
-      }
-    }
   } finally {
-    if (options.keep === true && context.dockerReady === true) {
+    if (keep === true && dockerReady) {
       console.error(
         `acceptance: keeping container ${context.postgres.containerName} (database URL withheld)`,
       );
@@ -293,8 +265,18 @@ async function main() {
     }
   }
 
-  // Preserve the declared order even when Docker skipped some scenarios.
-  const ordered = selected.map((scenario) => {
+  const blockedResults = dockerReady
+    ? []
+    : selected
+        .filter((scenario) => scenario.id !== 'vm-impact')
+        .map(blockedByDocker);
+
+  return [...runResults, ...blockedResults];
+}
+
+/** Preserves the declared order even when Docker skipped some scenarios. */
+function orderResults(selected, results) {
+  return selected.map((scenario) => {
     const result = results.find((candidate) => candidate.id === scenario.id);
 
     return (
@@ -312,6 +294,57 @@ async function main() {
       })
     );
   });
+}
+
+async function writeArtifacts(outDir, report) {
+  const jsonPath = join(outDir, 'acceptance-report.json');
+  const markdownPath = join(outDir, 'acceptance-report.md');
+
+  await writeFile(jsonPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
+  await writeFile(markdownPath, renderMarkdown(report), 'utf8');
+
+  return { jsonPath, markdownPath };
+}
+
+async function main() {
+  const options = readOptions(process.argv.slice(2));
+
+  if (options === null) {
+    process.exitCode = 2;
+    return;
+  }
+
+  if (options.help === true) {
+    console.log(usage());
+    return;
+  }
+
+  if (options.list === true) {
+    printScenarioList();
+    return;
+  }
+
+  let buildNote;
+
+  try {
+    buildNote = ensureBuild(options.build);
+  } catch (error) {
+    console.error(`acceptance: ${error.message}`);
+    process.exitCode = 2;
+    return;
+  }
+
+  const outDir =
+    options.outDir ?? (await mkdtemp(join(tmpdir(), 'habi-acceptance-report-')));
+
+  await mkdir(outDir, { recursive: true });
+
+  const selected = selectScenarios(scenarios, options.filter);
+  const context = await createContext({ outDir, keep: options.keep });
+  const results = await executeScenarios(context, selected, {
+    keep: options.keep,
+  });
+  const ordered = orderResults(selected, results);
 
   const report = buildReport({
     scenarios: ordered,
@@ -327,11 +360,7 @@ async function main() {
     },
   });
 
-  const jsonPath = join(outDir, 'acceptance-report.json');
-  const markdownPath = join(outDir, 'acceptance-report.md');
-
-  await writeFile(jsonPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
-  await writeFile(markdownPath, renderMarkdown(report), 'utf8');
+  const { jsonPath, markdownPath } = await writeArtifacts(outDir, report);
 
   printMatrix(report);
   console.log(`JSON report: ${jsonPath}`);

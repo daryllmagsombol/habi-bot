@@ -5,7 +5,7 @@
  * resolved through `pg` from the backend workspace, matching
  * `scripts/db/migrate.mjs`, so the harness adds no root dependency.
  */
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import net from 'node:net';
 import { fileURLToPath } from 'node:url';

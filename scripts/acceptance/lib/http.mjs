@@ -46,7 +46,7 @@ export function sessionFromResponse(response) {
  */
 export function createClient(base, session = {}) {
   return async function request(path, options = {}) {
-    const headers = { ...(options.headers ?? {}) };
+    const headers = { ...options.headers };
 
     if (options.cookie ?? session.cookie) {
       headers.cookie = options.cookie ?? session.cookie;

@@ -43,8 +43,8 @@ function parseStats(stdout) {
       continue;
     }
 
-    const memory = parts[3]?.replace(/[^\d.]/g, '');
-    const cpu = parts[2]?.replace(/[^\d.]/g, '');
+    const memory = parts[3]?.replaceAll(/[^\d.]/g, '');
+    const cpu = parts[2]?.replaceAll(/[^\d.]/g, '');
 
     if (memory !== undefined && memory !== '' && cpu !== undefined && cpu !== '') {
       samples.push({ name: parts[0], memoryMiB: Number(memory), cpuPercent: Number(cpu) });

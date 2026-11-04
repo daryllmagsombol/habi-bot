@@ -9,7 +9,9 @@ import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { BACKEND_ROOT, requireBackendModule } from './process.mjs';
+import { BACKEND_ROOT } from './process.mjs';
+
+export { requireBackendModule } from './process.mjs';
 
 export const ACCOUNT_A = 'account-a';
 export const ACCOUNT_B = 'account-b';
@@ -276,5 +278,3 @@ export async function seedWorld(pool) {
 
 /** Regex that never matches a generated id, for malformed-id probes. */
 export const MALFORMED_ID = 'not-a-uuid';
-
-export { requireBackendModule };
