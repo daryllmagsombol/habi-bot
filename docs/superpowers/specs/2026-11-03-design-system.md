@@ -237,33 +237,57 @@ outline ring that is visible on paper, surface, and filled buttons.
 Run from the repository root:
 
 ```bash
-pnpm --filter @habi/web build       # 8 routes; / and identity pages static, Bot page dynamic
-pnpm --filter @habi/web typecheck   # strict, noUncheckedIndexedAccess, exactOptionalPropertyTypes
-pnpm --filter @habi/web lint        # eslint + next core-web-vitals
-pnpm --filter @habi/web test        # identity, homepage, workspace smoke tests
+pnpm --filter @habi/web build         # 8 routes; / and identity pages static, Bot page dynamic
+pnpm --filter @habi/web typecheck     # strict, noUncheckedIndexedAccess, exactOptionalPropertyTypes
+pnpm --filter @habi/web lint          # eslint + next core-web-vitals
+pnpm --filter @habi/web test          # identity, homepage, workspace smoke tests
+pnpm --filter @habi/web test:browser  # the design run below, in Chromium
 ```
 
-Checked with a Playwright-driven headless Chromium at 320×760, 768×1000, and 1440×1000, in both
-themes, over ten routes (`/`, `/bots`, the thread workspace, the Document panel, the Context panel,
-`/login`, `/signup`, `/start`, `/recovery`, and an unknown Bot). 54 captures are kept out of the
-repository; what the run asserted:
+`test:browser` is kept out of `test` on purpose: the default test run stays fast and browser-free. The
+suite boots the built app once with `next start` on an ephemeral port and shares one Chromium
+instance. It never downloads a browser; when the Chromium build Playwright expects is missing, the
+whole run skips and prints the install command:
 
-- **No horizontal overflow** on any route at any width or theme (`scrollWidth === clientWidth`).
-- **Contrast measured from computed styles**, walking up to the first opaque ancestor background: no
-  text pair below 4.5:1 (3:1 for large text) in either theme.
-- **Touch targets**: every button, link, and control is at least 44px tall in its primary dimension,
-  except inline citation links (WCAG inline exception), form labels that are not the target, and the
-  14px checkbox inputs whose labels are the target and grow to 44px under `pointer: coarse`.
-- **One `h1` per route**, with headings never skipping a level.
-- **No console errors** other than the expected `404` response on the unknown-Bot route.
-- **Self-hosted faces only**: the emitted HTML preloads two `/_next/static/media/*.woff2` files and
-  makes no remote font, image, or script request.
-- **Reduced motion and forced colors** are defined at the token layer, so no component branches.
+```bash
+pnpm --filter @habi/web exec playwright install chromium
+```
 
-One defect this pass found and fixed: the not-found boundary rendered as the error page, because the
-shared app bar is interactive chrome (`onClick` for in-place back) being rendered from a server
-component. The app bar is now a client component, and the workspace smoke test asserts the 404 payload
-carries the custom boundary rather than only the right status.
+The run covers 320×760, 768×1000, and 1440×1000 in light and dark over nine routes (`/`, `/bots`, the
+thread workspace, the Document panel, the Context panel, `/login`, `/signup`, `/start`, `/recovery`).
+Every route and matrix cell asserts:
+
+- **No horizontal overflow** on the rendered page (`scrollWidth === clientWidth` on `<html>` and
+  `<body>`).
+- **One visible `h1`** per route, with no skipped heading levels in the rendered outline.
+- **Contrast measured from computed styles**, walking up to the first opaque ancestor background:
+  visible text is at least 4.5:1 (3:1 for large text), and placeholder text is measured from
+  `::placeholder` in both themes.
+- **Touch targets**: every link, button, and form control is at least 44px tall in its primary
+  dimension, except inline text links (the WCAG 2.5.8 inline exception) and form labels. The 14px
+  checkbox inputs are exempt because their label is the target and grows under `pointer: coarse`.
+- **Theme resolution**: a fresh context follows `prefers-color-scheme`, paints the matching palette,
+  and carries no `data-theme` attribute until the reader chooses one.
+
+Four further tests cover stateful behaviour:
+
+- An explicit toggle writes `habi-theme`, paints dark, and after reload has `data-theme` on `<html>`
+  before `DOMContentLoaded`; the emitted pre-paint script is asserted to appear before the rendered
+  content. This is a structural pre-paint check, not a capture of the first frame.
+- `Tab` from the top of `/bots` reaches the skip link first and reveals it.
+- `Tab` reaches the Document control in the thread workspace, and `Enter` opens it as
+  `?panel=document`.
+- An unknown Bot returns `404` and renders the custom boundary copy and gallery link, not the Next
+  error page.
+
+Screenshots are not written or kept; the assertions are the evidence. Not asserted by the suite, and
+previously checked by hand: console errors, self-hosted font/network requests, reduced motion and
+forced colours.
+
+One defect the original manual pass found and fixed: the not-found boundary rendered as the error page,
+because the shared app bar is interactive chrome (`onClick` for in-place back) being rendered from a
+server component. The app bar is now a client component, and the workspace smoke test asserts the 404
+payload carries the custom boundary rather than only the right status.
 
 Two behaviours are deliberately absent:
 

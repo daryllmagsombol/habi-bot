@@ -9,7 +9,8 @@
     "start": "next start -p 3000",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
-    "test": "node --test test/*.smoke.mjs"
+    "test": "node --test test/*.smoke.mjs",
+    "test:browser": "node --test test/browser/*.browser.mjs"
   },
   "dependencies": {
     "motion": "14.9.0",
@@ -25,6 +26,7 @@
     "@types/react-dom": "19.3.0",
     "eslint": "10.13.0",
     "eslint-config-next": "16.4.2",
+    "playwright": "1.56.1",
     "postcss": "8.5.31",
     "tailwindcss": "4.3.3",
     "typescript": "6.0.3"
