@@ -46,8 +46,7 @@ import {
   isTerminalRunEventType,
 } from '../events/index.js';
 import type { RunEventStore } from '../events/index.js';
-import type { UsageLimitService } from '../limits/index.js';
-import type { SettleUsageInput } from '../limits/index.js';
+import type { SettleUsageInput, UsageLimitService } from '../limits/index.js';
 import { RunRepository } from '../runs/run-repository.js';
 import type { RunRow } from '../runs/run-repository.js';
 import { normalizeUsage, unknownUsage } from '../runs/usage.js';
@@ -750,7 +749,7 @@ export class RunDispatcher {
       return;
     }
 
-    if (reservation === null || reservation.state !== 'reserved') {
+    if (reservation?.state !== 'reserved') {
       return;
     }
 

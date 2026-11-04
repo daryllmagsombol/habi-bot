@@ -257,7 +257,7 @@ export class WorkerRunner {
       return;
     }
 
-    const all = Promise.allSettled([...this.tasks.values()]);
+    const all = Promise.allSettled(this.tasks.values());
 
     await Promise.race([
       all,
