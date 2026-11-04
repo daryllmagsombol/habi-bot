@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Avatar, ChevronRightIcon, DocumentIcon } from '../ui';
 import { Composer } from './composer';
+import type { ComposerStatus } from './composer';
 import { MessageBubble } from './message-bubble';
 import { RunStrip } from './run-strip';
 import { ThreadCard } from './thread-card';
@@ -20,6 +21,16 @@ export interface ThreadConversationProps {
   readonly sendNotice: string;
   /** The note under a locally added turn. */
   readonly localFootnote: string;
+  /**
+   * A parent-owned send. When present the route owns the optimistic turn and
+   * reconciliation; the component only reports the text and clears the field.
+   */
+  readonly onSend?: ((text: string) => void) | undefined;
+  /** Controlled draft, for a parent that restores text after a failed send. */
+  readonly draft?: string | undefined;
+  readonly onDraftChange?: ((value: string) => void) | undefined;
+  /** Sending, offline, or error state from the route. */
+  readonly composerStatus?: ComposerStatus | undefined;
   /** A leading composer control, typically a disabled attach button. */
   readonly attachment?: ReactNode;
   readonly maxLength?: number;
@@ -43,14 +54,27 @@ export function ThreadConversation({
   hint,
   sendNotice,
   localFootnote,
+  onSend,
+  draft: controlledDraft,
+  onDraftChange,
+  composerStatus,
   attachment,
   maxLength = 4_000,
   composerId = 'composer',
 }: Readonly<ThreadConversationProps>) {
-  const [draft, setDraft] = useState('');
+  const [localDraft, setLocalDraft] = useState('');
   const [notice, setNotice] = useState('');
   const [added, setAdded] = useState<readonly TranscriptMessage[]>([]);
   const listRef = useRef<HTMLOListElement>(null);
+  const draft = controlledDraft ?? localDraft;
+
+  const setDraft = (value: string) => {
+    if (onDraftChange === undefined) {
+      setLocalDraft(value);
+    }
+
+    onDraftChange?.(value);
+  };
 
   const run: RunView | undefined = thread.messages.findLast(
     (message) => message.run !== undefined,
@@ -71,6 +95,13 @@ export function ThreadConversation({
       return;
     }
 
+    setDraft('');
+
+    if (onSend !== undefined) {
+      onSend(text);
+      return;
+    }
+
     setAdded((previous) => [
       ...previous,
       {
@@ -80,7 +111,6 @@ export function ThreadConversation({
         paragraphs: [text],
       },
     ]);
-    setDraft('');
     setNotice(sendNotice);
   }
 
@@ -146,6 +176,7 @@ export function ThreadConversation({
           hint={notice === '' ? hint : notice}
           counter={{ current: draft.length, max: maxLength }}
           maxLength={maxLength}
+          status={composerStatus}
           attachment={attachment}
         />
       }

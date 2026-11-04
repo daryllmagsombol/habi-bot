@@ -1,4 +1,4 @@
-export type RunState = 'streaming' | 'complete';
+export type RunState = 'queued' | 'streaming' | 'complete' | 'stopped' | 'failed';
 
 export interface RunEvent {
   readonly at: string;
@@ -13,6 +13,8 @@ export interface PanelRun {
   readonly outTokens: number;
   readonly durationMs?: number;
   readonly tools: number;
+  /** False when the server reported usage as unknown; never rendered as zero. */
+  readonly tokensKnown?: boolean;
   readonly events: readonly RunEvent[];
 }
 

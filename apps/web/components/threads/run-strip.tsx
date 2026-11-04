@@ -32,10 +32,14 @@ export function RunStrip({ run, className }: Readonly<RunStripProps>) {
         Run {run.id}
       </span>
       <span>{run.state}</span>
-      <span className="u-figures">
-        <b className="font-semibold text-muted">{COUNT.format(run.inTokens)}</b> in ·{' '}
-        <b className="font-semibold text-muted">{COUNT.format(run.outTokens)}</b> out
-      </span>
+      {run.tokensKnown === false ? (
+        <span className="u-figures">tokens unknown</span>
+      ) : (
+        <span className="u-figures">
+          <b className="font-semibold text-muted">{COUNT.format(run.inTokens)}</b> in ·{' '}
+          <b className="font-semibold text-muted">{COUNT.format(run.outTokens)}</b> out
+        </span>
+      )}
       <span className="u-figures">tools {run.tools}</span>
       {run.durationMs === undefined ? null : (
         <span className="u-figures ml-auto inline-flex items-center gap-1">

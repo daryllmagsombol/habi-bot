@@ -7,10 +7,12 @@
  * (`HABI_AUTH_API_URL`), never a request value, and only the five known actions
  * are proxied.
  *
- * CSRF is not implemented here. The proxy forwards `X-CSRF-Token`, the session
- * cookie, and an Origin matching the upstream; the H-017 guards still make the
- * decision. `Origin` is asserted by the server-side proxy because the browser's
- * Origin names the web origin, not the API host.
+ * CSRF is decided by the H-017 guards, never here. The proxy forwards
+ * `X-CSRF-Token`, the session cookie, and an Origin matching the upstream.
+ * Because the browser's Origin names the web origin, `Origin` is asserted
+ * server-side. When the upstream issues a token, the proxy also republishes it
+ * as a readable `habi_csrf` cookie so same-origin chat requests can echo it
+ * back; the session cookie itself stays HttpOnly.
  *
  * The client IP is not forwarded as a trusted identity: the backend reads its
  * socket peer, which is this proxy. Per-client rate limiting is therefore
@@ -23,6 +25,8 @@ const DEFAULT_AUTH_API_ORIGIN = 'http://127.0.0.1:3001';
 const ALLOWED_ACTIONS = new Set(['signup', 'login', 'logout', 'recovery/request', 'me']);
 const MAX_BODY_BYTES = 16 * 1024;
 const SESSION_COOKIE = /^(?:__Host-)?habi_session=/;
+const CSRF_COOKIE = 'habi_csrf';
+const CSRF_COOKIE_MAX_AGE_SECONDS = 12 * 60 * 60;
 
 interface RouteContext {
   params: Promise<{ path: string[] }>;
@@ -140,11 +144,30 @@ async function prepareRequest(
   return { ok: true, headers, body };
 }
 
+/** A readable CSRF cookie: the SPA must echo it, so it is deliberately not HttpOnly. */
+function csrfCookie(value: string, secure: boolean, maxAge = CSRF_COOKIE_MAX_AGE_SECONDS): string {
+  const attributes = [
+    `${CSRF_COOKIE}=${encodeURIComponent(value)}`,
+    'Path=/',
+    'SameSite=Lax',
+    `Max-Age=${maxAge}`,
+  ];
+
+  if (secure) {
+    attributes.push('Secure');
+  }
+
+  return attributes.join('; ');
+}
+
 /**
  * Copies the upstream status and the relayed headers (content type, CSRF
  * token, retry-after, and every Set-Cookie) onto a no-store response.
  */
-async function relayResponse(upstream: Response): Promise<Response> {
+async function relayResponse(
+  upstream: Response,
+  options: { readonly secure: boolean; readonly action: string },
+): Promise<Response> {
   const responseHeaders = new Headers({ 'cache-control': 'no-store' });
   const contentType = upstream.headers.get('content-type');
   const csrfToken = upstream.headers.get('x-csrf-token');
@@ -156,6 +179,11 @@ async function relayResponse(upstream: Response): Promise<Response> {
 
   if (csrfToken !== null) {
     responseHeaders.set('x-csrf-token', csrfToken);
+    responseHeaders.append('set-cookie', csrfCookie(csrfToken, options.secure));
+  } else if (options.action === 'logout') {
+    // A signed-out browser has no token to echo; drop the stale copy rather
+    // than let a later request send a value the session no longer accepts.
+    responseHeaders.append('set-cookie', csrfCookie('', options.secure, 0));
   }
 
   if (retryAfter !== null) {
@@ -205,7 +233,10 @@ async function forward(
     return errorResponse('auth_unavailable', 502);
   }
 
-  return relayResponse(upstream);
+  return relayResponse(upstream, {
+    secure: new URL(request.url).protocol === 'https:',
+    action,
+  });
 }
 
 export async function GET(request: Request, context: RouteContext): Promise<Response> {

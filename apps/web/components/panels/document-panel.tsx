@@ -4,6 +4,8 @@ import type { DocumentView } from './types';
 export interface DocumentPanelProps {
   readonly document?: DocumentView | undefined;
   readonly threadTitle: string;
+  /** `live` drops the preview-only sentence for data-backed screens. */
+  readonly mode?: 'preview' | 'live';
 }
 
 function renderBlocks(document: DocumentView) {
@@ -54,7 +56,11 @@ function renderBlocks(document: DocumentView) {
  * apart. The cited paragraph is the only highlighted text — the apricot mark
  * means "a reply used this", not "this is important".
  */
-export function DocumentPanel({ document, threadTitle }: Readonly<DocumentPanelProps>) {
+export function DocumentPanel({
+  document,
+  threadTitle,
+  mode = 'preview',
+}: Readonly<DocumentPanelProps>) {
   if (document === undefined) {
     return (
       <div className="px-4 py-4">
@@ -63,10 +69,17 @@ export function DocumentPanel({ document, threadTitle }: Readonly<DocumentPanelP
           mark={<DocumentIcon size={16} />}
           title="No document in this thread"
           description={
-            <>
-              A document attached to “{threadTitle}” would open here, read-only, and replies could
-              cite it by paragraph. Attachment upload is not wired in this preview.
-            </>
+            mode === 'live' ? (
+              <>
+                A document attached to “{threadTitle}” would open here, read-only. Attachment
+                upload and reading are not exposed by this API yet.
+              </>
+            ) : (
+              <>
+                A document attached to “{threadTitle}” would open here, read-only, and replies could
+                cite it by paragraph. Attachment upload is not wired in this preview.
+              </>
+            )
           }
           action={<Button disabled>Attach a document</Button>}
         />

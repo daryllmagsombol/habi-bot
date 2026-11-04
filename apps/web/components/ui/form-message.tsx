@@ -4,11 +4,11 @@ export type FormMessageTone = 'error' | 'success' | 'info';
 
 export interface FormMessageProps {
   /** Announced assertively (`role="alert"`). Takes precedence visually. */
-  readonly error?: string;
+  readonly error?: string | undefined;
   /** Announced politely through the native `<output>` element. */
-  readonly status?: string;
+  readonly status?: string | undefined;
   /** Neutral guidance, e.g. a bounded limitation. Not an error. */
-  readonly info?: string;
+  readonly info?: string | undefined;
   readonly className?: string;
 }
 

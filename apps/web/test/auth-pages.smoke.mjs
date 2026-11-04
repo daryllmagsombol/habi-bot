@@ -291,6 +291,18 @@ test('built identity pages are accessible, mobile-first forms without SSO', { ti
     assert.ok(relayedCookie, 'the BFF did not relay Set-Cookie');
     assert.match(relayedCookie, /HttpOnly/);
 
+    // The chat surface has to echo the token on same-origin writes, so the BFF
+    // publishes it in a readable cookie. The session cookie above stays
+    // HttpOnly; only this one is script-readable, and it is SameSite-scoped.
+    const csrfCookie = loginProxy.headers
+      .getSetCookie()
+      .find((cookie) => cookie.startsWith('habi_csrf='));
+    assert.ok(csrfCookie, 'the BFF did not publish the CSRF cookie');
+    assert.match(csrfCookie, /^habi_csrf=csrf-proxy/);
+    assert.match(csrfCookie, /SameSite=Lax/);
+    assert.match(csrfCookie, /Path=\//);
+    assert.ok(!/HttpOnly/i.test(csrfCookie), 'the CSRF cookie must be script-readable');
+
     const loginForward = upstreamRequests.find(
       (entry) => entry.url === '/auth/login' && entry.method === 'POST',
     );
