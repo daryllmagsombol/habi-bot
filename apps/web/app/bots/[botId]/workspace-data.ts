@@ -8,8 +8,8 @@ export interface WorkspaceThread {
   readonly listItem: ThreadListItem;
   /** The conversation card's title, meta and turns, already display-shaped. */
   readonly view: ThreadView;
-  readonly document?: DocumentView | undefined;
-  readonly run?: PanelRun | undefined;
+  readonly document: DocumentView | undefined;
+  readonly run: PanelRun | undefined;
   readonly hrefs: {
     readonly conversation: string;
     readonly document: string;

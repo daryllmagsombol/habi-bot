@@ -14,9 +14,9 @@ import type { WorkspaceData, WorkspaceThread } from './workspace-data';
 export interface BotWorkspaceProps {
   readonly data: WorkspaceData;
   /** From `?thread=`. Absent means the newest thread, not an empty screen. */
-  readonly initialThreadId?: string | undefined;
+  readonly initialThreadId: string | undefined;
   /** From `?panel=`. */
-  readonly initialPanel?: PanelId | undefined;
+  readonly initialPanel: PanelId | undefined;
 }
 
 /**
@@ -41,13 +41,13 @@ export function BotWorkspace({ data, initialThreadId, initialPanel }: Readonly<B
 
   useEffect(() => {
     function onPopState() {
-      const params = new URLSearchParams(window.location.search);
+      const params = new URLSearchParams(globalThis.location.search);
       setThreadId(params.get('thread') ?? undefined);
       setPanel(readPanel(params.get('panel') ?? undefined));
     }
 
-    window.addEventListener('popstate', onPopState);
-    return () => window.removeEventListener('popstate', onPopState);
+    globalThis.addEventListener('popstate', onPopState);
+    return () => globalThis.removeEventListener('popstate', onPopState);
   }, []);
 
   const activeId = threadId ?? data.threads[0]?.id;
@@ -82,21 +82,21 @@ export function BotWorkspace({ data, initialThreadId, initialPanel }: Readonly<B
 
     setThreadId(nextThreadId);
     setPanel(undefined);
-    window.history.pushState(null, '', target?.hrefs.conversation ?? data.bot.baseHref);
+    globalThis.history.pushState(null, '', target?.hrefs.conversation ?? data.bot.baseHref);
   };
 
   const selectPanel = (key: PanelId) => {
     const next = panel === key ? undefined : key;
     setPanel(next);
-    window.history.pushState(null, '', urlFor(threadId, next));
+    globalThis.history.pushState(null, '', urlFor(threadId, next));
   };
 
   const closePanel = () => {
     const closed = panel;
     setPanel(undefined);
-    window.history.pushState(null, '', urlFor(threadId, undefined));
+    globalThis.history.pushState(null, '', urlFor(threadId, undefined));
 
-    window.requestAnimationFrame(() => {
+    globalThis.requestAnimationFrame(() => {
       if (closed === undefined) {
         return;
       }
