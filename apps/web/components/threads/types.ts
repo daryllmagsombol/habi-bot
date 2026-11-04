@@ -2,7 +2,12 @@ import type { MetaItem } from '../ui';
 
 export type MessageVariant = 'user' | 'bot';
 export type MessageState = 'complete' | 'streaming';
-export type RunState = 'streaming' | 'complete';
+/**
+ * Run lifecycle as the UI can observe it. `queued` and `streaming` are live;
+ * `complete`, `stopped`, and `failed` are terminal outcomes, each named so a
+ * failed or cancelled run never reads as a successful one.
+ */
+export type RunState = 'queued' | 'streaming' | 'complete' | 'stopped' | 'failed';
 
 export interface RunEventView {
   readonly at: string;
@@ -17,6 +22,8 @@ export interface RunView {
   readonly outTokens: number;
   readonly durationMs?: number | undefined;
   readonly tools: number;
+  /** False when the server reported usage as unknown; never rendered as zero. */
+  readonly tokensKnown?: boolean | undefined;
   readonly events: readonly RunEventView[];
 }
 

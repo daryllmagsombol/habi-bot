@@ -4,8 +4,12 @@ import { botTone } from '../../../components/bots';
 import type { MemoryGateItem, MemoryItem, PanelRun } from '../../../components/panels';
 import type { TranscriptMessage } from '../../../components/threads';
 import { BotWorkspace } from './workspace';
+import { buildLiveWorkspace } from './api-data';
 import type { WorkspaceData, WorkspaceThread } from './workspace-data';
 import { botHref, readPanel, readParam, threadHref } from '../../../lib/links';
+import { readApiConfig } from '../../../lib/api/config';
+import { callerCookieHeader, fetchBot, fetchBots, fetchMessages, fetchThreads } from '../../../lib/api/server';
+import { DataStatePage } from '../../data-state';
 import {
   findAttachment,
   findBot,
@@ -27,6 +31,9 @@ export interface BotPageProps {
   readonly params: Promise<{ botId: string }>;
   readonly searchParams: Promise<Record<string, string | string[] | undefined>>;
 }
+
+/** The API configuration and cookie are request-scoped, not build-scoped. */
+export const dynamic = 'force-dynamic';
 
 function toRun(run: PreviewRun): PanelRun {
   return {
@@ -112,50 +119,7 @@ function toMemoryGates(bot: PreviewBot): readonly MemoryGateItem[] {
   }));
 }
 
-export async function generateMetadata({ params }: BotPageProps): Promise<Metadata> {
-  const { botId } = await params;
-  const bot = findBot(botId);
-
-  if (bot === undefined) {
-    return { title: 'Bot not found' };
-  }
-
-  return {
-    title: `${bot.name} · Threads`,
-    description: `${bot.purpose} A thread preview with local sample data.`,
-  };
-}
-
-/**
- * A Bot's workspace. This route owns data selection and provenance: it resolves
- * the Bot and thread, maps the sample records into the display shapes the
- * components take, and hands the result to `<BotWorkspace>` as one object. No
- * card, row, bubble or panel markup is written here.
- *
- * Validation happens on the server: an unknown Bot or thread is a real 404. The
- * workspace itself is a client component so selection can animate in place while
- * the URL keeps up; the first render is still server-rendered from `?thread=`
- * and `?panel=`, so deep links and reloads land on the same view.
- */
-export default async function BotPage({ params, searchParams }: BotPageProps) {
-  const { botId } = await params;
-  const query = await searchParams;
-
-  const bot = findBot(botId);
-
-  if (bot === undefined) {
-    notFound();
-  }
-
-  const threadId = readParam(query.thread);
-  const thread = findThread(bot, threadId);
-
-  if (thread === undefined) {
-    // Every sample Bot has at least one thread. A Bot with none needs its own
-    // empty state once the Bots API can return one.
-    notFound();
-  }
-
+function previewData(bot: PreviewBot): WorkspaceData {
   const items = toMemoryItems(bot);
   const approved = items.filter((memory) => memory.recalled).length;
   const summary =
@@ -163,7 +127,7 @@ export default async function BotPage({ params, searchParams }: BotPageProps) {
       ? 'No tools · No memories saved'
       : `No tools · ${approved} of ${items.length} memories selected`;
 
-  const data: WorkspaceData = {
+  return {
     bot: {
       id: bot.id,
       name: bot.name,
@@ -179,14 +143,177 @@ export default async function BotPage({ params, searchParams }: BotPageProps) {
     counts: COUNTS,
     allowance: previewAllowance,
     owner: previewOwner,
+    mode: 'preview',
   };
+}
+
+export async function generateMetadata({ params }: BotPageProps): Promise<Metadata> {
+  const { botId } = await params;
+
+  if (readApiConfig().kind !== 'unset') {
+    const cookie = await callerCookieHeader();
+    const result = await fetchBot(botId, cookie);
+
+    if (!result.ok) {
+      return { title: 'Bot' };
+    }
+
+    return {
+      title: `${result.data.bot.name} · Threads`,
+      description: result.data.purpose,
+    };
+  }
+
+  const bot = findBot(botId);
+
+  if (bot === undefined) {
+    return { title: 'Bot not found' };
+  }
+
+  return {
+    title: `${bot.name} · Threads`,
+    description: `${bot.purpose} A thread preview with local sample data.`,
+  };
+}
+
+/**
+ * A Bot's workspace. This route owns data selection and provenance.
+ *
+ * With `HABI_API_URL` unset it renders the unchanged sample-data preview. With
+ * it set it reads the owner-scoped API, maps the records in `api-data.ts`, and
+ * renders an explicit sign-in or error state for 401/5xx/transport failures.
+ * There is no path from a failed request back to the preview.
+ *
+ * Validation happens on the server: an unknown Bot or thread is a real 404. The
+ * workspace itself is a client component so selection and sending can happen in
+ * place while the URL keeps up.
+ */
+export default async function BotPage({ params, searchParams }: BotPageProps) {
+  const { botId } = await params;
+  const query = await searchParams;
+  const requestedThreadId = readParam(query.thread);
+  const panel = readPanel(readParam(query.panel));
+  const config = readApiConfig();
+
+  if (config.kind === 'unset') {
+    const bot = findBot(botId);
+
+    if (bot === undefined) {
+      notFound();
+    }
+
+    const thread = findThread(bot, requestedThreadId);
+
+    if (thread === undefined) {
+      // Every sample Bot has at least one thread. A Bot with none needs its own
+      // empty state once the Bots API can return one.
+      notFound();
+    }
+
+    return (
+      <BotWorkspace
+        key={`${requestedThreadId ?? 'list'}:${panel ?? 'none'}`}
+        data={previewData(bot)}
+        initialThreadId={requestedThreadId}
+        initialPanel={panel}
+      />
+    );
+  }
+
+  if (config.kind === 'invalid') {
+    return (
+      <DataStatePage
+        section="bots"
+        failure={{ ok: false, reason: 'invalid_config', status: 0 }}
+        retryHref={botHref(botId)}
+      />
+    );
+  }
+
+  const cookie = await callerCookieHeader();
+  const [detailResult, botsResult, threadsResult] = await Promise.all([
+    fetchBot(botId, cookie),
+    fetchBots(cookie),
+    fetchThreads(botId, cookie),
+  ]);
+
+  if (!detailResult.ok) {
+    if (detailResult.reason === 'not_found') {
+      notFound();
+    }
+
+    return (
+      <DataStatePage
+        section="bots"
+        failure={detailResult}
+        retryHref={botHref(botId)}
+      />
+    );
+  }
+
+  if (!botsResult.ok) {
+    return (
+      <DataStatePage
+        section="bots"
+        failure={botsResult}
+        retryHref={botHref(botId)}
+      />
+    );
+  }
+
+  if (!threadsResult.ok) {
+    return (
+      <DataStatePage
+        section="bots"
+        failure={threadsResult}
+        retryHref={botHref(botId)}
+      />
+    );
+  }
+
+  const threads = threadsResult.data.threads;
+  const threadId = requestedThreadId ?? threads[0]?.id;
+
+  if (threadId !== undefined && !threads.some((thread) => thread.id === threadId)) {
+    notFound();
+  }
+
+  let messages;
+
+  if (threadId !== undefined) {
+    const messageResult = await fetchMessages(threadId, cookie);
+
+    if (!messageResult.ok) {
+      if (messageResult.reason === 'not_found') {
+        notFound();
+      }
+
+      return (
+        <DataStatePage
+          section="bots"
+          failure={messageResult}
+          retryHref={threadHref(botId, threadId)}
+        />
+      );
+    }
+
+    messages = messageResult.data;
+  }
+
+  const data = buildLiveWorkspace({
+    detail: detailResult.data,
+    bots: botsResult.data,
+    threads: threadsResult.data,
+    selectedThreadId: threadId,
+    messages,
+  });
 
   return (
     <BotWorkspace
-      key={`${threadId ?? 'list'}:${readPanel(readParam(query.panel)) ?? 'none'}`}
+      key={`${threadId ?? 'empty'}:${panel ?? 'none'}`}
       data={data}
       initialThreadId={threadId}
-      initialPanel={readPanel(readParam(query.panel))}
+      initialPanel={panel}
     />
   );
 }

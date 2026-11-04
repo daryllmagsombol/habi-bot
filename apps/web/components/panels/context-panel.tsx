@@ -8,7 +8,10 @@ const COUNT = new Intl.NumberFormat('en-US');
 export interface ContextPanelProps {
   readonly memories: readonly MemoryGateItem[];
   readonly run?: PanelRun | undefined;
-  readonly allowance: AllowanceView;
+  /** Absent when the API cannot report daily usage; the panel then says so. */
+  readonly allowance?: AllowanceView | undefined;
+  /** `live` drops preview-only wording without claiming unwired capability. */
+  readonly mode?: 'preview' | 'live';
   /** Preview wording for the "changed" memory status; defaults live in MemoryGates. */
   readonly memoryChangedNote?: string;
   readonly className?: string;
@@ -54,7 +57,7 @@ function usageWidth(part: number, total: number): string {
 }
 
 function RunFacts({ run }: Readonly<{ run: PanelRun }>) {
-  const live = run.state === 'streaming';
+  const live = run.state === 'streaming' || run.state === 'queued';
   const total = run.inTokens + run.outTokens;
 
   return (
@@ -66,18 +69,26 @@ function RunFacts({ run }: Readonly<{ run: PanelRun }>) {
         </Badge>
       </div>
 
-      <div
-        className="mt-3 flex h-1.5 overflow-hidden rounded-full bg-sunken"
-        role="img"
-        aria-label={`${COUNT.format(run.inTokens)} input tokens and ${COUNT.format(run.outTokens)} output tokens`}
-      >
-        <span className="bg-accent" style={{ width: usageWidth(run.inTokens, total) }} />
-        <span className="bg-signal" style={{ width: usageWidth(run.outTokens, total) }} />
-      </div>
-      <p className="u-figures mt-1.5 flex justify-between text-2xs text-subtle">
-        <span>{COUNT.format(run.inTokens)} in</span>
-        <span>{COUNT.format(run.outTokens)} out</span>
-      </p>
+      {run.tokensKnown === false ? (
+        <p className="mt-3 text-xs leading-normal text-muted">
+          The server reported token usage as unknown for this run.
+        </p>
+      ) : (
+        <>
+          <div
+            className="mt-3 flex h-1.5 overflow-hidden rounded-full bg-sunken"
+            role="img"
+            aria-label={`${COUNT.format(run.inTokens)} input tokens and ${COUNT.format(run.outTokens)} output tokens`}
+          >
+            <span className="bg-accent" style={{ width: usageWidth(run.inTokens, total) }} />
+            <span className="bg-signal" style={{ width: usageWidth(run.outTokens, total) }} />
+          </div>
+          <p className="u-figures mt-1.5 flex justify-between text-2xs text-subtle">
+            <span>{COUNT.format(run.inTokens)} in</span>
+            <span>{COUNT.format(run.outTokens)} out</span>
+          </p>
+        </>
+      )}
 
       <dl className="mt-3 border-t border-line-soft">
         <Fact label="Duration">
@@ -113,10 +124,11 @@ export function ContextPanel({
   memories,
   run,
   allowance,
+  mode = 'preview',
   memoryChangedNote,
   className,
 }: Readonly<ContextPanelProps>) {
-  const allowancePercent = usageWidth(allowance.used, allowance.limit);
+  const live = mode === 'live';
 
   return (
     <div className={['divide-y divide-line-soft', className].filter(Boolean).join(' ')}>
@@ -124,13 +136,22 @@ export function ContextPanel({
         title="Memory"
         description="A memory reaches a run only when this bot and this conversation both approve it."
       >
-        <MemoryGates memories={memories} changedNote={memoryChangedNote} />
+        {live ? (
+          <p className="text-xs leading-normal text-muted">
+            Memory records are not exposed by this API yet. None of them are shown here, and
+            nothing below claims a memory was recalled.
+          </p>
+        ) : (
+          <MemoryGates memories={memories} changedNote={memoryChangedNote} />
+        )}
       </Section>
 
       <Section title="This run">
         {run === undefined ? (
           <p className="text-xs leading-normal text-muted">
-            No run in this thread yet. Nothing has been dispatched.
+            {live
+              ? 'No run has been started in this tab. Run history is not exposed by this API yet.'
+              : 'No run in this thread yet. Nothing has been dispatched.'}
           </p>
         ) : (
           <RunFacts run={run} />
@@ -138,31 +159,43 @@ export function ContextPanel({
       </Section>
 
       <Section title="Today">
-        <div className="flex h-1.5 overflow-hidden rounded-full bg-sunken" aria-hidden="true">
-          <span className="bg-accent" style={{ width: allowancePercent }} />
-        </div>
-        <p className="u-figures mt-1.5 flex items-baseline justify-between text-2xs text-subtle">
-          <span>
-            <b className="font-semibold text-ink">{COUNT.format(allowance.used)}</b> used
-          </span>
-          <span>{COUNT.format(allowance.limit)} / day</span>
-        </p>
-        <p className="mt-2 text-xs leading-relaxed text-subtle">
-          Resets at {allowance.reset}. The figure is intent, not enforcement: there is no
-          pre-dispatch check or output bound in this preview.
-        </p>
+        {allowance === undefined ? (
+          <p className="text-xs leading-normal text-muted">
+            Daily usage is not reported by this API yet, so no figure is shown.
+          </p>
+        ) : (
+          <>
+            <div className="flex h-1.5 overflow-hidden rounded-full bg-sunken" aria-hidden="true">
+              <span
+                className="bg-accent"
+                style={{ width: usageWidth(allowance.used, allowance.limit) }}
+              />
+            </div>
+            <p className="u-figures mt-1.5 flex items-baseline justify-between text-2xs text-subtle">
+              <span>
+                <b className="font-semibold text-ink">{COUNT.format(allowance.used)}</b> used
+              </span>
+              <span>{COUNT.format(allowance.limit)} / day</span>
+            </p>
+            <p className="mt-2 text-xs leading-relaxed text-subtle">
+              Resets at {allowance.reset}. The figure is intent, not enforcement: there is no
+              pre-dispatch check or output bound in this preview.
+            </p>
+          </>
+        )}
       </Section>
 
       <Section title="Capability">
         <dl className="border-t border-line-soft">
           <Fact label="Tools allowed">0</Fact>
           <Fact label="Allow-list">Empty</Fact>
-          <Fact label="Attachments">Read-only</Fact>
-          <Fact label="Workspace">One user</Fact>
+          <Fact label="Attachments">{live ? 'Not exposed' : 'Read-only'}</Fact>
+          <Fact label="Workspace">{live ? 'Owner-scoped' : 'One user'}</Fact>
         </dl>
         <p className="mt-3 text-xs leading-relaxed text-subtle">
-          A bot in this preview cannot call a tool, a shell, or a browser — and this page does not
-          demonstrate the server-side isolation the product requires.
+          {live
+            ? 'A Bot cannot call a tool, a shell, or a browser through this API, and the client cannot grant one.'
+            : 'A bot in this preview cannot call a tool, a shell, or a browser — and this page does not demonstrate the server-side isolation the product requires.'}
         </p>
       </Section>
     </div>

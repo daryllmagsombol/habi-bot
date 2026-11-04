@@ -35,6 +35,9 @@ export interface WorkspaceData {
   readonly memoryItems: readonly MemoryItem[];
   readonly approvedMemories: number;
   readonly counts: { readonly bots: number; readonly threads: number };
-  readonly allowance: { readonly used: number; readonly limit: number; readonly reset: string };
+  /** Absent when the API cannot report daily usage. */
+  readonly allowance?: { readonly used: number; readonly limit: number; readonly reset: string };
   readonly owner: { readonly name: string; readonly initials: string };
+  /** `preview` renders sample data; `live` renders records from the chat API. */
+  readonly mode: 'preview' | 'live';
 }

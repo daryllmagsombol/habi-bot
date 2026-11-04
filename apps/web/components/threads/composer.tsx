@@ -25,7 +25,7 @@ export interface ComposerProps {
   readonly hint?: ReactNode;
   readonly counter?: { readonly current: number; readonly max: number };
   readonly maxLength?: number;
-  readonly status?: ComposerStatus;
+  readonly status?: ComposerStatus | undefined;
   /** A leading control, typically an attach button. */
   readonly attachment?: ReactNode;
   readonly sendLabel?: string;

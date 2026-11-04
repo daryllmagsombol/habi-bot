@@ -6,9 +6,12 @@ import { AppBar } from '../../../components/app-bar';
 import { BotIdentity } from '../../../components/bots';
 import { ContextPanel, DocumentPanel, MemoryCard, PanelCard, PanelSwitch } from '../../../components/panels';
 import { ThreadConversation, ThreadListCard } from '../../../components/threads';
-import { Button, IconButton, PaperclipIcon, SkipLink } from '../../../components/ui';
+import type { ComposerStatus } from '../../../components/threads';
+import { Button, EmptyState, FormMessage, IconButton, PaperclipIcon, SkipLink } from '../../../components/ui';
 import { readPanel, type PanelId } from '../../../lib/links';
 import { DURATION, EASE, PANEL_OFFSET } from '../../../lib/motion';
+import { runViewToPanel } from './api-data';
+import { useLiveRun } from './use-live-run';
 import type { WorkspaceData, WorkspaceThread } from './workspace-data';
 
 export interface BotWorkspaceProps {
@@ -30,36 +33,52 @@ export interface BotWorkspaceProps {
  * lands on a covered control.
  *
  * Pure composition and URL state: the route selects the data and hands it in as
- * `WorkspaceData`, so this component never imports sample records. The cards,
- * rows, bubbles, composer and panels are all components from `bots`, `threads`,
- * `panels`, and `ui`.
+ * `WorkspaceData`. In live mode `useLiveRun` owns sends, the Run stream,
+ * reconnect, and cancel; this component renders its state and never fetches.
  */
 export function BotWorkspace({ data, initialThreadId, initialPanel }: Readonly<BotWorkspaceProps>) {
   const [threadId, setThreadId] = useState<string | undefined>(initialThreadId);
   const [panel, setPanel] = useState<PanelId | undefined>(initialPanel);
   const reduceMotion = useReducedMotion();
 
+  const activeId = threadId ?? data.threads[0]?.id;
+  const thread: WorkspaceThread | undefined = data.threads.find((item) => item.id === activeId);
+  const live = data.mode === 'live';
+  const liveRun = useLiveRun(thread?.id, live);
+  const resetLiveRun = liveRun.reset;
+
   useEffect(() => {
     function onPopState() {
       const params = new URLSearchParams(globalThis.location.search);
       setThreadId(params.get('thread') ?? undefined);
       setPanel(readPanel(params.get('panel') ?? undefined));
+      resetLiveRun();
     }
 
     globalThis.addEventListener('popstate', onPopState);
     return () => globalThis.removeEventListener('popstate', onPopState);
-  }, []);
+  }, [resetLiveRun]);
 
-  const activeId = threadId ?? data.threads[0]?.id;
-  const thread: WorkspaceThread | undefined = data.threads.find((item) => item.id === activeId);
+  const baseMessages =
+    live && liveRun.messages !== undefined
+      ? liveRun.messages
+      : (thread?.view.messages ?? []);
+  const shownThread =
+    thread === undefined
+      ? undefined
+      : {
+          ...thread.view,
+          messages: [...baseMessages, ...(live ? liveRun.extra : [])],
+        };
 
-  if (thread === undefined) {
-    return null;
-  }
-
-  const conversationHref = threadId === undefined ? data.bot.baseHref : thread.hrefs.conversation;
+  const conversationHref =
+    threadId === undefined ? data.bot.baseHref : (thread?.hrefs.conversation ?? data.bot.baseHref);
 
   const urlFor = (nextThreadId: string | undefined, nextPanel: PanelId | undefined): string => {
+    if (thread === undefined) {
+      return data.bot.baseHref;
+    }
+
     if (nextThreadId === undefined && nextPanel === undefined) {
       return data.bot.baseHref;
     }
@@ -82,6 +101,7 @@ export function BotWorkspace({ data, initialThreadId, initialPanel }: Readonly<B
 
     setThreadId(nextThreadId);
     setPanel(undefined);
+    resetLiveRun();
     globalThis.history.pushState(null, '', target?.hrefs.conversation ?? data.bot.baseHref);
   };
 
@@ -105,6 +125,101 @@ export function BotWorkspace({ data, initialThreadId, initialPanel }: Readonly<B
     });
   };
 
+  const composerStatus: ComposerStatus | undefined = live
+    ? liveRun.error !== undefined
+      ? { kind: 'error', message: liveRun.error }
+      : liveRun.phase === 'sending' ||
+          liveRun.phase === 'waiting' ||
+          liveRun.phase === 'streaming'
+        ? { kind: 'disabled', message: liveRun.info ?? 'Sending…' }
+        : undefined
+    : undefined;
+
+  const conversation =
+    thread === undefined || shownThread === undefined ? (
+      <div className="order-1 min-w-0 lg:order-none">
+        <EmptyState
+          headingLevel={2}
+          title="No threads yet"
+          description={
+            live
+              ? 'This Bot has no conversation in your account. Creating a thread is not exposed by this API yet, so there is nothing to open here.'
+              : 'A Bot with no threads still has its instructions and memory. Opening the first thread is part of the wired workspace.'
+          }
+          action={<Button disabled>New thread</Button>}
+        />
+      </div>
+    ) : (
+      <motion.div
+        key={thread.id}
+        initial={reduceMotion === true ? false : { opacity: 0, y: 8 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: DURATION.base, ease: EASE }}
+        className="order-1 min-w-0 lg:order-none"
+      >
+        <ThreadConversation
+          bot={{ name: data.bot.name, initials: data.bot.initials }}
+          owner={data.owner}
+          thread={shownThread}
+          headingId="thread-title"
+          hint={
+            <span className="hidden sm:inline">
+              Enter sends · Shift + Enter adds a line
+            </span>
+          }
+          sendNotice={
+            live
+              ? 'Message saved. A reply appears when the run writes events.'
+              : 'Added to this thread locally. No run is dispatched in this preview.'
+          }
+          localFootnote={live ? 'Optimistic turn · not yet confirmed' : 'Local only · not sent'}
+          onSend={live ? liveRun.send : undefined}
+          draft={live ? liveRun.draft : undefined}
+          onDraftChange={live ? liveRun.setDraft : undefined}
+          composerStatus={composerStatus}
+          attachment={
+            <IconButton
+              label={
+                live
+                  ? 'Attach a document — not exposed by this API'
+                  : 'Attach a document — not available in this preview'
+              }
+              disabled
+              icon={<PaperclipIcon size={17} />}
+            />
+          }
+        />
+
+        {live ? (
+          <>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              {liveRun.canCancel ? (
+                <Button variant="secondary" size="sm" onClick={liveRun.cancel}>
+                  Stop run
+                </Button>
+              ) : null}
+              {liveRun.canRetry ? (
+                <Button variant="secondary" size="sm" onClick={liveRun.retry}>
+                  Retry
+                </Button>
+              ) : null}
+              <span className="text-2xs text-subtle">
+                {liveRun.run === undefined
+                  ? 'No run has started in this tab.'
+                  : `Run ${liveRun.run.id} · ${liveRun.run.state}`}
+              </span>
+            </div>
+
+            <FormMessage
+              className="mt-3"
+              error={liveRun.error}
+              status={liveRun.error === undefined ? liveRun.info : undefined}
+            />
+          </>
+        ) : null}
+      </motion.div>
+    );
+
   return (
     <MotionConfig reducedMotion="user">
       <div className="flex min-h-svh flex-col">
@@ -114,14 +229,17 @@ export function BotWorkspace({ data, initialThreadId, initialPanel }: Readonly<B
           section="bots"
           counts={data.counts}
           allowance={data.allowance}
+          mode={data.mode}
           actions={
-            <PanelSwitch
-              panel={panel}
-              documentHref={thread.hrefs.document}
-              contextHref={thread.hrefs.context}
-              conversationHref={conversationHref}
-              onSelect={selectPanel}
-            />
+            thread === undefined ? undefined : (
+              <PanelSwitch
+                panel={panel}
+                documentHref={thread.hrefs.document}
+                contextHref={thread.hrefs.context}
+                conversationHref={conversationHref}
+                onSelect={selectPanel}
+              />
+            )
           }
         />
 
@@ -146,7 +264,11 @@ export function BotWorkspace({ data, initialThreadId, initialPanel }: Readonly<B
                     variant="secondary"
                     size="sm"
                     disabled
-                    title="Not available in this preview"
+                    title={
+                      live
+                        ? 'Not exposed by this API yet'
+                        : 'Not available in this preview'
+                    }
                     className="w-full sm:w-auto"
                   >
                     Edit instructions
@@ -155,7 +277,11 @@ export function BotWorkspace({ data, initialThreadId, initialPanel }: Readonly<B
                     variant="primary"
                     size="sm"
                     disabled
-                    title="Not available in this preview"
+                    title={
+                      live
+                        ? 'Not exposed by this API yet'
+                        : 'Not available in this preview'
+                    }
                     className="w-full sm:w-auto"
                   >
                     New thread
@@ -170,7 +296,7 @@ export function BotWorkspace({ data, initialThreadId, initialPanel }: Readonly<B
                   label="Threads"
                   headingId="bot-threads-title"
                   items={data.threads.map((item) => item.listItem)}
-                  activeId={thread.id}
+                  activeId={thread?.id}
                   onSelect={selectThread}
                   emptyMessage="No threads yet. The first one starts this Bot's history."
                 />
@@ -179,50 +305,28 @@ export function BotWorkspace({ data, initialThreadId, initialPanel }: Readonly<B
                   headingId="bot-memory-title"
                   items={data.memoryItems}
                   approvedCount={data.approvedMemories}
-                  emptyMessage="No memories saved. This bot starts every thread with nothing recalled."
+                  emptyMessage={
+                    live
+                      ? 'Memory records are not exposed by this API yet. Nothing is shown, so nothing can be mistaken for recalled.'
+                      : 'No memories saved. This bot starts every thread with nothing recalled.'
+                  }
                   note="Both the bot and the thread have to approve a memory before a run can recall it."
                 />
               </div>
 
-              <motion.div
-                key={thread.id}
-                initial={reduceMotion === true ? false : { opacity: 0, y: 8 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: DURATION.base, ease: EASE }}
-                className="order-1 min-w-0 lg:order-none"
-              >
-                <ThreadConversation
-                  bot={{ name: data.bot.name, initials: data.bot.initials }}
-                  owner={data.owner}
-                  thread={thread.view}
-                  headingId="thread-title"
-                  hint={
-                    <span className="hidden sm:inline">
-                      Enter sends · Shift + Enter adds a line
-                    </span>
-                  }
-                  sendNotice="Added to this thread locally. No run is dispatched in this preview."
-                  localFootnote="Local only · not sent"
-                  attachment={
-                    <IconButton
-                      label="Attach a document — not available in this preview"
-                      disabled
-                      icon={<PaperclipIcon size={17} />}
-                    />
-                  }
-                />
-              </motion.div>
+              {conversation}
             </div>
 
             <p className="mt-4 max-w-[62ch] text-xs leading-relaxed text-subtle">
-              This thread is local sample data. Sending adds a message to this tab only; no model
-              is called and no run is dispatched.
+              {live
+                ? 'This conversation is stored by the Habi API. A reply appears only when the worker writes run events, and no figure on this page is sample data.'
+                : 'This thread is local sample data. Sending adds a message to this tab only; no model is called and no run is dispatched.'}
             </p>
           </div>
         </main>
 
         <AnimatePresence initial={false}>
-          {panel === undefined ? null : (
+          {panel === undefined || thread === undefined ? null : (
             <motion.div
               key={panel}
               initial={reduceMotion === true ? false : { opacity: 0, x: PANEL_OFFSET }}
@@ -238,13 +342,24 @@ export function BotWorkspace({ data, initialThreadId, initialPanel }: Readonly<B
                 onClose={closePanel}
               >
                 {panel === 'document' ? (
-                  <DocumentPanel document={thread.document} threadTitle={thread.view.title} />
+                  <DocumentPanel
+                    document={thread.document}
+                    threadTitle={shownThread?.title ?? thread.view.title}
+                    mode={data.mode}
+                  />
                 ) : (
                   <ContextPanel
                     memories={data.memories}
-                    run={thread.run}
+                    run={
+                      live && liveRun.run !== undefined
+                        ? runViewToPanel(liveRun.run)
+                        : thread.run
+                    }
                     allowance={data.allowance}
-                    memoryChangedNote="Preview only — this change is not saved."
+                    mode={data.mode}
+                    {...(live
+                      ? {}
+                      : { memoryChangedNote: 'Preview only — this change is not saved.' })}
                   />
                 )}
               </PanelCard>
