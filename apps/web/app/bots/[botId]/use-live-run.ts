@@ -59,6 +59,37 @@ export interface LiveRun {
 const MAX_RECONNECTS = 4;
 const TERMINAL_EVENTS = new Set(['run.completed', 'run.failed', 'run.cancelled']);
 
+interface TerminalOutcome {
+  readonly phase: LivePhase;
+  readonly state: RunView['state'];
+  readonly info: string;
+}
+
+const FAILED_OUTCOME: TerminalOutcome = {
+  phase: 'failed',
+  state: 'failed',
+  info: 'The run failed. The transcript keeps whatever arrived before the failure.',
+};
+
+const TERMINAL_OUTCOMES: Readonly<Record<string, TerminalOutcome>> = {
+  'run.completed': {
+    phase: 'complete',
+    state: 'complete',
+    info: 'Reply complete.',
+  },
+  'run.cancelled': {
+    phase: 'stopped',
+    state: 'stopped',
+    info: 'The run was stopped. The reply does not continue.',
+  },
+  'run.failed': FAILED_OUTCOME,
+};
+
+/** A terminal event names its own outcome; anything else is a failure, not a success. */
+function outcomeOf(type: string): TerminalOutcome {
+  return TERMINAL_OUTCOMES[type] ?? FAILED_OUTCOME;
+}
+
 function eventDetail(event: RunEventDto): string {
   if (event.type === 'message.delta') {
     const text = event.payload.text;
@@ -90,6 +121,45 @@ function toEventView(event: RunEventDto) {
 
 function appendText(previous: string, delta: string): string {
   return `${previous}${delta}`;
+}
+
+/** The Run projection a first event implies, before the POST result arrives. */
+function runFromFirstEvent(event: RunEventDto): RunView {
+  return runDtoToRunView(
+    {
+      id: event.runId,
+      conversationId: '',
+      status: 'running',
+      dispatchState: '',
+      errorCode: null,
+      lastEventSeq: event.seq,
+      createdAt: event.createdAt,
+      updatedAt: event.createdAt,
+      startedAt: null,
+      finishedAt: null,
+      usage: {
+        status: 'unknown',
+        grossPromptTokens: null,
+        grossCompletionTokens: null,
+        cachedPromptTokens: null,
+        reasoningTokens: null,
+        totalTokens: null,
+        costStatus: 'unknown',
+      },
+    },
+    [],
+  );
+}
+
+function runWithEvent(base: RunView, event: RunEventDto): RunView {
+  const streaming =
+    event.type === 'message.delta' && base.state !== 'complete' ? 'streaming' : base.state;
+
+  return {
+    ...base,
+    state: streaming,
+    events: [...base.events, toEventView(event)],
+  };
 }
 
 export function useLiveRun(
@@ -180,7 +250,7 @@ export function useLiveRun(
 
       // The API does not link messages to Runs; this tab does know the Run it
       // just watched, so the strip stays attached to the reply it produced.
-      if (last !== undefined && last.variant === 'bot' && runRef.current !== undefined) {
+      if (last?.variant === 'bot' && runRef.current !== undefined) {
         mapped[mapped.length - 1] = { ...last, run: runRef.current };
       }
 
@@ -201,20 +271,11 @@ export function useLiveRun(
       stopTimers();
       stopStream();
 
-      const nextPhase: LivePhase =
-        type === 'run.completed' ? 'complete' : type === 'run.cancelled' ? 'stopped' : 'failed';
-      const nextState =
-        type === 'run.completed' ? 'complete' : type === 'run.cancelled' ? 'stopped' : 'failed';
+      const outcome = outcomeOf(type);
 
-      setPhase(nextPhase);
+      setPhase(outcome.phase);
       setError(undefined);
-      setInfo(
-        type === 'run.completed'
-          ? 'Reply complete.'
-          : type === 'run.cancelled'
-            ? 'The run was stopped. The reply does not continue.'
-            : 'The run failed. The transcript keeps whatever arrived before the failure.',
-      );
+      setInfo(outcome.info);
       setExtra((previous) =>
         previous.map((turn) =>
           turn.id === assistantIdRef.current
@@ -224,7 +285,7 @@ export function useLiveRun(
                 run:
                   runRef.current === undefined
                     ? turn.run
-                    : { ...runRef.current, state: nextState },
+                    : { ...runRef.current, state: outcome.state },
               }
             : turn,
         ),
@@ -232,7 +293,7 @@ export function useLiveRun(
       runRef.current =
         runRef.current === undefined
           ? undefined
-          : { ...runRef.current, state: nextState };
+          : { ...runRef.current, state: outcome.state };
       setRun(runRef.current);
 
       const id = threadRef.current;
@@ -244,6 +305,78 @@ export function useLiveRun(
     [refresh, stopStream, stopTimers],
   );
 
+  const applyRunEvent = useCallback((event: RunEventDto) => {
+    setRun((previous) => {
+      const next = runWithEvent(previous ?? runFromFirstEvent(event), event);
+
+      runRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const applyMessageDelta = useCallback((event: RunEventDto) => {
+    const text = event.payload.text;
+
+    if (typeof text !== 'string') {
+      return;
+    }
+
+    streamTextRef.current = appendText(streamTextRef.current, text);
+    const paragraphs = paragraphsOf(streamTextRef.current);
+    const assistantId = assistantIdRef.current;
+
+    setExtra((previous) =>
+      previous.map((turn) => (turn.id === assistantId ? { ...turn, paragraphs } : turn)),
+    );
+    setPhase('streaming');
+    setInfo('The reply is streaming.');
+  }, []);
+
+  const applyUsage = useCallback((event: RunEventDto) => {
+    const prompt = event.payload.grossPromptTokens;
+    const completion = event.payload.grossCompletionTokens;
+    const promptTokens = typeof prompt === 'number' ? prompt : undefined;
+    const completionTokens = typeof completion === 'number' ? completion : undefined;
+
+    if (promptTokens === undefined && completionTokens === undefined) {
+      return;
+    }
+
+    setRun((previous) => {
+      if (previous === undefined) {
+        return previous;
+      }
+
+      const next: RunView = {
+        ...previous,
+        tokensKnown: true,
+        inTokens: promptTokens ?? previous.inTokens,
+        outTokens: completionTokens ?? previous.outTokens,
+      };
+
+      runRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const applyCompletedMessage = useCallback((event: RunEventDto) => {
+    const text = event.payload.text;
+
+    if (typeof text !== 'string' || text.length === 0) {
+      return;
+    }
+
+    streamTextRef.current = text;
+    const paragraphs = paragraphsOf(text);
+    const assistantId = assistantIdRef.current;
+
+    setExtra((previous) =>
+      previous.map((turn) =>
+        turn.id === assistantId ? { ...turn, paragraphs, state: 'complete' } : turn,
+      ),
+    );
+  }, []);
+
   const handleEvent = useCallback(
     (event: RunEventDto, cursor: string | undefined) => {
       const resume = cursor !== undefined && cursor.length > 0 ? cursor : event.id;
@@ -252,110 +385,25 @@ export function useLiveRun(
         lastEventIdRef.current = resume;
       }
 
-      setRun((previous) => {
-        const base =
-          previous ??
-          runDtoToRunView(
-            {
-              id: event.runId,
-              conversationId: '',
-              status: 'running',
-              dispatchState: '',
-              errorCode: null,
-              lastEventSeq: event.seq,
-              createdAt: event.createdAt,
-              updatedAt: event.createdAt,
-              startedAt: null,
-              finishedAt: null,
-              usage: {
-                status: 'unknown',
-                grossPromptTokens: null,
-                grossCompletionTokens: null,
-                cachedPromptTokens: null,
-                reasoningTokens: null,
-                totalTokens: null,
-                costStatus: 'unknown',
-              },
-            },
-            [],
-          );
-        const next: RunView = {
-          ...base,
-          state:
-            event.type === 'message.delta' && base.state !== 'complete'
-              ? 'streaming'
-              : base.state,
-          events: [...base.events, toEventView(event)],
-        };
-
-        runRef.current = next;
-        return next;
-      });
+      applyRunEvent(event);
 
       if (event.type === 'message.delta') {
-        const text = event.payload.text;
-
-        if (typeof text === 'string') {
-          streamTextRef.current = appendText(streamTextRef.current, text);
-          const paragraphs = paragraphsOf(streamTextRef.current);
-          const assistantId = assistantIdRef.current;
-
-          setExtra((previous) =>
-            previous.map((turn) =>
-              turn.id === assistantId ? { ...turn, paragraphs } : turn,
-            ),
-          );
-          setPhase('streaming');
-          setInfo('The reply is streaming.');
-        }
+        applyMessageDelta(event);
       }
 
       if (event.type === 'usage.recorded') {
-        const prompt = event.payload.grossPromptTokens;
-        const completion = event.payload.grossCompletionTokens;
-        const promptTokens = typeof prompt === 'number' ? prompt : undefined;
-        const completionTokens = typeof completion === 'number' ? completion : undefined;
-
-        if (promptTokens !== undefined || completionTokens !== undefined) {
-          setRun((previous) => {
-            if (previous === undefined) {
-              return previous;
-            }
-
-            const next: RunView = {
-              ...previous,
-              tokensKnown: true,
-              inTokens: promptTokens ?? previous.inTokens,
-              outTokens: completionTokens ?? previous.outTokens,
-            };
-
-            runRef.current = next;
-            return next;
-          });
-        }
+        applyUsage(event);
       }
 
       if (event.type === 'message.completed') {
-        const text = event.payload.text;
-
-        if (typeof text === 'string' && text.length > 0) {
-          streamTextRef.current = text;
-          const paragraphs = paragraphsOf(text);
-          const assistantId = assistantIdRef.current;
-
-          setExtra((previous) =>
-            previous.map((turn) =>
-              turn.id === assistantId ? { ...turn, paragraphs, state: 'complete' } : turn,
-            ),
-          );
-        }
+        applyCompletedMessage(event);
       }
 
       if (TERMINAL_EVENTS.has(event.type)) {
         finish(event.type);
       }
     },
-    [finish],
+    [applyCompletedMessage, applyMessageDelta, applyRunEvent, applyUsage, finish],
   );
 
   const connect = useCallback(
@@ -456,7 +504,7 @@ export function useLiveRun(
       const localUserId = `local-user-${Date.now()}`;
       const assistantId = `local-bot-${Date.now()}`;
       const clientMessageId =
-        pending !== undefined && pending.text === content ? pending.id : crypto.randomUUID();
+        pending?.text === content ? pending.id : crypto.randomUUID();
 
       pendingRef.current = { text: content, id: clientMessageId };
       assistantIdRef.current = assistantId;

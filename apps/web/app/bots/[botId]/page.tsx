@@ -7,8 +7,11 @@ import { BotWorkspace } from './workspace';
 import { buildLiveWorkspace } from './api-data';
 import type { WorkspaceData, WorkspaceThread } from './workspace-data';
 import { botHref, readPanel, readParam, threadHref } from '../../../lib/links';
+import type { PanelId } from '../../../lib/links';
 import { readApiConfig } from '../../../lib/api/config';
 import { callerCookieHeader, fetchBot, fetchBots, fetchMessages, fetchThreads } from '../../../lib/api/server';
+import type { ApiFailure } from '../../../lib/api/server';
+import type { MessagePageDto } from '../../../lib/api/types';
 import { DataStatePage } from '../../data-state';
 import {
   findAttachment,
@@ -196,28 +199,7 @@ export default async function BotPage({ params, searchParams }: BotPageProps) {
   const config = readApiConfig();
 
   if (config.kind === 'unset') {
-    const bot = findBot(botId);
-
-    if (bot === undefined) {
-      notFound();
-    }
-
-    const thread = findThread(bot, requestedThreadId);
-
-    if (thread === undefined) {
-      // Every sample Bot has at least one thread. A Bot with none needs its own
-      // empty state once the Bots API can return one.
-      notFound();
-    }
-
-    return (
-      <BotWorkspace
-        key={`${requestedThreadId ?? 'list'}:${panel ?? 'none'}`}
-        data={previewData(bot)}
-        initialThreadId={requestedThreadId}
-        initialPanel={panel}
-      />
-    );
+    return renderPreviewWorkspace(botId, requestedThreadId, panel);
   }
 
   if (config.kind === 'invalid') {
@@ -231,6 +213,111 @@ export default async function BotPage({ params, searchParams }: BotPageProps) {
   }
 
   const cookie = await callerCookieHeader();
+  const result = await loadLiveWorkspace(botId, requestedThreadId, cookie);
+
+  if (!result.ok) {
+    return (
+      <DataStatePage
+        section="bots"
+        failure={result.failure}
+        retryHref={result.retryHref}
+      />
+    );
+  }
+
+  return (
+    <BotWorkspace
+      key={`${result.threadId ?? 'empty'}:${panel ?? 'none'}`}
+      data={result.data}
+      initialThreadId={result.threadId}
+      initialPanel={panel}
+    />
+  );
+}
+
+/** The unchanged sample preview: an unknown Bot or thread is a real 404. */
+function renderPreviewWorkspace(
+  botId: string,
+  requestedThreadId: string | undefined,
+  panel: PanelId | undefined,
+) {
+  const bot = findBot(botId);
+
+  if (bot === undefined) {
+    notFound();
+  }
+
+  const thread = findThread(bot, requestedThreadId);
+
+  if (thread === undefined) {
+    // Every sample Bot has at least one thread. A Bot with none needs its own
+    // empty state once the Bots API can return one.
+    notFound();
+  }
+
+  return (
+    <BotWorkspace
+      key={`${requestedThreadId ?? 'list'}:${panel ?? 'none'}`}
+      data={previewData(bot)}
+      initialThreadId={requestedThreadId}
+      initialPanel={panel}
+    />
+  );
+}
+
+type LiveWorkspaceResult =
+  | {
+      readonly ok: true;
+      readonly data: WorkspaceData;
+      readonly threadId: string | undefined;
+    }
+  | {
+      readonly ok: false;
+      readonly failure: ApiFailure;
+      readonly retryHref: string;
+    };
+
+type SelectedMessages =
+  | { readonly ok: true; readonly data: MessagePageDto | undefined }
+  | { readonly ok: false; readonly failure: ApiFailure; readonly retryHref: string };
+
+/** The selected thread's transcript; no thread means no request and no messages. */
+async function loadSelectedMessages(
+  botId: string,
+  threadId: string | undefined,
+  cookie: string | undefined,
+): Promise<SelectedMessages> {
+  if (threadId === undefined) {
+    return { ok: true, data: undefined };
+  }
+
+  const result = await fetchMessages(threadId, cookie);
+
+  if (result.ok) {
+    return { ok: true, data: result.data };
+  }
+
+  if (result.reason === 'not_found') {
+    notFound();
+  }
+
+  return {
+    ok: false,
+    failure: result,
+    retryHref: threadHref(botId, threadId),
+  };
+}
+
+/**
+ * The owner-scoped live workspace: Bot detail, the gallery counts, the thread
+ * list, and the selected thread's messages. The first failing request is the
+ * page's failure; none of them falls back to sample data.
+ */
+async function loadLiveWorkspace(
+  botId: string,
+  requestedThreadId: string | undefined,
+  cookie: string | undefined,
+): Promise<LiveWorkspaceResult> {
   const [detailResult, botsResult, threadsResult] = await Promise.all([
     fetchBot(botId, cookie),
     fetchBots(cookie),
@@ -242,33 +329,15 @@ export default async function BotPage({ params, searchParams }: BotPageProps) {
       notFound();
     }
 
-    return (
-      <DataStatePage
-        section="bots"
-        failure={detailResult}
-        retryHref={botHref(botId)}
-      />
-    );
+    return { ok: false, failure: detailResult, retryHref: botHref(botId) };
   }
 
   if (!botsResult.ok) {
-    return (
-      <DataStatePage
-        section="bots"
-        failure={botsResult}
-        retryHref={botHref(botId)}
-      />
-    );
+    return { ok: false, failure: botsResult, retryHref: botHref(botId) };
   }
 
   if (!threadsResult.ok) {
-    return (
-      <DataStatePage
-        section="bots"
-        failure={threadsResult}
-        retryHref={botHref(botId)}
-      />
-    );
+    return { ok: false, failure: threadsResult, retryHref: botHref(botId) };
   }
 
   const threads = threadsResult.data.threads;
@@ -278,26 +347,10 @@ export default async function BotPage({ params, searchParams }: BotPageProps) {
     notFound();
   }
 
-  let messages;
+  const messageResult = await loadSelectedMessages(botId, threadId, cookie);
 
-  if (threadId !== undefined) {
-    const messageResult = await fetchMessages(threadId, cookie);
-
-    if (!messageResult.ok) {
-      if (messageResult.reason === 'not_found') {
-        notFound();
-      }
-
-      return (
-        <DataStatePage
-          section="bots"
-          failure={messageResult}
-          retryHref={threadHref(botId, threadId)}
-        />
-      );
-    }
-
-    messages = messageResult.data;
+  if (!messageResult.ok) {
+    return messageResult;
   }
 
   const data = buildLiveWorkspace({
@@ -305,15 +358,8 @@ export default async function BotPage({ params, searchParams }: BotPageProps) {
     bots: botsResult.data,
     threads: threadsResult.data,
     selectedThreadId: threadId,
-    messages,
+    messages: messageResult.data,
   });
 
-  return (
-    <BotWorkspace
-      key={`${threadId ?? 'empty'}:${panel ?? 'none'}`}
-      data={data}
-      initialThreadId={threadId}
-      initialPanel={panel}
-    />
-  );
+  return { ok: true, data, threadId };
 }
