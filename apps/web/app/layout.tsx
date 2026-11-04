@@ -1,29 +1,13 @@
-import localFont from 'next/font/local';
 import type { Metadata, Viewport } from 'next';
 import type { ReactNode } from 'react';
 import './globals.css';
 
 /*
- * Self-hosted variable faces. Outfit carries display and titles; Work Sans
- * carries everything read or operated. Both files live in the repository, so the
- * build and the browser make no font request, and the preview keeps working
- * offline.
+ * No web-font request: the shell is set in the rounded system face (SF Pro
+ * Rounded on Apple platforms) and the body in the system sans. That keeps the
+ * build and the browser offline-friendly, and it makes the type feel native on
+ * every platform rather than shipping a look-alike.
  */
-const outfit = localFont({
-  src: './fonts/outfit-latin-variable.woff2',
-  variable: '--font-outfit',
-  weight: '300 700',
-  display: 'swap',
-  fallback: ['Avenir Next', 'Helvetica Neue', 'Arial', 'sans-serif'],
-});
-
-const workSans = localFont({
-  src: './fonts/work-sans-latin-variable.woff2',
-  variable: '--font-work-sans',
-  weight: '300 600',
-  display: 'swap',
-  fallback: ['Segoe UI', 'Helvetica Neue', 'Arial', 'sans-serif'],
-});
 
 /*
  * Runs before the first paint. An explicit choice is applied to `<html>` here,
@@ -47,14 +31,14 @@ export const viewport: Viewport = {
   width: 'device-width',
   initialScale: 1,
   themeColor: [
-    { media: '(prefers-color-scheme: light)', color: '#f5f4f1' },
-    { media: '(prefers-color-scheme: dark)', color: '#0e1114' },
+    { media: '(prefers-color-scheme: light)', color: '#fbfaf6' },
+    { media: '(prefers-color-scheme: dark)', color: '#141317' },
   ],
 };
 
 export default function RootLayout({ children }: Readonly<{ children: ReactNode }>) {
   return (
-    <html lang="en" className={`${outfit.variable} ${workSans.variable}`} suppressHydrationWarning>
+    <html lang="en" suppressHydrationWarning>
       <body>
         <script dangerouslySetInnerHTML={{ __html: THEME_SCRIPT }} />
         {children}

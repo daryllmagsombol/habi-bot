@@ -1,4 +1,3 @@
-import Link from 'next/link';
 import type { ComponentProps, ReactNode } from 'react';
 
 export type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger';
@@ -11,17 +10,18 @@ const TRANSITION =
  * keeps its shape and drops to the neutral surface, so it still reads as a
  * control the reader cannot use yet. */
 const DISABLED =
-  'disabled:border-line disabled:bg-sunken disabled:text-subtle disabled:shadow-none ' +
-  'disabled:hover:bg-sunken disabled:hover:text-subtle disabled:hover:border-line';
+  'disabled:border-line disabled:bg-surface disabled:text-subtle disabled:shadow-none ' +
+  'disabled:hover:bg-surface disabled:hover:text-subtle disabled:hover:border-line';
 
 const VARIANTS: Record<ButtonVariant, string> = {
-  /* The one filled control on a screen. Flat: no shadow, no lift. */
-  primary: 'bg-accent text-on-accent hover:bg-accent-hover motion-safe:active:translate-y-px',
+  /* The one filled control on a screen: ink on paper, iris when hovered. */
+  primary:
+    'bg-ink text-ink-inverse shadow-card hover:bg-accent hover:text-on-accent motion-safe:active:translate-y-px',
   secondary:
-    'border-line-strong bg-surface text-ink hover:border-ink hover:bg-sunken motion-safe:active:translate-y-px',
+    'border border-line bg-surface text-ink hover:border-line-strong hover:bg-sunken motion-safe:active:translate-y-px',
   /* Text action: the underline is the affordance, so it is always present. */
   ghost:
-    'text-ink underline decoration-line-strong decoration-1 underline-offset-4 hover:decoration-fg',
+    'text-ink underline decoration-line-strong decoration-1 underline-offset-4 hover:no-underline',
   danger: 'bg-danger text-on-danger hover:bg-danger-hover motion-safe:active:translate-y-px',
 };
 
@@ -30,7 +30,7 @@ const VARIANTS: Record<ButtonVariant, string> = {
 const SIZES: Record<ButtonSize, string> = {
   sm: 'min-h-11 text-xs',
   md: 'min-h-11 text-sm',
-  lg: 'min-h-12 text-base',
+  lg: 'min-h-12 text-sm',
 };
 
 const SIZE_PADDING: Record<ButtonSize, string> = {
@@ -105,27 +105,5 @@ export function Button({
       {loading ? <span className="spinner" aria-hidden="true" /> : null}
       {children}
     </button>
-  );
-}
-
-export interface ButtonLinkProps extends ComponentProps<typeof Link> {
-  readonly variant?: ButtonVariant;
-  readonly size?: ButtonSize;
-  readonly block?: boolean;
-  readonly children?: ReactNode;
-}
-
-export function ButtonLink({
-  variant,
-  size,
-  block,
-  className,
-  children,
-  ...rest
-}: Readonly<ButtonLinkProps>) {
-  return (
-    <Link {...rest} className={buttonStyles({ variant, size, block, className })}>
-      {children}
-    </Link>
   );
 }

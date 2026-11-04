@@ -108,17 +108,20 @@ test('built Bot gallery and thread workspace render honest sample data', { timeo
     assert.match(gallery.html, /href="#main-content"/);
     assert.match(gallery.html, /<main[^>]*id="main-content"/);
     assert.equal((gallery.html.match(/<h1\b/gi) ?? []).length, 1);
-    assert.match(gallery.html, /<h1[^>]*>Bots<\/h1>/);
+    assert.match(gallery.html, /<h1[^>]*>Your bots<\/h1>/);
 
     const galleryText = visibleText(gallery.html);
     for (const copy of [
+      'Four working assistants',
       'Field Notes',
       'Draft Partner',
+      'Sounding Board',
       'Second Reader',
-      'Conversations',
-      'Last active',
-      'New Bot',
-      'Create a Bot',
+      'memories',
+      'threads',
+      'Open',
+      'New bot',
+      'Not available in this preview',
       'local sample data',
     ]) {
       assert.ok(galleryText.includes(copy), `gallery is missing: ${copy}`);
@@ -127,7 +130,14 @@ test('built Bot gallery and thread workspace render honest sample data', { timeo
     assert.match(gallery.html, /aria-label="Workspace"/);
     assert.match(gallery.html, /aria-label="Switch to (?:light|dark) theme"/);
     assert.match(gallery.html, /localStorage\.getItem\('habi-theme'\)/);
-    assert.match(gallery.html, /disabled[^>]*>Create a Bot</);
+    assert.match(gallery.html, /href="\/bots\/field-notes"/);
+    assert.match(gallery.html, /href="\/threads"/);
+
+    const threads = await page('/threads');
+    assert.equal(threads.response.status, 200);
+    assert.equal((threads.html.match(/<h1\b/gi) ?? []).length, 1);
+    assert.match(threads.html, /<h1[^>]*>Threads<\/h1>/);
+    assert.ok(visibleText(threads.html).includes('Should the allowance pause or stop?'));
 
     const thread = await page('/bots/field-notes?thread=run-ordering');
     assert.equal(thread.response.status, 200);
@@ -137,10 +147,11 @@ test('built Bot gallery and thread workspace render honest sample data', { timeo
     const threadText = visibleText(thread.html);
     for (const copy of [
       'Run event ordering across a reconnect',
-      'run 4821',
+      'Run 4821',
       'streaming',
       'tools 0',
-      'Both this Bot and the conversation approve a memory',
+      'Both the bot and the thread have to approve a memory',
+      'No tools · 2 of 3 memories selected',
     ]) {
       assert.ok(threadText.includes(copy), `thread is missing: ${copy}`);
     }
@@ -149,6 +160,7 @@ test('built Bot gallery and thread workspace render honest sample data', { timeo
     assert.match(thread.html, /id="composer"/);
     assert.match(thread.html, /role="status"/);
     assert.match(thread.html, /aria-current="page"/);
+    assert.match(thread.html, /aria-label="Thread panels"/);
     assert.match(thread.html, /panel=document/);
     assert.match(thread.html, /panel=context/);
 

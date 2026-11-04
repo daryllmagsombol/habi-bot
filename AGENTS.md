@@ -4,8 +4,8 @@ This is a project-specific supplement to the global agent contract. Read it befo
 
 ## Current state
 
-- Runnable local foundation only: pnpm/Turborepo, a minimal Next.js/React/Tailwind web shell, a NestJS health API, an inert headless worker, shared contracts/config, and local PostgreSQL Compose tooling.
-- H-009 remains open and no P0 gate has passed. Authentication, chat, Bots, model calls, Hermes production, persistence, queueing, database integration, uploads, and deployment are not implemented.
+- Runnable local stack: pnpm/Turborepo, a Next.js web preview, a NestJS API (health plus flag-gated identity, session and P1 chat surfaces), a headless worker that only executes when `HABI_P1_WORKER=1`, shared contracts/config, and local PostgreSQL Compose tooling.
+- Much of P1 exists at service and API fidelity and was accepted at recorded fidelity; nothing is deployed, no P1 acceptance suite (#25) has run, and P2 stays gated. Describe capability by the boundary it actually has — "implemented and tested, not wired", "flag-gated", "preview only" — never as shipped behavior.
 - Do not describe planned behavior as present. Apply later requirements only when that feature is being implemented.
 - `packageManager` in `package.json` and `.node-version` are the version baseline. Read them; do not cache version numbers in guidance.
 
@@ -16,6 +16,7 @@ This is a project-specific supplement to the global agent contract. Read it befo
 - `packages/contracts` — shared type-only contracts.
 - `packages/config` — shared TypeScript and ESLint base.
 - `scripts/` — foundation verification and `scripts/ci` focused checks.
+- [Design system](docs/DESIGN.md) — tokens, component contract, motion, accessibility, verification.
 - [OpenCode review operations](docs/ci/opencode-review.md) and [SonarQube operations](docs/ci/sonarqube.md); [Sonar engineering guidance](docs/SONAR_GUIDELINES.md); `docs/superpowers/` — design, plan, ledger.
 - `.github/review/` — trusted OpenCode review prompts; `.github/scripts/` — review helpers/tests; `.github/workflows/` — CI, OpenCode review, optional SonarQube.
 - Root `compose.yaml`, `sonar-project.properties`, `tsconfig.sonar.json`.
@@ -36,6 +37,15 @@ This is a project-specific supplement to the global agent contract. Read it befo
 - OpenCode loads only its three trusted base prompts (`.github/review/system.md`, `security.md`, `bugs.md`), taken from the immutable event base or an administrator-approved bootstrap commit rather than the PR head. These prompts are CI review input only, not product model skills. It does not load `AGENTS.md`, native skills, or `docs/SONAR_GUIDELINES.md` automatically. Changing guidance does not change review policy; propagate rules with a separately reviewed manual prompt update.
 - SonarQube is an optional, self-hosted, configuration-gated lane. No live pass is known. Missing configuration skips; configured scans can pass or fail. No fake coverage or blanket exclusions. Real source-mapped LCOV comes from `pnpm coverage`; any numeric server-gate threshold is an explicit owner decision, not a copied default.
 - Operational Sonar details live in `docs/ci/sonarqube.md`, `sonar-project.properties`, `tsconfig.sonar.json`, and `.github/workflows/sonarqube.yml`. Use [the guidelines](docs/SONAR_GUIDELINES.md) for engineering rules, not as a server quality profile.
+
+## Design and reusable components
+
+- Read [the design system](docs/DESIGN.md) before changing anything under `apps/web`.
+- **Always build reusable components.** A route composes components; it does not contain card, bubble, row, pill or avatar markup of its own. Reuse an existing component, then extend it with a prop or a typed variant, and only then write a new one — in the right group (`components/ui`, `components/bots`, `components/threads`, `components/panels`), with data in and callbacks out, states as props, and a barrel export.
+- A component never imports sample data, fetches, or reads the URL; the route owns data selection and provenance.
+- Style through `apps/web/app/tokens.css` only. New colour, spacing, radius or motion values are added as tokens in both themes, not as literals in a component.
+- Both themes ship together: a UI change is not done until the affected route is checked at 320, 768 and 1440 in light and dark, and `pnpm --filter @habi/web test` plus `test:browser` pass.
+- Sample data is labelled as sample data, and the copy never claims a capability the backend does not enforce.
 
 ## Security and change discipline
 

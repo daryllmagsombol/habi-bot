@@ -54,8 +54,10 @@ const WORKSPACE = '/bots/field-notes?thread=run-ordering';
 const ROUTES = [
   { label: 'home /', path: '/' },
   { label: 'Bot gallery /bots', path: '/bots' },
+  { label: 'thread index /threads', path: '/threads' },
   { label: 'thread workspace', path: WORKSPACE },
   { label: 'Document panel', path: `${WORKSPACE}&panel=document` },
+  { label: 'Document panel, no attachment', path: '/bots/draft-partner?thread=boundary-note&panel=document' },
   { label: 'Context panel', path: `${WORKSPACE}&panel=context` },
   { label: 'login /login', path: '/login' },
   { label: 'signup /signup', path: '/signup' },
@@ -72,8 +74,8 @@ const VIEWPORTS = [
 const THEMES = ['light', 'dark'];
 
 const EXPECTED = {
-  light: { canvasToken: '#f5f4f1', bodyBackground: 'rgb(245, 244, 241)' },
-  dark: { canvasToken: '#0e1114', bodyBackground: 'rgb(14, 17, 20)' },
+  light: { canvasToken: '#fbfaf6', bodyBackground: 'rgb(251, 250, 246)' },
+  dark: { canvasToken: '#141317', bodyBackground: 'rgb(20, 19, 23)' },
 };
 
 const chromiumPath = chromium.executablePath();

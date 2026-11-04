@@ -8,7 +8,7 @@
  * adapted: it is sample content, not a client.
  */
 
-export type BotId = 'field-notes' | 'draft-partner' | 'second-reader';
+export type BotId = 'field-notes' | 'draft-partner' | 'sounding-board' | 'second-reader';
 
 export type RunState = 'complete' | 'streaming';
 
@@ -87,6 +87,12 @@ export const previewAllowance = {
   used: 12_480,
   limit: 100_000,
   reset: '00:00 Asia/Manila',
+} as const;
+
+/** The signed-in reader in this preview; there is no auth session behind it. */
+export const previewOwner = {
+  name: 'You',
+  initials: 'D',
 } as const;
 
 export const previewAttachments: Readonly<Record<string, PreviewAttachment>> = {
@@ -399,11 +405,70 @@ const secondReaderThreads: readonly PreviewThread[] = [
   },
 ];
 
+const soundingBoardThreads: readonly PreviewThread[] = [
+  {
+    id: 'allowance-pause',
+    botId: 'sounding-board',
+    title: 'Should the allowance pause or stop?',
+    at: 'Saturday, 10:15',
+    tokens: 940,
+    messages: [
+      {
+        id: 'm1',
+        role: 'user',
+        at: '10:12',
+        paragraphs: [
+          'A run is mid-flight when someone crosses the daily allowance. Do we pause it, or stop it?',
+        ],
+      },
+      {
+        id: 'm2',
+        role: 'bot',
+        at: '10:14',
+        paragraphs: [
+          'Before I answer: is the cost you are guarding the tokens, or the surprise of a run that finishes after the line? And who would have to notice the pause — the reader, or the worker?',
+          'Those two answers point in different directions, so I am not going to pick for you.',
+        ],
+      },
+      {
+        id: 'm3',
+        role: 'user',
+        at: '10:15',
+        paragraphs: ['The surprise, mostly. The reader should not have to guess.'],
+      },
+    ],
+  },
+  {
+    id: 'two-questions',
+    botId: 'sounding-board',
+    title: 'Two questions before I commit to a plan',
+    at: 'Friday, 16:40',
+    tokens: 712,
+    messages: [
+      {
+        id: 'm1',
+        role: 'user',
+        at: '16:36',
+        paragraphs: ['I want to rewrite the onboarding copy this week. Where should I start?'],
+      },
+      {
+        id: 'm2',
+        role: 'bot',
+        at: '16:40',
+        paragraphs: [
+          'What does a reader need to believe before they will try the first Bot? And what is the one sentence you would keep if everything else had to go?',
+          'Answer those and the order writes itself.',
+        ],
+      },
+    ],
+  },
+];
+
 export const previewBots: readonly PreviewBot[] = [
   {
     id: 'field-notes',
     name: 'Field Notes',
-    initials: 'FN',
+    initials: 'Fn',
     purpose: 'Reads what you attach and names the paragraph behind every claim.',
     instruction: 'Cite the attached document by paragraph. Keep uncertainty visible.',
     memories: [
@@ -416,7 +481,7 @@ export const previewBots: readonly PreviewBot[] = [
   {
     id: 'draft-partner',
     name: 'Draft Partner',
-    initials: 'DP',
+    initials: 'Dp',
     purpose: 'Turns a decision you already made into short document sections.',
     instruction: 'Write in the first person, plain verbs, no headings longer than three words.',
     memories: [
@@ -426,9 +491,18 @@ export const previewBots: readonly PreviewBot[] = [
     threads: draftPartnerThreads,
   },
   {
+    id: 'sounding-board',
+    name: 'Sounding Board',
+    initials: 'Sb',
+    purpose: 'Asks two questions before answering, and refuses to pick for you.',
+    instruction: 'Ask two questions before answering. Do not choose for the reader.',
+    memories: [],
+    threads: soundingBoardThreads,
+  },
+  {
     id: 'second-reader',
     name: 'Second Reader',
-    initials: 'SR',
+    initials: 'Sr',
     purpose: 'Reads a draft and points at the vague sentence, not the whole page.',
     instruction: 'Point at one sentence. Do not rewrite the page unless asked.',
     memories: [
@@ -468,11 +542,33 @@ export function formatCount(value: number): string {
   return new Intl.NumberFormat('en-US').format(value);
 }
 
-export function conversationsLabel(bot: PreviewBot): string {
-  const count = bot.threads.length;
-  return count === 1 ? '1 conversation' : `${count} conversations`;
+/**
+ * A row label that fits beside a title: "14:02" for today, "Mon" for older
+ * threads. The full stamp stays in the thread card, so nothing is lost.
+ */
+export function shortWhen(at: string): string {
+  const [day, time] = at.split(', ');
+
+  if (day === undefined) {
+    return at;
+  }
+
+  if (time === undefined) {
+    return day;
+  }
+
+  if (day === 'Today' || day === 'Yesterday') {
+    return time;
+  }
+
+  return day.slice(0, 3);
 }
 
-export function approvedMemoryCount(bot: PreviewBot): number {
-  return bot.memories.filter((memory) => memory.botApproved && memory.threadApproved).length;
+/** Threads whose newest message is still streaming. */
+export function liveThreadCount(bot: PreviewBot): number {
+  return bot.threads.filter((thread) => thread.messages.at(-1)?.streaming === true).length;
+}
+
+export function totalThreadCount(): number {
+  return previewBots.reduce((total, bot) => total + bot.threads.length, 0);
 }

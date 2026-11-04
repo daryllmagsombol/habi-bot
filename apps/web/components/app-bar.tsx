@@ -1,168 +1,196 @@
 'use client';
 
 import Link from 'next/link';
+import { useState } from 'react';
 import type { ReactNode } from 'react';
-import { Badge } from './ui/badge';
+import { Badge, CloseIcon, IconButton, MenuIcon, Pill } from './ui';
 import { ThemeToggle } from './theme/theme-toggle';
-import { ChevronLeftIcon } from './ui/icons';
-import { previewAllowance, formatCount } from '../lib/preview-data';
+import { Wordmark } from './wordmark';
+
+const COUNT = new Intl.NumberFormat('en-US');
+
+export interface AppBarCounts {
+  readonly bots: number;
+  readonly threads: number;
+}
+
+export interface AppBarAllowance {
+  readonly used: number;
+  readonly limit: number;
+  readonly reset: string;
+}
 
 export interface AppBarProps {
-  /** Route the app bar treats as the current section. */
-  readonly section?: 'bots' | 'identity';
-  /** The object being viewed, e.g. a Bot name. Truncates before it wraps. */
-  readonly title?: ReactNode;
-  /** Mobile-only back control. Desktop navigation is the breadcrumb. */
-  readonly backHref?: string;
-  readonly backLabel?: string;
-  /** Closes one level in place; the link still navigates without it. */
-  readonly onBack?: (() => void) | undefined;
-  /** Right-side controls, e.g. the panel toggle. */
+  /** Route the bar treats as the current section. */
+  readonly section?: 'bots' | 'threads';
+  /** Right-side controls that belong to the page, e.g. the panel switch. */
   readonly actions?: ReactNode;
-  readonly showAllowance?: boolean;
-  /** Panes run edge to edge: the bar pads to the window instead of centring. */
-  readonly fluid?: boolean;
-  /** Extra row under the bar, e.g. the mobile Thread / Document / Context tabs. */
-  readonly children?: ReactNode;
+  /** Section totals come from the route, not from the chrome. */
+  readonly counts: AppBarCounts;
+  readonly allowance: AppBarAllowance;
   readonly className?: string;
 }
 
 function navItemClass(current: boolean): string {
   return [
-    'inline-flex min-h-11 items-center rounded-xs px-2.5 text-xs font-medium transition-colors',
-    'duration-[var(--habi-duration-fast)] ease-standard',
-    current ? 'bg-sunken text-ink' : 'text-muted hover:bg-sunken/60 hover:text-ink',
+    'inline-flex min-h-11 items-center gap-1.5 rounded-full px-3 text-sm whitespace-nowrap',
+    'transition-colors duration-[var(--habi-duration-fast)] ease-standard',
+    current ? 'bg-sunken font-semibold text-ink' : 'text-subtle hover:bg-sunken/60 hover:text-ink',
   ].join(' ');
 }
 
+const SECTIONS = [
+  { key: 'bots', label: 'Bots', href: '/bots' },
+  { key: 'threads', label: 'Threads', href: '/threads' },
+] as const;
+
 /**
- * Workspace chrome: wordmark, section nav, the current object, and the sample
- * allowance. The bar is sticky because the panes below it scroll independently
- * on a desktop; it stays one 56px hairline rather than becoming a hero.
+ * The workspace chrome: wordmark, section pills, the daily allowance, the
+ * page's own controls, the theme switch, and — on a phone — a menu instead of
+ * the pills.
  *
- * The `Preview` badge is not decoration. Every screen built on local sample
- * data carries it, and the page copy states the same thing in words.
+ * The `Preview` tag is not decoration. Every screen built on local sample data
+ * carries it, and the page copy states the same thing in words. Nothing in this
+ * bar is a product control: the panel switch and the theme toggle are the only
+ * actions, and both are plain links or a toggle.
  */
-export function AppBar({
-  section,
-  title,
-  backHref,
-  backLabel = 'back',
-  onBack,
-  actions,
-  showAllowance = true,
-  fluid = false,
-  children,
-  className,
-}: Readonly<AppBarProps>) {
-  const usedPercent = Math.min(100, (previewAllowance.used / previewAllowance.limit) * 100);
+export function AppBar({ section, actions, counts, allowance, className }: Readonly<AppBarProps>) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const usedPercent = Math.min(100, (allowance.used / allowance.limit) * 100);
+
+  const sectionCounts: Record<(typeof SECTIONS)[number]['key'], number> = {
+    bots: counts.bots,
+    threads: counts.threads,
+  };
 
   return (
     <header
-      className={['sticky top-0 z-30 border-b border-line bg-surface', className]
+      className={[
+        'sticky top-0 z-30 border-b border-line bg-canvas/95 backdrop-blur-[10px]',
+        className,
+      ]
         .filter(Boolean)
         .join(' ')}
     >
-      <div
-        className={[
-          'flex min-h-14 w-full items-center gap-2',
-          fluid ? 'px-4 lg:px-6' : 'mx-auto max-w-wide px-gutter',
-        ].join(' ')}
-      >
-        {backHref === undefined ? null : (
-          <Link
-            href={backHref}
-            aria-label={`Back to ${backLabel}`}
-            onClick={(event) => {
-              if (onBack === undefined || event.metaKey || event.ctrlKey || event.shiftKey) {
-                return;
-              }
+      <div className="mx-auto flex min-h-14 w-full max-w-wide items-center gap-2 px-4 sm:px-6">
+        <Wordmark />
 
-              event.preventDefault();
-              onBack();
-            }}
-            className="-ml-2 inline-flex size-11 items-center justify-center rounded-sm text-muted hover:bg-sunken hover:text-ink lg:hidden"
-          >
-            <ChevronLeftIcon size={18} />
-          </Link>
-        )}
-
-        <Link
-          href="/"
-          className={[
-            'u-brand inline-flex min-h-11 shrink-0 items-center text-ink',
-            backHref === undefined ? '' : 'hidden lg:inline-flex',
-          ]
-            .filter(Boolean)
-            .join(' ')}
-        >
-          Habi
-        </Link>
-
-        <span aria-hidden="true" className="hidden h-4 w-px shrink-0 bg-line md:block" />
-
-        <nav aria-label="Workspace" className="hidden items-center gap-1 md:flex">
-          <Link
-            href="/bots"
-            aria-current={section === 'bots' ? 'page' : undefined}
-            className={navItemClass(section === 'bots')}
-          >
-            Bots
-          </Link>
-          <Link
-            href="/start"
-            aria-current={section === 'identity' ? 'page' : undefined}
-            className={navItemClass(section === 'identity')}
-          >
-            Account
-          </Link>
+        <nav aria-label="Workspace" className="ml-1 hidden items-center gap-0.5 md:flex">
+          {SECTIONS.map((item) => (
+            <Link
+              key={item.key}
+              href={item.href}
+              aria-current={section === item.key ? 'page' : undefined}
+              className={navItemClass(section === item.key)}
+            >
+              {item.label}
+              <Pill tone="surface" size="xs" className="u-figures min-w-5 justify-center">
+                {sectionCounts[item.key]}
+              </Pill>
+            </Link>
+          ))}
         </nav>
 
-        {title === undefined ? null : (
-          <>
-            <span aria-hidden="true" className="hidden h-4 w-px shrink-0 bg-line md:block" />
-            <h1 className="min-w-0 flex-1 truncate font-body text-sm leading-normal font-medium tracking-normal text-ink md:ml-1 md:max-w-[22rem] md:flex-none">
-              {title}
-            </h1>
-          </>
-        )}
-
-        <div className="ml-auto flex shrink-0 items-center gap-2">
+        <div className="ml-auto flex shrink-0 items-center gap-1.5 sm:gap-2">
           {actions}
 
-          <ThemeToggle />
-
-          {showAllowance ? (
-            <span className="hidden items-center gap-2 md:flex">
-              <span aria-hidden="true" className="relative block h-[3px] w-10 bg-sunken">
+          {actions === undefined ? (
+            <Pill as="span" tone="sunken" size="sm" className="md:hidden">
+              <span aria-hidden="true" className="block h-1 w-6 overflow-hidden rounded-full bg-line">
                 <span
-                  className="absolute inset-y-0 left-0 bg-accent"
+                  className="block h-full rounded-full bg-accent"
                   style={{ width: `${usedPercent.toFixed(2)}%` }}
                 />
               </span>
-              <span className="u-figures text-2xs text-muted">
-                <b className="font-semibold text-ink">{formatCount(previewAllowance.used)}</b>
-                {' / '}
-                {formatCount(previewAllowance.limit)}
-                <span className="sr-only"> tokens used today. Resets at {previewAllowance.reset}.</span>
+              <span className="u-figures whitespace-nowrap">
+                <b className="font-semibold text-ink">{(allowance.used / 1000).toFixed(1)}k</b>
+                /{allowance.limit / 1000}k
               </span>
-            </span>
+              <span className="sr-only">
+                {COUNT.format(allowance.used)} of {COUNT.format(allowance.limit)} tokens
+                used today.
+              </span>
+            </Pill>
           ) : null}
 
-          <Badge tone="outline">Preview</Badge>
+          <Pill tone="sunken" size="md" className="max-md:hidden">
+            <span aria-hidden="true" className="block h-1 w-8 overflow-hidden rounded-full bg-line">
+              <span
+                className="block h-full rounded-full bg-accent"
+                style={{ width: `${usedPercent.toFixed(2)}%` }}
+              />
+            </span>
+            <span className="u-figures whitespace-nowrap">
+              <b className="font-semibold text-ink">{COUNT.format(allowance.used)}</b>
+              {' / '}
+              {COUNT.format(allowance.limit)}
+            </span>
+            <span className="sr-only">
+              tokens used today. Resets at {allowance.reset}.
+            </span>
+          </Pill>
+
+          <span
+            className={
+              actions === undefined ? 'hidden sm:inline-flex' : 'hidden lg:inline-flex'
+            }
+          >
+            <Badge tone="outline">Preview</Badge>
+          </span>
+
+          <ThemeToggle />
+
+          <IconButton
+            label={menuOpen ? 'Close menu' : 'Open menu'}
+            icon={menuOpen ? <CloseIcon size={18} /> : <MenuIcon size={18} />}
+            variant="surface"
+            aria-expanded={menuOpen}
+            aria-controls="workspace-menu"
+            onClick={() => setMenuOpen((open) => !open)}
+            className="md:hidden"
+          />
         </div>
       </div>
 
-      {children === undefined ? null : (
-        <div
-        className={[
-          'border-t border-line py-1.5 lg:hidden',
-          fluid ? 'px-4' : 'px-gutter',
-        ].join(' ')}
+      <div
+        id="workspace-menu"
+        hidden={!menuOpen}
+        className="border-t border-line bg-canvas px-4 pb-4 sm:px-6 md:hidden"
       >
-        {children}
+        <nav aria-label="Workspace menu" className="py-1">
+          {SECTIONS.map((item) => (
+            <Link
+              key={item.key}
+              href={item.href}
+              aria-current={section === item.key ? 'page' : undefined}
+              onClick={() => setMenuOpen(false)}
+              className="flex min-h-11 items-center justify-between gap-3 border-b border-line-soft px-1 text-sm text-ink last:border-b-0"
+            >
+              {item.label}
+              <span className="u-figures text-2xs text-subtle">{sectionCounts[item.key]}</span>
+            </Link>
+          ))}
+        </nav>
+
+        <Pill as="p" tone="sunken" size="md" className="mt-3 w-full flex-wrap">
+          <span aria-hidden="true" className="block h-1 w-8 overflow-hidden rounded-full bg-line">
+            <span
+              className="block h-full rounded-full bg-accent"
+              style={{ width: `${usedPercent.toFixed(2)}%` }}
+            />
+          </span>
+          <span className="u-figures">
+            <b className="font-semibold text-ink">{COUNT.format(allowance.used)}</b>
+            {' / '}
+            {COUNT.format(allowance.limit)} today
+          </span>
+          <span className="w-full text-subtle">Resets at {allowance.reset}.</span>
+        </Pill>
+
+        <p className="mt-3 px-1 text-xs leading-relaxed text-subtle">
+          Interface preview · local sample data. Nothing is saved and no model is called.
+        </p>
       </div>
-      )}
     </header>
   );
 }

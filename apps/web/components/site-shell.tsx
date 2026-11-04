@@ -4,6 +4,7 @@ import { Container } from './ui/container';
 import { SkipLink } from './ui/skip-link';
 import { Badge } from './ui/badge';
 import { ThemeToggle } from './theme/theme-toggle';
+import { Wordmark } from './wordmark';
 
 export interface SiteShellProps {
   /** Shown in the header stamp, e.g. "Interface preview". */
@@ -27,15 +28,13 @@ export function SiteShell({ label = 'Interface preview', nav, footerLeft, footer
     <div className="flex min-h-svh flex-col">
       <SkipLink />
 
-      <header className="border-b border-line bg-surface">
+      <header className="sticky top-0 z-30 border-b border-line bg-canvas/95 backdrop-blur-[10px]">
         <Container
           size="wide"
           className="flex min-h-14 flex-wrap items-center justify-between gap-x-4 gap-y-2 py-2"
         >
           <div className="flex items-center gap-4">
-            <Link href="/" className="u-brand inline-flex min-h-11 items-center text-ink">
-              Habi
-            </Link>
+            <Wordmark href="/" label="Habi, home" />
             {nav === undefined ? null : (
               <div className="hidden items-center gap-4 sm:flex">
                 <span aria-hidden="true" className="h-4 w-px bg-line" />

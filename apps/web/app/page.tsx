@@ -1,6 +1,4 @@
-import Link from 'next/link';
-import { ArrowRightIcon } from '../components/ui/icons';
-import { Container } from '../components/ui/container';
+import { ArrowRightIcon, ButtonLink, Card, Container } from '../components/ui';
 import { SiteNavLink, SiteShell } from '../components/site-shell';
 import { WeaveFigure } from '../components/weave-figure';
 
@@ -66,39 +64,33 @@ export default function HomePage() {
             </p>
 
             <div className="mt-8 flex flex-col gap-3 sm:flex-row sm:items-center">
-              <Link
-                href="/bots"
-                className="inline-flex min-h-12 items-center justify-center gap-2 rounded-sm bg-accent px-5 text-sm font-medium text-on-accent transition-colors duration-[var(--habi-duration-fast)] ease-standard hover:bg-accent-hover"
-              >
+              <ButtonLink href="/bots" size="lg">
                 Look inside the preview
                 <ArrowRightIcon size={16} />
-              </Link>
-              <Link
-                href="/start"
-                className="inline-flex min-h-12 items-center justify-center rounded-sm border border-line-strong bg-surface px-5 text-sm font-medium text-ink transition-colors duration-[var(--habi-duration-fast)] ease-standard hover:bg-sunken"
-              >
+              </ButtonLink>
+              <ButtonLink href="/start" variant="secondary" size="lg">
                 See the identity screens
-              </Link>
+              </ButtonLink>
             </div>
 
-            <div className="mt-10 max-w-[52ch] border border-line bg-surface px-4 py-3">
+            <Card radius="lg" elevation="card" className="mt-10 max-w-[52ch] px-4 py-3">
               <p className="text-xs leading-relaxed text-muted">
                 <span className="font-semibold text-ink">Interface preview.</span> The gallery,
                 threads, runs, and token counts are local sample data. Nothing is saved, and
                 no model is called.
               </p>
-            </div>
+            </Card>
           </div>
 
           <div className="lg:col-span-5">
             <WeaveFigure className="h-auto w-full max-w-[20rem] lg:max-w-none" />
             <p className="mt-4 flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-line pt-3 text-xs text-subtle">
               <span className="inline-flex items-center gap-1.5">
-                <span aria-hidden="true" className="h-[3px] w-4 bg-accent" />
+                <span aria-hidden="true" className="h-1 w-4 bg-accent" />
                 <span>Action</span>
               </span>
               <span className="inline-flex items-center gap-1.5">
-                <span aria-hidden="true" className="h-[3px] w-4 bg-signal" />
+                <span aria-hidden="true" className="h-1 w-4 bg-signal" />
                 <span>Evidence</span>
               </span>
               <span className="u-figures text-subtle">Habi · 2026</span>
