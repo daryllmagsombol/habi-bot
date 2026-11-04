@@ -126,7 +126,7 @@ async function settleReservation(
     return;
   }
 
-  if (reservation === null || reservation.state !== 'reserved') {
+  if (reservation?.state !== 'reserved') {
     return;
   }
 
