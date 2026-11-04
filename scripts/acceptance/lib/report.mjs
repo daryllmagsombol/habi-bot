@@ -27,7 +27,7 @@ const SENSITIVE_KEY =
 // which is quadratic: measured 6.0 s for 100 kB of letters, versus 1 ms here.
 // Evidence strings are ours, but a provider or upstream error can reach a
 // report, so the scanner must stay linear on hostile input.
-const URL_CREDENTIALS = /(^|[\s"'(\[<=,;])([a-z][a-z0-9+.-]*:\/\/)[^/\s@]+@/gi;
+const URL_CREDENTIALS = /(^|[\s"'([<=,;])([a-z][a-z0-9+.-]*:\/\/)[^/\s@]+@/gi;
 const SESSION_COOKIE = /\b(?:__Host-)?habi_session=[^;\s]+/g;
 const BEARER = /\bBearer\s+[A-Za-z0-9._~+/=-]+/g;
 
