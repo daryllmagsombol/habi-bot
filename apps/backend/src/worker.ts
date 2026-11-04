@@ -5,6 +5,9 @@ import { NestFactory } from '@nestjs/core';
 import { WorkerModule } from './worker.module.js';
 
 // A ref'd message port keeps the headless worker alive without timers or I/O.
+// The keep-alive is also what makes the flag-off path inert: `WorkerModule`
+// returns a null runtime unless HABI_P1_WORKER=1, so nothing from `worker/**`
+// is even imported.
 const keepAlive = new MessageChannel();
 keepAlive.port1.start();
 keepAlive.port1.ref();
