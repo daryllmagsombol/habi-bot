@@ -184,7 +184,12 @@ test('built identity pages are accessible, mobile-first forms without SSO', { ti
     assert.match(start, /href="\/login"/);
     assert.match(start, /href="\/signup"/);
     assert.match(start, /href="\/recovery"/);
-    assert.doesNotMatch(start, /<(?:input|textarea|button)\b/i);
+    assert.doesNotMatch(start, /<(?:input|textarea)\b/i);
+    const startButtons = start.match(/<button\b[^>]*>/gi) ?? [];
+    assert.ok(
+      startButtons.every((tag) => /aria-label="Switch to (light|dark) theme"/.test(tag)),
+      'only the theme toggle may be a button on the identity entry page',
+    );
 
     const login = await page('/login');
     assert.equal((login.match(/<h1\b/gi) ?? []).length, 1);
@@ -228,11 +233,19 @@ test('built identity pages are accessible, mobile-first forms without SSO', { ti
       'HABI_AUTH_API_URL',
       'DATABASE_URL',
       'password_hash',
-      'localStorage',
       'sessionStorage',
     ]) {
       assert.ok(!joined.includes(forbidden), `identity pages leaked or added: ${forbidden}`);
     }
+
+    // Browser storage on these pages may only hold the theme preference. No
+    // credential, session, or form value is ever written to localStorage.
+    const storageCalls = joined.match(/localStorage\.[a-zA-Z]+\([^)]*\)/g) ?? [];
+    assert.ok(storageCalls.length > 0, 'the pre-paint theme script should be present');
+    assert.ok(
+      storageCalls.every((call) => call === "localStorage.getItem('habi-theme')"),
+      `identity pages may only read the theme preference: ${storageCalls.join(', ')}`,
+    );
 
     const forwardedBeforeUnknown = upstreamRequests.length;
 

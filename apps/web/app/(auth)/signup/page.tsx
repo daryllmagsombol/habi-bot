@@ -3,11 +3,8 @@
 import Link from 'next/link';
 import { useState } from 'react';
 import type { SubmitEvent } from 'react';
+import { Button, FormMessage, Stack, TextField } from '../../../components/ui';
 import { authErrorMessage, postAuth } from '../auth-client';
-import { FormMessage } from '../form-message';
-
-const FIELD_CLASS =
-  'mt-1.5 min-h-11 w-full rounded-md border border-[var(--line)] bg-white px-3 py-2 text-base text-[var(--ink)] focus-visible:border-[var(--thread)]';
 
 export default function SignupPage() {
   const [email, setEmail] = useState('');
@@ -36,9 +33,9 @@ export default function SignupPage() {
   }
 
   return (
-    <div className="mx-auto w-full max-w-md">
-      <h1 className="text-3xl font-medium tracking-tight sm:text-4xl">Create an account</h1>
-      <p className="mt-3 text-sm leading-relaxed text-[var(--muted)]">
+    <div>
+      <h1 className="text-page tracking-heading text-ink">Create an account</h1>
+      <p className="mt-3 max-w-[48ch] text-sm leading-relaxed text-muted">
         Registration is invite-only. Your invitation must match this email
         address and has not been used before.
       </p>
@@ -48,83 +45,62 @@ export default function SignupPage() {
           All fields are required. Passwords must be at least 12 characters.
         </p>
 
-        <div>
-          <label htmlFor="signup-email" className="text-sm font-medium">
-            Email address
-          </label>
-          <input
+        <Stack gap={5}>
+          <TextField
             id="signup-email"
             name="email"
             type="email"
+            label="Email address"
             autoComplete="username"
             inputMode="email"
             required
-            className={FIELD_CLASS}
             value={email}
             onChange={(event) => setEmail(event.target.value)}
           />
-        </div>
 
-        <div className="mt-5">
-          <label htmlFor="signup-password" className="text-sm font-medium">
-            Password
-          </label>
-          <input
+          <TextField
             id="signup-password"
             name="password"
             type="password"
+            label="Password"
             autoComplete="new-password"
             minLength={12}
             required
-            aria-describedby="signup-password-hint"
-            className={FIELD_CLASS}
+            hint="At least 12 characters. Do not use your email address as the password."
             value={password}
             onChange={(event) => setPassword(event.target.value)}
           />
-          <p id="signup-password-hint" className="mt-1.5 text-xs leading-relaxed text-[var(--muted)]">
-            At least 12 characters. Do not use your email address as the password.
-          </p>
-        </div>
 
-        <div className="mt-5">
-          <label htmlFor="signup-invite" className="text-sm font-medium">
-            Invitation token
-          </label>
-          <input
+          <TextField
             id="signup-invite"
             name="inviteToken"
             type="text"
+            label="Invitation token"
             autoComplete="off"
             spellCheck={false}
             required
-            aria-describedby="signup-invite-hint"
-            className={`${FIELD_CLASS} font-mono text-sm`}
+            hint="Invitations are issued out of band. Ask the Habi maintainer if you need one."
+            inputClassName="font-mono text-sm"
             value={inviteToken}
             onChange={(event) => setInviteToken(event.target.value)}
           />
-          <p id="signup-invite-hint" className="mt-1.5 text-xs leading-relaxed text-[var(--muted)]">
-            Invitations are issued out of band. Ask the Habi maintainer if you
-            need one.
-          </p>
-        </div>
+        </Stack>
 
-        <button
-          type="submit"
-          disabled={pending}
-          aria-busy={pending}
-          className="mt-6 inline-flex min-h-11 w-full items-center justify-center rounded-md bg-[var(--ink)] px-5 py-2.5 text-sm font-medium text-[var(--paper)] hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
-        >
+        <Button type="submit" block loading={pending} className="mt-6">
           {pending ? 'Creating account…' : 'Create account'}
-        </button>
+        </Button>
       </form>
 
       <FormMessage error={error} status={status} />
 
-      <nav className="mt-8 flex flex-wrap gap-x-6 gap-y-3 border-t border-[var(--line)] pt-5 text-sm" aria-label="Other account actions">
-        <Link className="underline underline-offset-4" href="/login">
+      <nav
+        className="mt-8 flex flex-wrap gap-x-6 gap-y-1 border-t border-line pt-4 text-sm"
+        aria-label="Other account actions"
+      >
+        <Link className="inline-flex min-h-11 items-center underline underline-offset-4 hover:no-underline" href="/login">
           Log in instead
         </Link>
-        <Link className="underline underline-offset-4" href="/recovery">
+        <Link className="inline-flex min-h-11 items-center underline underline-offset-4 hover:no-underline" href="/recovery">
           Recover access
         </Link>
       </nav>

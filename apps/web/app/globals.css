@@ -1,59 +1,262 @@
 @import 'tailwindcss';
+@import './tokens.css';
 
-:root {
-  color-scheme: light;
-  --paper: #f4f6f5;
-  --ink: #192d38;
-  --muted: #52636a;
-  --line: #ccd5d7;
-  --thread: #315bc5;
-  --thread-muted: #d6dfe3;
-  --selection: #dbe5ff;
-  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  background: var(--paper);
-  color: var(--ink);
+/**
+ * Tailwind wiring. Every utility below points at a runtime theme token
+ * (`inline`), so light and dark resolve through the same class names.
+ *
+ * Naming is role-based: `canvas`, `surface`, `line`, `ink`, `muted`, `accent`,
+ * `signal`. `signal` is deliberately not called `accent` — orange marks
+ * evidence (citations, run state), blue carries action.
+ */
+@theme inline {
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-sunken: var(--sunken);
+
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-subtle: var(--subtle);
+  --color-ink-inverse: var(--ink-inverse);
+
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-ink: var(--accent-ink);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-line: var(--accent-line);
+  --color-on-accent: var(--on-accent);
+
+  --color-signal: var(--signal);
+  --color-signal-ink: var(--signal-ink);
+  --color-signal-soft: var(--signal-soft);
+  --color-signal-line: var(--signal-line);
+  --color-signal-mark: var(--signal-mark);
+
+  --color-danger: var(--danger);
+  --color-danger-ink: var(--danger-ink);
+  --color-danger-soft: var(--danger-soft);
+  --color-danger-line: var(--danger-line);
+  --color-danger-hover: var(--danger-hover);
+  --color-on-danger: var(--on-danger);
+
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-success-line: var(--success-line);
+
+  --color-selection: var(--selection);
+
+  --font-display: var(--habi-font-display);
+  --font-body: var(--habi-font-body);
+  --font-mono: var(--habi-font-mono);
+
+  --text-2xs: var(--habi-text-2xs);
+  --text-2xs--line-height: var(--habi-leading-normal);
+  --text-xs: var(--habi-text-xs);
+  --text-xs--line-height: var(--habi-leading-normal);
+  --text-sm: var(--habi-text-sm);
+  --text-sm--line-height: var(--habi-leading-relaxed);
+  --text-base: var(--habi-text-body);
+  --text-base--line-height: var(--habi-leading-relaxed);
+  --text-lead: var(--habi-text-lead);
+  --text-lead--line-height: var(--habi-leading-relaxed);
+  --text-title: var(--habi-text-title);
+  --text-title--line-height: var(--habi-leading-snug);
+  --text-page: var(--habi-text-page);
+  --text-page--line-height: var(--habi-leading-tight);
+  --text-display: var(--habi-text-display);
+  --text-display--line-height: var(--habi-leading-tight);
+
+  --tracking-label: var(--habi-tracking-label);
+  --tracking-display: var(--habi-tracking-display);
+  --tracking-heading: var(--habi-tracking-heading);
+
+  --radius-xs: var(--habi-radius-xs);
+  --radius-sm: var(--habi-radius-sm);
+  --radius-md: var(--habi-radius-md);
+  --radius-lg: var(--habi-radius-lg);
+  --radius-xl: var(--habi-radius-xl);
+
+  --shadow-1: var(--shadow-1);
+  --shadow-2: var(--shadow-2);
+  --shadow-3: var(--shadow-3);
+
+  --ease-standard: var(--habi-ease-standard);
+
+  --spacing-gutter: var(--habi-space-gutter);
+  --spacing-section: var(--habi-space-section);
+
+  --container-form: var(--habi-width-form);
+  --container-narrow: var(--habi-width-narrow);
+  --container-reading: var(--habi-width-reading);
+  --container-default: var(--habi-width-default);
+  --container-wide: var(--habi-width-wide);
+
+  --breakpoint-sm: 40rem;
+  --breakpoint-md: 48rem;
+  --breakpoint-lg: 64rem;
+  --breakpoint-xl: 80rem;
+  --breakpoint-2xl: 96rem;
 }
 
-body { margin: 0; }
-* { box-sizing: border-box; }
-::selection { background: var(--selection); color: var(--ink); }
-:focus-visible { outline: 2px solid var(--thread); outline-offset: 6px; }
+@layer base {
+  *,
+  ::before,
+  ::after {
+    box-sizing: border-box;
+  }
 
-.foundation { padding-inline: clamp(1.5rem, 6vw, 5rem); }
-.masthead { padding-block: 2rem; border-bottom: 1px solid var(--line); }
-.wordmark { font-size: 1.75rem; line-height: 1; font-weight: 650; letter-spacing: -0.04em; }
-.preview-label { color: var(--muted); font-size: 0.8125rem; font-weight: 500; }
+  html {
+    -webkit-text-size-adjust: 100%;
+    background: var(--canvas);
+    scrollbar-color: var(--line-strong) transparent;
+    scrollbar-width: thin;
+  }
 
-.skip-link {
-  position: fixed;
-  top: 1rem;
-  left: 1rem;
-  z-index: 10;
-  padding: 0.75rem 1rem;
-  background: var(--ink);
-  color: var(--paper);
-  transform: translateY(-200%);
-  text-decoration: underline;
-  text-underline-offset: 0.2em;
+  body {
+    margin: 0;
+    min-height: 100svh;
+    background: var(--canvas);
+    color: var(--ink);
+    font-family: var(--habi-font-body);
+    font-size: var(--habi-text-body);
+    line-height: var(--habi-leading-relaxed);
+    -webkit-font-smoothing: antialiased;
+    font-synthesis-weight: none;
+    text-rendering: optimizeLegibility;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    margin: 0;
+    font-family: var(--habi-font-display);
+    font-weight: var(--habi-weight-display);
+    line-height: var(--habi-leading-tight);
+    letter-spacing: var(--habi-tracking-heading);
+    text-wrap: balance;
+  }
+
+  p {
+    margin: 0;
+    text-wrap: pretty;
+  }
+
+  a {
+    color: inherit;
+    text-underline-offset: 0.22em;
+    text-decoration-thickness: 1px;
+  }
+
+  /* Browser surfaces are part of the design: selection, caret, placeholder,
+   * scrollbars, and the focus ring all carry the palette, in both themes. */
+  ::selection {
+    background: var(--selection);
+    color: var(--ink);
+  }
+
+  :focus-visible {
+    outline: var(--habi-focus-width) solid var(--focus);
+    outline-offset: var(--habi-focus-offset);
+  }
+
+  input,
+  textarea {
+    caret-color: var(--accent);
+  }
+
+  ::placeholder {
+    color: var(--subtle);
+    opacity: 1;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: var(--line-strong);
+    border: 3px solid transparent;
+    background-clip: padding-box;
+    border-radius: 8px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  summary {
+    cursor: pointer;
+  }
+
+  summary::marker {
+    content: '';
+  }
 }
-.skip-link:focus { transform: translateY(0); }
 
-.introduction { gap: 2rem; padding-block: 3.75rem 3rem; }
-h1 { max-width: 10ch; font-size: clamp(3.25rem, 7.5vw, 5.5rem); line-height: 1.02; font-weight: 500; letter-spacing: -0.04em; text-wrap: balance; }
-.introduction-note { margin-top: 1.75rem; color: var(--muted); font-size: 1rem; line-height: 1.65; }
-.weave { width: clamp(9rem, 42vw, 13rem); max-width: 100%; justify-self: end; }
+/* ---------------------------------------------------------------------------
+ * Treatment utilities.
+ *
+ * Character belongs to the direction, not to a component: the label voice, the
+ * wordmark, and tabular figures are set once here.
+ * ------------------------------------------------------------------------- */
+@layer components {
+  .u-label {
+    font-family: var(--habi-font-label);
+    font-size: var(--habi-text-2xs);
+    font-weight: var(--habi-weight-semibold);
+    letter-spacing: var(--habi-tracking-label);
+    text-transform: var(--habi-label-transform);
+    line-height: var(--habi-leading-normal);
+  }
 
-.scope { gap: 2rem; padding-block: 2rem 3rem; border-top: 1px solid var(--line); }
-.scope h2 { margin: 0 0 0.875rem; font-size: 1.0625rem; line-height: 1.4; font-weight: 600; letter-spacing: -0.015em; text-wrap: balance; }
-.scope p { max-width: 47ch; font-size: 0.9375rem; line-height: 1.75; color: var(--muted); }
-.scope .availability { margin-top: 1rem; color: var(--ink); font-weight: 500; }
-.footer { border-top: 1px solid var(--line); padding-block: 1.5rem; color: var(--muted); font-size: 0.75rem; line-height: 1.5; }
+  .u-brand {
+    font-family: var(--habi-font-display);
+    font-size: var(--habi-brand-size);
+    font-weight: var(--habi-weight-display);
+    letter-spacing: var(--habi-brand-tracking);
+    line-height: 1;
+  }
 
-@media (min-width: 48rem) {
-  .masthead { padding-block: 2.5rem; }
-  .introduction { grid-template-columns: 1.5fr 1fr; gap: 3rem; padding-block: clamp(4rem, 8vw, 7rem); }
-  .introduction-note { font-size: 1.0625rem; }
-  .weave { width: 100%; max-width: 17.5rem; }
-  .scope { grid-template-columns: 1.2fr 1fr; gap: clamp(3rem, 7vw, 6rem); padding-block: 2.5rem 4rem; }
-  .scope-boundary { border-left: 1px solid var(--line); padding-left: 2rem; }
+  /* Figures that sit in columns (times, tokens, counts) align only when the
+   * numerals are equal width. */
+  .u-figures {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: 'tnum' 1;
+  }
+}
+
+/* A loader that still reads as "waiting" with motion off. */
+@keyframes habi-spin {
+  to {
+    transform: rotate(1turn);
+  }
+}
+
+.spinner {
+  display: inline-block;
+  width: 0.85em;
+  height: 0.85em;
+  border: 2px solid currentcolor;
+  border-inline-end-color: transparent;
+  border-radius: 50%;
+  animation: habi-spin 720ms linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation: none;
+    border-inline-end-color: currentcolor;
+    opacity: 0.55;
+  }
+}
+
+@media (forced-colors: active) {
+  .spinner {
+    border-color: currentcolor;
+  }
 }
