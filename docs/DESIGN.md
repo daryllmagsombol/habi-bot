@@ -77,11 +77,29 @@ not.
 
 | Group | Contains | Reused by |
 | --- | --- | --- |
-| `components/ui` | `Button`, `ButtonLink`, `TextField`, `Card`, `Badge`, `Pill`, `Avatar`, `Segmented`, `Sheet`, `Toolbar`, `EmptyState`, `Skeleton`, `FormMessage`, `PageHeader`, `Container`, `Stack`, `SkipLink`, icons | every screen |
-| `components/bots` | `BotCard`, `NewBotCard`, `BotIdentity` | gallery, Bot page |
-| `components/threads` | `ThreadListCard`, `ThreadRow`, `ThreadCard`, `MessageBubble`, `RunStrip`, `Composer` | Bot page, threads route |
-| `components/panels` | `PanelCard`, `DocumentPanel`, `ContextPanel`, `MemoryCard` | Bot page, document/context routes |
+| `components/ui` | `Avatar`, `Badge`, `Pill`, `Button`, `ButtonLink`, `IconButton`, `IconButtonLink`, `Card`, `ListRow`, `MetaRow`, `SectionHeader`, `Segmented`, `Sheet`, `Toolbar`, `Container`, `Stack`, `Inline`, `TextField`, `FormMessage`, `EmptyState`, `Skeleton`, `SkeletonText`, `PageHeader`, `SkipLink`, `icons` | every screen |
+| `components/bots` | `BotCard`, `NewBotCard`, `BotGallery`, `BotIdentity`, `botTone` (helper) | gallery, Bot page |
+| `components/threads` | `ThreadListCard`, `ThreadRow`, `ThreadCard`, `ThreadConversation`, `MessageBubble`, `RunStrip`, `Composer` | Bot page, `/threads` |
+| `components/panels` | `PanelCard`, `PanelSwitch`, `DocumentPanel`, `ContextPanel`, `MemoryCard`, `MemoryGates` | Bot page, panel routes |
+| `components/chrome` (root files today) | `app-bar`, `wordmark`, `site-shell`, `weave-figure` | every route |
+| `components/theme` | `theme-toggle`, `theme` (store) | app bar, site shell |
 | `lib` | `preview-data`, `motion`, `links` | routes only |
+
+`ui` is the primitive layer and depends on tokens alone. `Segmented`, `Sheet`, `Toolbar`, `Skeleton`
+and `SkeletonText` are kept for states the data-backed screens will need; an unused primitive is not
+dead code, it is the contract for the next screen.
+
+A route-level **coordinator** is not a component group. `/bots/[botId]` owns `?thread=` and `?panel=`
+in `app/bots/[botId]/workspace.tsx` (with `workspace-data.ts` mapping sample records to component
+props), receives one `WorkspaceData` object, and passes slices to the groups.
+
+### Inventory notes
+
+- One component per file, named export, group barrel: `Button`/`ButtonLink`, `IconButton`/`IconButtonLink`,
+  `Stack`/`Inline` and `Skeleton`/`SkeletonText` are separate files on purpose.
+- `Badge` is a state label (status, run state); `Pill` is chrome (counts, allowance). Do not swap them.
+- `ListRow` is generic row mechanics; `ThreadRow` is the thread-specific row built on it.
+- `Avatar` carries the Bot identity tone (`iris`/`sage`/`apricot`/`plum`) and neutral/user tones.
 
 ## 4. Composition rules
 

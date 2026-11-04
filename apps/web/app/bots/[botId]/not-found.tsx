@@ -1,9 +1,9 @@
 import type { Metadata } from 'next';
 import { AppBar } from '../../../components/app-bar';
-import { ButtonLink } from '../../../components/ui/button';
-import { Container } from '../../../components/ui/container';
-import { PageHeader } from '../../../components/ui/page-header';
-import { SkipLink } from '../../../components/ui/skip-link';
+import { ButtonLink, PageHeader, SkipLink } from '../../../components/ui';
+import { previewAllowance, previewBots, totalThreadCount } from '../../../lib/preview-data';
+
+const COUNTS = { bots: previewBots.length, threads: totalThreadCount() };
 
 export const metadata: Metadata = {
   title: 'Not in this preview',
@@ -13,23 +13,25 @@ export default function BotNotFound() {
   return (
     <div className="flex min-h-svh flex-col">
       <SkipLink />
-      <AppBar section="bots" backHref="/bots" backLabel="all Bots" showAllowance={false} />
+      <AppBar section="bots" counts={COUNTS} allowance={previewAllowance} />
 
-      <main id="main-content" tabIndex={-1} className="flex-1 focus:outline-none">
-        <Container size="narrow" className="py-12 sm:py-16">
-          <PageHeader
-            title="That Bot or thread is not in this preview."
-            description="The preview ships three sample Bots with fixed conversations. The address may be a typo, or it may point at a Bot that only exists once the Bots API is connected."
-            actions={
-              <>
-                <ButtonLink href="/bots">Back to the gallery</ButtonLink>
-                <ButtonLink href="/start" variant="secondary">
-                  Identity screens
-                </ButtonLink>
-              </>
-            }
-          />
-        </Container>
+      <main
+        id="main-content"
+        tabIndex={-1}
+        className="mx-auto w-full max-w-wide flex-1 px-4 py-10 focus:outline-none sm:px-6 sm:py-14"
+      >
+        <PageHeader
+          title="That Bot or thread is not in this preview."
+          description="The preview ships four sample bots with fixed conversations. The address may be a typo, or it may point at a bot that only exists once the Bots API is connected."
+          actions={
+            <>
+              <ButtonLink href="/bots">Back to the gallery</ButtonLink>
+              <ButtonLink href="/start" variant="secondary">
+                Identity screens
+              </ButtonLink>
+            </>
+          }
+        />
       </main>
     </div>
   );

@@ -1,6 +1,6 @@
 /**
  * ============================================================================
- * HABI TOKENS — Swiss gallery, light and dark
+ * HABI TOKENS — warm paper, iris accent, light and dark
  * ============================================================================
  *
  * §1 STRUCTURE  rhythm, scale, motion, focus geometry, layout widths.
@@ -13,8 +13,8 @@
  * Light and dark share every semantic name (`--surface`, `--ink`, `--muted`,
  * `--line`, `--accent`, `--accent-soft`, `--on-accent`, `--shadow-*`), so a
  * component never asks which theme is active. Dark is designed, not inverted:
- * the field is graphite, accent and signal move to lighter tints so they carry
- * text, and depth comes from a hairline rather than from a raised shadow.
+ * the field is graphite-violet, cards sit one step lighter, hairline borders do
+ * the work shadows do on paper, and iris is lifted so it can carry text.
  *
  * The theme is resolved before first paint by a small inline script (globals
  * document `theme-color`), which sets `data-theme` on `<html>`; the media query
@@ -30,6 +30,8 @@
   --habi-space-1: 0.25rem;
   --habi-space-2: 0.5rem;
   --habi-space-3: 0.75rem;
+  /* Card padding is a named step: 17.6px, one notch over the 16px base. */
+  --habi-space-card: 1.1rem;
   --habi-space-4: 1rem;
   --habi-space-5: 1.25rem;
   --habi-space-6: 1.5rem;
@@ -40,51 +42,53 @@
   --habi-space-11: 5rem;
   --habi-space-12: 6rem;
 
-  --habi-space-gutter: clamp(1.25rem, 4.5vw, 3rem);
-  --habi-space-section: clamp(3.5rem, 7vw, 6rem);
+  /* The shell is a centred column: 16px at the narrowest, 24px from tablet up. */
+  --habi-space-gutter: clamp(1rem, 2.4vw, 1.5rem);
+  --habi-space-section: clamp(3rem, 6vw, 4.5rem);
 
   /* Type scale — structural sizes. Families live in §4. */
-  --habi-text-2xs: 0.75rem; /* 12px — uppercase micro-labels */
-  --habi-text-xs: 0.8125rem; /* 13px — hints, metadata */
-  --habi-text-sm: 0.9375rem; /* 15px — controls, secondary copy */
+  --habi-text-2xs: 0.75rem; /* 12px — micro-labels, metadata, eyebrow */
+  --habi-text-xs: 0.8125rem; /* 13px — hints, thread rows, secondary copy */
+  --habi-text-sm: 0.9375rem; /* 15px — controls, bubble copy */
   --habi-text-body: 1rem; /* 16px — never smaller for inputs */
   --habi-text-lead: clamp(1.0625rem, 0.5vw + 0.95rem, 1.1875rem);
   --habi-text-title: clamp(1.1875rem, 0.7vw + 1.03rem, 1.4375rem);
   --habi-text-page: clamp(2rem, 3.4vw + 1.15rem, 2.875rem);
   --habi-text-display: clamp(2.75rem, 7.4vw + 0.6rem, 5.25rem);
 
-  --habi-leading-tight: 1.05;
-  --habi-leading-snug: 1.28;
+  --habi-leading-tight: 1.1;
+  --habi-leading-snug: 1.25;
   --habi-leading-normal: 1.5;
-  --habi-leading-relaxed: 1.62;
+  --habi-leading-relaxed: 1.6;
 
-  --habi-tracking-label: 0.12em;
+  --habi-tracking-label: 0.14em;
 
   --habi-weight-regular: 400;
   --habi-weight-medium: 500;
   --habi-weight-semibold: 600;
 
-  /* Motion — state changes only. The library-side numbers live in
-   * `lib/motion.ts` and must match: fast 150ms, base 200ms, sheet 250ms. */
-  --habi-duration-fast: 150ms;
-  --habi-duration-base: 200ms;
-  --habi-duration-slow: 250ms;
-  --habi-duration-sheet: 250ms;
-  --habi-ease-standard: cubic-bezier(0.2, 0.6, 0.2, 1);
+  /* Motion — state changes only, transform and opacity. The library-side
+   * numbers live in `lib/motion.ts` and must match: fast 140ms, base 180ms,
+   * slow 200ms. Nothing here exceeds 200ms. */
+  --habi-duration-fast: 140ms;
+  --habi-duration-base: 180ms;
+  --habi-duration-slow: 200ms;
+  --habi-duration-sheet: 200ms;
+  --habi-ease-standard: cubic-bezier(0.2, 0.8, 0.2, 1);
 
   /* Focus geometry — the colour is a semantic role. */
   --habi-focus-width: 2px;
-  --habi-focus-offset: 2px;
+  --habi-focus-offset: 3px;
 
-  /* Layout */
+  /* Layout — one 1088px shell, a 272px aside, and a narrow docked panel. */
   --habi-bar-height: 3.5rem;
   --habi-width-form: 28rem;
   --habi-width-narrow: 38rem;
   --habi-width-reading: 44rem;
   --habi-width-default: 64rem;
-  --habi-width-wide: 76rem;
-  --habi-width-rail: 18.5rem;
-  --habi-width-panel: 25rem;
+  --habi-width-wide: 68rem;
+  --habi-width-rail: 17rem;
+  --habi-width-panel: 22rem;
 
   /* Touch */
   --habi-target: 2.75rem; /* 44px minimum for every control */
@@ -92,53 +96,64 @@
   /* ==========================================================================
    * §2 PALETTE — LIGHT
    *
-   * Warm paper keeps the cool blue from turning clinical. Orange stays a mark,
-   * never a second primary and never a small-text colour.
+   * Warm ivory paper, white cards, one iris accent, and three quiet tints used
+   * only as identity. The accent wash is for state, never for large fields.
    * ========================================================================== */
 
   color-scheme: light;
 
-  --p-canvas: #f5f4f1;
+  --p-canvas: #fbfaf6;
   --p-surface: #ffffff;
-  --p-sunken: #ecebe5;
-  --p-line: #dcdbd4;
-  --p-line-strong: #6e6e67;
+  --p-sunken: #f3eee4;
+  --p-bubble: #f8f4ec;
+  --p-line: #e7e0d4;
+  --p-line-soft: #f0eae0;
+  --p-line-strong: #d9d0c1;
 
-  --p-ink: #15181d;
-  --p-muted: #454b54;
-  --p-subtle: #5b6169;
-  --p-ink-inverse: #f5f4f1;
+  --p-ink: #241f2b;
+  --p-muted: #3c3546;
+  --p-subtle: #6b6473;
+  --p-ink-inverse: #fbfaf6;
+  --p-user-bubble: #241f2b;
+  --p-on-user-bubble: #fbfaf6;
 
-  --p-accent: #2563eb;
-  --p-accent-hover: #1d4ed8;
-  --p-accent-ink: #1e40af;
-  --p-accent-soft: #eff3ff;
-  --p-accent-line: #c3d3fb;
+  --p-accent: #4f46e5;
+  --p-accent-hover: #4338ca;
+  --p-accent-ink: #4338ca;
+  --p-accent-soft: #efedfe;
+  --p-accent-line: #ded9fd;
   --p-on-accent: #ffffff;
 
-  --p-signal: #ea580c;
-  --p-signal-ink: #9a3412;
-  --p-signal-soft: #fdf1e7;
-  --p-signal-line: #f7d3ba;
-  --p-signal-mark: #f8ddc5;
+  --p-signal: #b66534;
+  --p-signal-ink: #9a5326;
+  --p-signal-soft: #fbf0e8;
+  --p-signal-line: #f0d9c8;
+  --p-signal-mark: #f6e3d5;
 
   --p-danger: #b42318;
   --p-danger-hover: #8f1f1f;
-  --p-danger-ink: #a4231a;
+  --p-danger-ink: #9b1c13;
   --p-danger-soft: #fdeceb;
   --p-danger-line: #f3c3be;
   --p-on-danger: #ffffff;
 
-  --p-success: #14683c;
-  --p-success-soft: #eef6f1;
-  --p-success-line: #bfdccb;
+  --p-success: #4f8a6e;
+  --p-success-soft: #eef7f1;
+  --p-success-line: #cfe6d9;
 
-  --p-focus: #2563eb;
-  --p-selection: #eff3ff;
+  /* Bot identity hues. They are mixed into the current surface by the avatar,
+   * so the same value works on ivory and on graphite. */
+  --p-tint-iris: #6366f1;
+  --p-tint-sage: #4f8a6e;
+  --p-tint-apricot: #b66534;
+  --p-tint-plum: #3f566b;
 
-  --p-shadow-1: 0 1px 0 rgb(21 24 29 / 0.05);
-  --p-shadow-2: 0 20px 44px -28px rgb(21 24 29 / 0.3);
-  --p-shadow-3: 0 36px 72px -36px rgb(21 24 29 / 0.34);
+  --p-focus: #4f46e5;
+  --p-selection: #e6e1fb;
+
+  --p-shadow-1: 0 1px 2px rgb(36 31 43 / 0.05), 0 6px 18px -10px rgb(36 31 43 / 0.25);
+  --p-shadow-2: 0 2px 4px rgb(36 31 43 / 0.06), 0 18px 40px -22px rgb(36 31 43 / 0.35);
+  --p-shadow-3: 0 28px 64px -32px rgb(36 31 43 / 0.4);
 
   /* ==========================================================================
    * §3 SEMANTICS — identical names in both themes.
@@ -147,13 +162,17 @@
   --canvas: var(--p-canvas);
   --surface: var(--p-surface);
   --sunken: var(--p-sunken);
+  --bubble: var(--p-bubble);
   --line: var(--p-line);
+  --line-soft: var(--p-line-soft);
   --line-strong: var(--p-line-strong);
 
   --ink: var(--p-ink);
   --muted: var(--p-muted);
   --subtle: var(--p-subtle);
   --ink-inverse: var(--p-ink-inverse);
+  --user-bubble: var(--p-user-bubble);
+  --on-user-bubble: var(--p-on-user-bubble);
 
   --accent: var(--p-accent);
   --accent-hover: var(--p-accent-hover);
@@ -179,6 +198,11 @@
   --success-soft: var(--p-success-soft);
   --success-line: var(--p-success-line);
 
+  --tint-iris: var(--p-tint-iris);
+  --tint-sage: var(--p-tint-sage);
+  --tint-apricot: var(--p-tint-apricot);
+  --tint-plum: var(--p-tint-plum);
+
   --focus: var(--p-focus);
   --selection: var(--p-selection);
 
@@ -190,89 +214,102 @@
    * §4 BRAND — type and character do not change with the theme.
    * ========================================================================== */
 
-  --habi-font-display: var(--font-outfit), 'Avenir Next', 'Helvetica Neue', Arial, sans-serif;
-  --habi-font-body: var(--font-work-sans), ui-sans-serif, system-ui, -apple-system,
-    BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  /* The shell is set in the rounded system face: SF Pro Rounded on Apple
+   * platforms, the closest rounded grotesque elsewhere. Body copy stays in the
+   * system sans, so long reads keep plain letterforms. */
+  --habi-font-display:
+    ui-rounded, 'SF Pro Rounded', 'Hiragino Maru Gothic ProN', 'Segoe UI Variable Display', 'Segoe UI',
+    system-ui, -apple-system, sans-serif;
+  --habi-font-body:
+    ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue',
+    Arial, sans-serif;
   --habi-font-mono: ui-monospace, 'SF Mono', SFMono-Regular, 'Cascadia Mono', Menlo, Consolas,
     'Liberation Mono', monospace;
 
-  /* Outfit's geometric bowls carry size; 550 keeps weight off the details. */
-  --habi-weight-display: 550;
-  --habi-weight-control: 550;
+  --habi-weight-display: 600;
+  --habi-weight-control: 600;
   --habi-tracking-display: -0.035em;
   --habi-tracking-heading: -0.02em;
 
   --habi-font-label: var(--habi-font-body);
   --habi-label-transform: uppercase;
 
-  --habi-brand-size: 1.25rem;
-  --habi-brand-tracking: -0.035em;
+  --habi-brand-size: 1.125rem;
+  --habi-brand-tracking: -0.02em;
 
   --habi-border-width: 1px;
   --habi-border-width-emphasis: 2px;
 
-  --habi-radius-xs: 1px;
-  --habi-radius-sm: 2px;
-  --habi-radius-md: 3px;
-  --habi-radius-lg: 4px;
-  --habi-radius-xl: 6px;
+  /* Radii are part of the voice: pills for state, 12px for controls, 16px for
+   * cards, 20px for the gallery. */
+  --habi-radius-xs: 0.375rem; /* 6px */
+  --habi-radius-sm: 0.75rem; /* 12px */
+  --habi-radius-md: 0.875rem; /* 14px */
+  --habi-radius-lg: 1rem; /* 16px */
+  --habi-radius-xl: 1.25rem; /* 20px */
 }
 
 /**
  * DARK PALETTE.
  *
- * Graphite field, one step lighter surface, and lights raised for text: the
- * blue and orange carry small text here only as their lighter tints. Borders
- * do the work a shadow does in light, because a raised shadow on near-black
- * reads as a smudge rather than as depth.
- *
- * The literals are repeated in the media fallback below; keep the two blocks
- * (and the shadow values) in sync.
+ * Graphite-violet field, one step lighter surface, and iris lifted for text.
+ * Depth comes from a hairline instead of a shadow: a raised shadow on near-black
+ * reads as a smudge rather than as depth. The literals are repeated in the media
+ * fallback below; keep the two blocks in sync.
  */
 :root[data-theme='dark'] {
   color-scheme: dark;
 
-  --p-canvas: #0e1114;
-  --p-surface: #171a1f;
-  --p-sunken: #1e2229;
-  --p-line: #2b313a;
-  --p-line-strong: #6c7683;
+  --p-canvas: #141317;
+  --p-surface: #1c1a20;
+  --p-sunken: #282430;
+  --p-bubble: #232028;
+  --p-line: #332e3a;
+  --p-line-soft: #262229;
+  --p-line-strong: #4a4454;
 
-  --p-ink: #edeff3;
-  --p-muted: #aeb6c2;
-  --p-subtle: #929ba8;
-  --p-ink-inverse: #0e1114;
+  --p-ink: #f5f2ec;
+  --p-muted: #c6bfcd;
+  --p-subtle: #a9a1b2;
+  --p-ink-inverse: #141317;
+  --p-user-bubble: #37305a;
+  --p-on-user-bubble: #f2efff;
 
-  --p-accent: #7ea2ff;
-  --p-accent-hover: #9bb7ff;
-  --p-accent-ink: #b9ceff;
-  --p-accent-soft: #1b2740;
-  --p-accent-line: #35486f;
-  --p-on-accent: #0a1020;
+  --p-accent: #a9a3ff;
+  --p-accent-hover: #c0bbff;
+  --p-accent-ink: #c9c4ff;
+  --p-accent-soft: #272244;
+  --p-accent-line: #3d3663;
+  --p-on-accent: #17131f;
 
-  --p-signal: #ff8a4c;
-  --p-signal-ink: #ffc7a3;
-  --p-signal-soft: #2a1c12;
-  --p-signal-line: #4e3321;
-  --p-signal-mark: #3b2718;
+  --p-signal: #e0a67e;
+  --p-signal-ink: #f2c8a9;
+  --p-signal-soft: #2b211a;
+  --p-signal-line: #4b372a;
+  --p-signal-mark: #3a2a1f;
 
-  --p-danger: #ff7a70;
-  --p-danger-hover: #ffa098;
-  --p-danger-ink: #ffb3ac;
-  --p-danger-soft: #2c1615;
-  --p-danger-line: #5a2a28;
-  --p-on-danger: #2a0b0a;
+  --p-danger: #ff8b80;
+  --p-danger-hover: #ffa79e;
+  --p-danger-ink: #ffc0b9;
+  --p-danger-soft: #2e1817;
+  --p-danger-line: #582b28;
+  --p-on-danger: #1d0b09;
 
-  --p-success: #6bd3a2;
-  --p-success-soft: #10241b;
-  --p-success-line: #244c38;
+  --p-success: #7fc9a6;
+  --p-success-soft: #18261f;
+  --p-success-line: #2c4638;
 
-  --p-focus: #8fb2ff;
-  --p-selection: #24365c;
+  --p-tint-iris: #6366f1;
+  --p-tint-sage: #4f8a6e;
+  --p-tint-apricot: #b66534;
+  --p-tint-plum: #3f566b;
 
-  --p-shadow-1: 0 1px 0 rgb(0 0 0 / 0.5);
-  --p-shadow-2: 0 24px 48px -28px rgb(0 0 0 / 0.85);
-  --p-shadow-3: 0 40px 80px -40px rgb(0 0 0 / 0.9);
+  --p-focus: #c0bbff;
+  --p-selection: #312a5c;
+
+  --p-shadow-1: none;
+  --p-shadow-2: none;
+  --p-shadow-3: none;
 }
 
 /* No-script fallback: follow the system unless an explicit theme is set. */
@@ -280,46 +317,56 @@
   :root:not([data-theme]) {
     color-scheme: dark;
 
-    --p-canvas: #0e1114;
-    --p-surface: #171a1f;
-    --p-sunken: #1e2229;
-    --p-line: #2b313a;
-    --p-line-strong: #6c7683;
+    --p-canvas: #141317;
+    --p-surface: #1c1a20;
+    --p-sunken: #282430;
+    --p-bubble: #232028;
+    --p-line: #332e3a;
+    --p-line-soft: #262229;
+    --p-line-strong: #4a4454;
 
-    --p-ink: #edeff3;
-    --p-muted: #aeb6c2;
-    --p-subtle: #929ba8;
-    --p-ink-inverse: #0e1114;
+    --p-ink: #f5f2ec;
+    --p-muted: #c6bfcd;
+    --p-subtle: #a9a1b2;
+    --p-ink-inverse: #141317;
+    --p-user-bubble: #37305a;
+    --p-on-user-bubble: #f2efff;
 
-    --p-accent: #7ea2ff;
-    --p-accent-hover: #9bb7ff;
-    --p-accent-ink: #b9ceff;
-    --p-accent-soft: #1b2740;
-    --p-accent-line: #35486f;
-    --p-on-accent: #0a1020;
+    --p-accent: #a9a3ff;
+    --p-accent-hover: #c0bbff;
+    --p-accent-ink: #c9c4ff;
+    --p-accent-soft: #272244;
+    --p-accent-line: #3d3663;
+    --p-on-accent: #17131f;
 
-    --p-signal: #ff8a4c;
-    --p-signal-ink: #ffc7a3;
-    --p-signal-soft: #2a1c12;
-    --p-signal-line: #4e3321;
-    --p-signal-mark: #3b2718;
+    --p-signal: #e0a67e;
+    --p-signal-ink: #f2c8a9;
+    --p-signal-soft: #2b211a;
+    --p-signal-line: #4b372a;
+    --p-signal-mark: #3a2a1f;
 
-    --p-danger: #ff7a70;
-    --p-danger-ink: #ffb3ac;
-    --p-danger-soft: #2c1615;
-    --p-danger-line: #5a2a28;
-    --p-on-danger: #2a0b0a;
+    --p-danger: #ff8b80;
+    --p-danger-hover: #ffa79e;
+    --p-danger-ink: #ffc0b9;
+    --p-danger-soft: #2e1817;
+    --p-danger-line: #582b28;
+    --p-on-danger: #1d0b09;
 
-    --p-success: #6bd3a2;
-    --p-success-soft: #10241b;
-    --p-success-line: #244c38;
+    --p-success: #7fc9a6;
+    --p-success-soft: #18261f;
+    --p-success-line: #2c4638;
 
-    --p-focus: #8fb2ff;
-    --p-selection: #24365c;
+    --p-tint-iris: #6366f1;
+    --p-tint-sage: #4f8a6e;
+    --p-tint-apricot: #b66534;
+    --p-tint-plum: #3f566b;
 
-    --p-shadow-1: 0 1px 0 rgb(0 0 0 / 0.5);
-    --p-shadow-2: 0 24px 48px -28px rgb(0 0 0 / 0.85);
-    --p-shadow-3: 0 40px 80px -40px rgb(0 0 0 / 0.9);
+    --p-focus: #c0bbff;
+    --p-selection: #312a5c;
+
+    --p-shadow-1: none;
+    --p-shadow-2: none;
+    --p-shadow-3: none;
   }
 }
 

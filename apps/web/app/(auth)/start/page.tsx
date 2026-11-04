@@ -1,5 +1,5 @@
 import Link from 'next/link';
-import { ButtonLink } from '../../../components/ui/button';
+import { ButtonLink } from '../../../components/ui';
 
 /**
  * Identity landing. The root `/` is the repository landing; this page is the

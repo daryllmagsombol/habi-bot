@@ -1,7 +1,5 @@
 import type { Metadata } from 'next';
-import { ButtonLink } from '../components/ui/button';
-import { Container } from '../components/ui/container';
-import { PageHeader } from '../components/ui/page-header';
+import { ButtonLink, Container, PageHeader } from '../components/ui';
 import { SiteShell } from '../components/site-shell';
 
 export const metadata: Metadata = {
@@ -14,7 +12,7 @@ export default function NotFound() {
       <Container size="narrow" className="py-12 sm:py-16">
         <PageHeader
           title="There is nothing at this address."
-          description="The preview has a landing page, a Bot gallery, three sample Bots, and the identity screens. This address is none of them."
+          description="The preview has a landing page, a Bot gallery, four sample bots, and the identity screens. This address is none of them."
           actions={
             <>
               <ButtonLink href="/bots">Open the Bot gallery</ButtonLink>

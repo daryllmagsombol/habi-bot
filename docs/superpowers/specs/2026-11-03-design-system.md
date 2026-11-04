@@ -1,3 +1,10 @@
+> **Superseded in part (2026-11-04).** The owner rejected the full-bleed three-column shell described
+> below as drifting into concept 4. The shipped layout is concept 3: a card-based, centered page with a
+> threads card beside a thread card, and Document/Context opened from the top bar. That rebuild also
+> dropped the self-hosted Outfit/Work Sans faces for the rounded system stack. The current component
+> contract, tokens and verification live in [the design system](../../DESIGN.md); the reasoning here
+> about palette, type scale, states and evidence panels still applies.
+
 # Habi Design System — Bot gallery, split evidence, Swiss surfaces
 
 - **Status:** Direction chosen and implemented in `apps/web`. Every screen described here renders, but

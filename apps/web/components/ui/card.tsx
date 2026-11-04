@@ -1,12 +1,19 @@
 import type { ReactNode } from 'react';
 
-export type CardTone = 'surface' | 'outline' | 'sunken';
-export type CardPadding = 'none' | 'sm' | 'md' | 'lg';
+export type CardVariant = 'surface' | 'dashed';
+export type CardRadius = 'md' | 'lg' | 'xl';
+export type CardPadding = 'none' | 'sm' | 'md' | 'lg' | 'card';
+export type CardElevation = 'none' | 'card' | 'lift';
 
-const TONES: Record<CardTone, string> = {
-  surface: 'border-line bg-surface',
-  outline: 'border-line bg-transparent',
-  sunken: 'border-line bg-sunken',
+const VARIANT: Record<CardVariant, string> = {
+  surface: 'border border-line bg-surface',
+  dashed: 'border border-dashed border-line-strong bg-transparent',
+};
+
+const RADIUS: Record<CardRadius, string> = {
+  md: 'rounded-md',
+  lg: 'rounded-lg',
+  xl: 'rounded-xl',
 };
 
 const PADDING: Record<CardPadding, string> = {
@@ -14,124 +21,79 @@ const PADDING: Record<CardPadding, string> = {
   sm: 'p-4',
   md: 'p-5 sm:p-6',
   lg: 'p-6 sm:p-8',
+  card: 'p-card sm:p-5',
 };
 
+const ELEVATION: Record<CardElevation, string> = {
+  none: '',
+  card: 'shadow-card',
+  lift: 'shadow-lift',
+};
+
+export interface CardStyleOptions {
+  readonly variant?: CardVariant | undefined;
+  readonly radius?: CardRadius | undefined;
+  readonly padding?: CardPadding | undefined;
+  readonly elevation?: CardElevation | undefined;
+  readonly className?: string | undefined;
+}
+
+/**
+ * The card surface, as a string, for elements that cannot be a `<div>` — a link,
+ * an aside, a fixed panel. The same hairline, radius and elevation tokens as
+ * `<Card>`, so a card is never restyled by hand.
+ */
+export function cardStyles({
+  variant = 'surface',
+  radius = 'lg',
+  padding = 'none',
+  elevation = 'card',
+  className,
+}: Readonly<CardStyleOptions> = {}): string {
+  return [VARIANT[variant], RADIUS[radius], PADDING[padding], ELEVATION[elevation], className]
+    .filter(Boolean)
+    .join(' ');
+}
+
 export interface CardProps {
-  readonly tone?: CardTone;
-  readonly padding?: CardPadding;
-  readonly className?: string;
+  readonly as?: 'div' | 'section' | 'article' | 'aside';
+  readonly variant?: CardVariant | undefined;
+  readonly radius?: CardRadius | undefined;
+  readonly padding?: CardPadding | undefined;
+  readonly elevation?: CardElevation | undefined;
+  readonly id?: string | undefined;
+  readonly 'aria-labelledby'?: string | undefined;
+  readonly 'aria-label'?: string | undefined;
+  readonly className?: string | undefined;
   readonly children?: ReactNode;
 }
 
 /**
- * A flat ruled surface. One hairline, near-square corners, no elevation — depth
- * is reserved for a surface that floats over another (the mobile sheet).
+ * A surface on the page: white paper, one hairline, a soft elevation on the
+ * ivory field. In dark the elevation token resolves to `none`, so the hairline
+ * does the work instead of a shadow.
  */
-export function Card({ tone = 'surface', padding = 'md', className, children }: Readonly<CardProps>) {
-  return (
-    <div
-      className={['rounded-sm border', TONES[tone], PADDING[padding], className]
-        .filter(Boolean)
-        .join(' ')}
-    >
-      {children}
-    </div>
-  );
-}
-
-function titleIdFrom(title: string, explicit?: string): string {
-  if (explicit !== undefined && explicit.length > 0) {
-    return explicit;
-  }
-
-  const slug = title
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-
-  return `${slug === '' ? 'panel' : slug}-title`;
-}
-
-export interface PanelProps {
-  readonly title: string;
-  readonly description?: ReactNode;
-  /** Right-aligned controls in the heading row. */
-  readonly actions?: ReactNode;
-  readonly footer?: ReactNode;
-  /** `label` is the uppercase micro-heading used inside evidence panels. */
-  readonly headingStyle?: 'title' | 'label';
-  /** Heading level. Pages keep a single `h1`; panels start at 2. */
-  readonly headingLevel?: 2 | 3 | 4;
-  /** Wrap the panel in its own ruled surface. */
-  readonly surface?: boolean;
-  readonly id?: string;
-  readonly className?: string;
-  readonly children?: ReactNode;
-}
-
-/**
- * A labelled section with a hairline under its heading.
- *
- * `aria-labelledby` points at the visible title, so the region is navigable by
- * heading and identifiable in a landmark list. The id derives from the title
- * when none is supplied, keeping markup deterministic on the server.
- */
-export function Panel({
-  title,
-  description,
-  actions,
-  footer,
-  headingStyle = 'title',
-  headingLevel = 2,
-  surface = false,
+export function Card({
+  as = 'div',
+  variant,
+  radius,
+  padding,
+  elevation,
   id,
   className,
   children,
-}: Readonly<PanelProps>) {
-  const headingId = titleIdFrom(title, id);
-  const Heading = headingLevel === 2 ? 'h2' : headingLevel === 3 ? 'h3' : 'h4';
-
-  const body = (
-    <>
-      <div className="flex items-baseline justify-between gap-3 pb-2.5 border-b border-line">
-        <Heading
-          id={headingId}
-          className={
-            headingStyle === 'label'
-              ? 'u-label text-subtle'
-              : 'text-title tracking-heading'
-          }
-        >
-          {title}
-        </Heading>
-        {actions === undefined ? null : <div className="flex shrink-0 items-center gap-2">{actions}</div>}
-      </div>
-
-      {description === undefined ? null : (
-        <div className="mt-3 text-sm leading-relaxed text-muted">{description}</div>
-      )}
-
-      {children === undefined ? null : <div className="mt-3">{children}</div>}
-
-      {footer === undefined ? null : (
-        <div className="mt-4 border-t border-line pt-3 text-xs leading-relaxed text-muted">
-          {footer}
-        </div>
-      )}
-    </>
-  );
-
-  if (surface) {
-    return (
-      <section aria-labelledby={headingId} className={className}>
-        <Card padding="sm">{body}</Card>
-      </section>
-    );
-  }
+  ...aria
+}: Readonly<CardProps>) {
+  const Tag = as;
 
   return (
-    <section aria-labelledby={headingId} className={className}>
-      {body}
-    </section>
+    <Tag
+      id={id}
+      aria-labelledby={aria['aria-labelledby']}
+      aria-label={aria['aria-label']}
+      className={cardStyles({ variant, radius, padding, elevation, className })}
+    >
+      {children}
+    </Tag>
   );
 }

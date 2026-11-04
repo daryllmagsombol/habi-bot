@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import type { ReactNode } from 'react';
-import { Container } from '../../components/ui/container';
+import { Container } from '../../components/ui';
 import { SiteNavLink, SiteShell } from '../../components/site-shell';
 
 export const metadata: Metadata = {

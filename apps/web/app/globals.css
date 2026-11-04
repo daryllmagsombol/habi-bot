@@ -6,21 +6,25 @@
  * (`inline`), so light and dark resolve through the same class names.
  *
  * Naming is role-based: `canvas`, `surface`, `line`, `ink`, `muted`, `accent`,
- * `signal`. `signal` is deliberately not called `accent` — orange marks
- * evidence (citations, run state), blue carries action.
+ * `signal`, `bubble`. `signal` is deliberately not called `accent` — apricot
+ * marks evidence (citations, run state); iris carries action.
  */
 @theme inline {
   --color-canvas: var(--canvas);
   --color-surface: var(--surface);
   --color-sunken: var(--sunken);
+  --color-bubble: var(--bubble);
 
   --color-line: var(--line);
+  --color-line-soft: var(--line-soft);
   --color-line-strong: var(--line-strong);
 
   --color-ink: var(--ink);
   --color-muted: var(--muted);
   --color-subtle: var(--subtle);
   --color-ink-inverse: var(--ink-inverse);
+  --color-user-bubble: var(--user-bubble);
+  --color-on-user-bubble: var(--on-user-bubble);
 
   --color-accent: var(--accent);
   --color-accent-hover: var(--accent-hover);
@@ -79,14 +83,16 @@
   --radius-lg: var(--habi-radius-lg);
   --radius-xl: var(--habi-radius-xl);
 
-  --shadow-1: var(--shadow-1);
-  --shadow-2: var(--shadow-2);
-  --shadow-3: var(--shadow-3);
+  --shadow-card: var(--shadow-1);
+  --shadow-lift: var(--shadow-2);
+  --shadow-modal: var(--shadow-3);
 
   --ease-standard: var(--habi-ease-standard);
 
   --spacing-gutter: var(--habi-space-gutter);
   --spacing-section: var(--habi-space-section);
+  --spacing-card: var(--habi-space-card);
+  --spacing-panel: var(--habi-width-panel);
 
   --container-form: var(--habi-width-form);
   --container-narrow: var(--habi-width-narrow);
@@ -122,7 +128,7 @@
     color: var(--ink);
     font-family: var(--habi-font-body);
     font-size: var(--habi-text-body);
-    line-height: var(--habi-leading-relaxed);
+    line-height: var(--habi-leading-normal);
     -webkit-font-smoothing: antialiased;
     font-synthesis-weight: none;
     text-rendering: optimizeLegibility;
@@ -180,9 +186,9 @@
 
   ::-webkit-scrollbar-thumb {
     background: var(--line-strong);
-    border: 3px solid transparent;
+    border: 3px solid var(--canvas);
     background-clip: padding-box;
-    border-radius: 8px;
+    border-radius: 99px;
   }
 
   ::-webkit-scrollbar-track {
@@ -217,7 +223,7 @@
   .u-brand {
     font-family: var(--habi-font-display);
     font-size: var(--habi-brand-size);
-    font-weight: var(--habi-weight-display);
+    font-weight: 700;
     letter-spacing: var(--habi-brand-tracking);
     line-height: 1;
   }
@@ -228,6 +234,17 @@
     font-variant-numeric: tabular-nums;
     font-feature-settings: 'tnum' 1;
   }
+
+  /* The streaming caret is a static state mark, not a loop: a short iris bar
+   * at the end of the last paragraph says the answer is still arriving. */
+  .habi-caret {
+    display: inline-block;
+    width: 2px;
+    height: 1em;
+    margin-left: 2px;
+    vertical-align: -0.12em;
+    background: var(--accent);
+  }
 }
 
 /* A loader that still reads as "waiting" with motion off. */
@@ -236,6 +253,7 @@
     transform: rotate(1turn);
   }
 }
+
 
 .spinner {
   display: inline-block;
@@ -253,6 +271,7 @@
     border-inline-end-color: currentcolor;
     opacity: 0.55;
   }
+
 }
 
 @media (forced-colors: active) {
