@@ -51,6 +51,24 @@ Rules:
 - Layout is a centered column with a card grid. Panes do not run edge to edge; a panel opens as a card
   or a sheet and must not permanently shrink the reading column.
 
+### 2.1 Preview versus live data
+
+Screens take their data through props, so where it comes from is decided once, in the route:
+
+| Condition | What renders |
+| --- | --- |
+| `HABI_API_URL` unset | `lib/preview-data.ts`, labelled `Preview` and "local sample data" |
+| `HABI_API_URL` set, 200 | Real records through the same-origin BFF, marked `Live` |
+| 401 | "Sign in" state with a link to `/login` — never an empty gallery |
+| 5xx or unreachable | Explicit unavailable state — never the sample data |
+| Invalid URL | Configuration error |
+| SSE drop | Reconnect from the last `id:`, bounded retries, then an explicit retry |
+
+Rules: the browser never learns the backend origin (all requests go to `/api/*` on the web origin,
+which forwards only the session cookie, the CSRF token and the event cursor). A failed request never
+degrades into sample data, and absent figures — allowance, memory, attachments, citations, run
+history — stay absent rather than being invented for the live path.
+
 ## 3. The component contract
 
 Every component in `apps/web/components` satisfies all of these. Review rejects a component that does
@@ -129,11 +147,12 @@ props), receives one `WorkspaceData` object, and passes slices to the groups.
 ## 7. Verification
 
 ```bash
-pnpm --filter @habi/web build        # routes compile and prerender
-pnpm --filter @habi/web typecheck    # strict
-pnpm --filter @habi/web lint         # eslint + next core-web-vitals
-pnpm --filter @habi/web test         # server-rendered smoke assertions, fast and browser-free
-pnpm --filter @habi/web test:browser # Chromium: 3 viewports x 2 themes x 9 routes + stateful tests
+pnpm --filter @habi/web build          # routes compile and prerender
+pnpm --filter @habi/web typecheck      # strict
+pnpm --filter @habi/web lint           # eslint + next core-web-vitals
+pnpm --filter @habi/web test           # server-rendered smoke assertions, fast and browser-free
+pnpm --filter @habi/web test:browser   # Chromium: 3 viewports x 2 themes x 11 routes + stateful tests
+node --test apps/web/test/api-proxy.test.mjs  # BFF forwarding, SSE, 401/5xx mapping, no origin leak
 ```
 
 `test:browser` skips with the install command when Chromium is absent. A UI change is not done until
