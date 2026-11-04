@@ -21,7 +21,7 @@ async function availablePort() {
   return port;
 }
 
-test('built homepage renders the honest foundation without product controls', { timeout: 40_000 }, async () => {
+test('built homepage states the foundation and the preview boundary without product controls', { timeout: 40_000 }, async () => {
   const port = await availablePort();
   const child = spawn(process.execPath, [require.resolve('next/dist/bin/next'), 'start', '--hostname', '127.0.0.1', '--port', String(port)], {
     cwd,
@@ -58,14 +58,27 @@ test('built homepage renders the honest foundation without product controls', { 
     for (const sentence of [
       'Habi',
       'Weave ideas into action.',
-      'Foundation preview',
+      'Interface preview',
+      'A foundation, not a finished product.',
       'This repository proves the workspace, web shell, API health endpoint, worker boot path, and local PostgreSQL tooling.',
-      'It does not include sign-in, chat, Bots, model calls, or Hermes.',
-      'No product functionality is available yet.',
+      'It does not include chat, Bots, model calls, or Hermes.',
+      'The gallery, threads, runs, and token counts are local sample data. Nothing is saved, and no model is called.',
     ]) {
       assert.ok(text.includes(sentence), `Missing visible copy: ${sentence}`);
     }
-    assert.doesNotMatch(rendered, /<(?:form|input|textarea|button)\b/i);
+    assert.match(rendered, /href="\/bots"/);
+    assert.match(rendered, /href="\/start"/);
+    assert.doesNotMatch(rendered, /<(?:form|input|textarea)\b/i);
+
+    // The theme toggle is chrome, not a product control: it is the only button
+    // this page may render, and it names its action.
+    const buttons = rendered.match(/<button\b[^>]*>/gi) ?? [];
+    assert.ok(buttons.length > 0, 'the theme toggle should be reachable from the landing page');
+    assert.ok(
+      buttons.every((tag) => /aria-label="Switch to (light|dark) theme"/.test(tag)),
+      `unexpected button on the landing page: ${buttons.join(' ')}`,
+    );
+    assert.match(html, /localStorage\.getItem\('habi-theme'\)/);
     assert.doesNotMatch(rendered, /\btype\s*=\s*["']?password\b/i);
     assert.equal((rendered.match(/<h1\b/gi) ?? []).length, 1);
     assert.match(rendered, /<html\b[^>]*lang="en"/i);

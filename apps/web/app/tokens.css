@@ -1,0 +1,338 @@
+/**
+ * ============================================================================
+ * HABI TOKENS — Swiss gallery, light and dark
+ * ============================================================================
+ *
+ * §1 STRUCTURE  rhythm, scale, motion, focus geometry, layout widths.
+ * §2 PALETTE    the primitive values for each theme. The only block that
+ *               differs between light and dark.
+ * §3 SEMANTICS  the names components use. Written once; both themes resolve
+ *               them to their own palette.
+ * §4 BRAND      type families, weights, tracking, radius, elevation.
+ *
+ * Light and dark share every semantic name (`--surface`, `--ink`, `--muted`,
+ * `--line`, `--accent`, `--accent-soft`, `--on-accent`, `--shadow-*`), so a
+ * component never asks which theme is active. Dark is designed, not inverted:
+ * the field is graphite, accent and signal move to lighter tints so they carry
+ * text, and depth comes from a hairline rather than from a raised shadow.
+ *
+ * The theme is resolved before first paint by a small inline script (globals
+ * document `theme-color`), which sets `data-theme` on `<html>`; the media query
+ * block is the no-script fallback, not the primary mechanism.
+ */
+
+:root {
+  /* ==========================================================================
+   * §1 STRUCTURE
+   * ========================================================================== */
+
+  /* Space — 4px base. Page rhythm uses the two fluid steps below. */
+  --habi-space-1: 0.25rem;
+  --habi-space-2: 0.5rem;
+  --habi-space-3: 0.75rem;
+  --habi-space-4: 1rem;
+  --habi-space-5: 1.25rem;
+  --habi-space-6: 1.5rem;
+  --habi-space-7: 2rem;
+  --habi-space-8: 2.5rem;
+  --habi-space-9: 3rem;
+  --habi-space-10: 4rem;
+  --habi-space-11: 5rem;
+  --habi-space-12: 6rem;
+
+  --habi-space-gutter: clamp(1.25rem, 4.5vw, 3rem);
+  --habi-space-section: clamp(3.5rem, 7vw, 6rem);
+
+  /* Type scale — structural sizes. Families live in §4. */
+  --habi-text-2xs: 0.75rem; /* 12px — uppercase micro-labels */
+  --habi-text-xs: 0.8125rem; /* 13px — hints, metadata */
+  --habi-text-sm: 0.9375rem; /* 15px — controls, secondary copy */
+  --habi-text-body: 1rem; /* 16px — never smaller for inputs */
+  --habi-text-lead: clamp(1.0625rem, 0.5vw + 0.95rem, 1.1875rem);
+  --habi-text-title: clamp(1.1875rem, 0.7vw + 1.03rem, 1.4375rem);
+  --habi-text-page: clamp(2rem, 3.4vw + 1.15rem, 2.875rem);
+  --habi-text-display: clamp(2.75rem, 7.4vw + 0.6rem, 5.25rem);
+
+  --habi-leading-tight: 1.05;
+  --habi-leading-snug: 1.28;
+  --habi-leading-normal: 1.5;
+  --habi-leading-relaxed: 1.62;
+
+  --habi-tracking-label: 0.12em;
+
+  --habi-weight-regular: 400;
+  --habi-weight-medium: 500;
+  --habi-weight-semibold: 600;
+
+  /* Motion — state changes only. The library-side numbers live in
+   * `lib/motion.ts` and must match: fast 150ms, base 200ms, sheet 250ms. */
+  --habi-duration-fast: 150ms;
+  --habi-duration-base: 200ms;
+  --habi-duration-slow: 250ms;
+  --habi-duration-sheet: 250ms;
+  --habi-ease-standard: cubic-bezier(0.2, 0.6, 0.2, 1);
+
+  /* Focus geometry — the colour is a semantic role. */
+  --habi-focus-width: 2px;
+  --habi-focus-offset: 2px;
+
+  /* Layout */
+  --habi-bar-height: 3.5rem;
+  --habi-width-form: 28rem;
+  --habi-width-narrow: 38rem;
+  --habi-width-reading: 44rem;
+  --habi-width-default: 64rem;
+  --habi-width-wide: 76rem;
+  --habi-width-rail: 18.5rem;
+  --habi-width-panel: 25rem;
+
+  /* Touch */
+  --habi-target: 2.75rem; /* 44px minimum for every control */
+
+  /* ==========================================================================
+   * §2 PALETTE — LIGHT
+   *
+   * Warm paper keeps the cool blue from turning clinical. Orange stays a mark,
+   * never a second primary and never a small-text colour.
+   * ========================================================================== */
+
+  color-scheme: light;
+
+  --p-canvas: #f5f4f1;
+  --p-surface: #ffffff;
+  --p-sunken: #ecebe5;
+  --p-line: #dcdbd4;
+  --p-line-strong: #6e6e67;
+
+  --p-ink: #15181d;
+  --p-muted: #454b54;
+  --p-subtle: #5b6169;
+  --p-ink-inverse: #f5f4f1;
+
+  --p-accent: #2563eb;
+  --p-accent-hover: #1d4ed8;
+  --p-accent-ink: #1e40af;
+  --p-accent-soft: #eff3ff;
+  --p-accent-line: #c3d3fb;
+  --p-on-accent: #ffffff;
+
+  --p-signal: #ea580c;
+  --p-signal-ink: #9a3412;
+  --p-signal-soft: #fdf1e7;
+  --p-signal-line: #f7d3ba;
+  --p-signal-mark: #f8ddc5;
+
+  --p-danger: #b42318;
+  --p-danger-hover: #8f1f1f;
+  --p-danger-ink: #a4231a;
+  --p-danger-soft: #fdeceb;
+  --p-danger-line: #f3c3be;
+  --p-on-danger: #ffffff;
+
+  --p-success: #14683c;
+  --p-success-soft: #eef6f1;
+  --p-success-line: #bfdccb;
+
+  --p-focus: #2563eb;
+  --p-selection: #eff3ff;
+
+  --p-shadow-1: 0 1px 0 rgb(21 24 29 / 0.05);
+  --p-shadow-2: 0 20px 44px -28px rgb(21 24 29 / 0.3);
+  --p-shadow-3: 0 36px 72px -36px rgb(21 24 29 / 0.34);
+
+  /* ==========================================================================
+   * §3 SEMANTICS — identical names in both themes.
+   * ========================================================================== */
+
+  --canvas: var(--p-canvas);
+  --surface: var(--p-surface);
+  --sunken: var(--p-sunken);
+  --line: var(--p-line);
+  --line-strong: var(--p-line-strong);
+
+  --ink: var(--p-ink);
+  --muted: var(--p-muted);
+  --subtle: var(--p-subtle);
+  --ink-inverse: var(--p-ink-inverse);
+
+  --accent: var(--p-accent);
+  --accent-hover: var(--p-accent-hover);
+  --accent-ink: var(--p-accent-ink);
+  --accent-soft: var(--p-accent-soft);
+  --accent-line: var(--p-accent-line);
+  --on-accent: var(--p-on-accent);
+
+  --signal: var(--p-signal);
+  --signal-ink: var(--p-signal-ink);
+  --signal-soft: var(--p-signal-soft);
+  --signal-line: var(--p-signal-line);
+  --signal-mark: var(--p-signal-mark);
+
+  --danger: var(--p-danger);
+  --danger-hover: var(--p-danger-hover);
+  --danger-ink: var(--p-danger-ink);
+  --danger-soft: var(--p-danger-soft);
+  --danger-line: var(--p-danger-line);
+  --on-danger: var(--p-on-danger);
+
+  --success: var(--p-success);
+  --success-soft: var(--p-success-soft);
+  --success-line: var(--p-success-line);
+
+  --focus: var(--p-focus);
+  --selection: var(--p-selection);
+
+  --shadow-1: var(--p-shadow-1);
+  --shadow-2: var(--p-shadow-2);
+  --shadow-3: var(--p-shadow-3);
+
+  /* ==========================================================================
+   * §4 BRAND — type and character do not change with the theme.
+   * ========================================================================== */
+
+  --habi-font-display: var(--font-outfit), 'Avenir Next', 'Helvetica Neue', Arial, sans-serif;
+  --habi-font-body: var(--font-work-sans), ui-sans-serif, system-ui, -apple-system,
+    BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --habi-font-mono: ui-monospace, 'SF Mono', SFMono-Regular, 'Cascadia Mono', Menlo, Consolas,
+    'Liberation Mono', monospace;
+
+  /* Outfit's geometric bowls carry size; 550 keeps weight off the details. */
+  --habi-weight-display: 550;
+  --habi-weight-control: 550;
+  --habi-tracking-display: -0.035em;
+  --habi-tracking-heading: -0.02em;
+
+  --habi-font-label: var(--habi-font-body);
+  --habi-label-transform: uppercase;
+
+  --habi-brand-size: 1.25rem;
+  --habi-brand-tracking: -0.035em;
+
+  --habi-border-width: 1px;
+  --habi-border-width-emphasis: 2px;
+
+  --habi-radius-xs: 1px;
+  --habi-radius-sm: 2px;
+  --habi-radius-md: 3px;
+  --habi-radius-lg: 4px;
+  --habi-radius-xl: 6px;
+}
+
+/**
+ * DARK PALETTE.
+ *
+ * Graphite field, one step lighter surface, and lights raised for text: the
+ * blue and orange carry small text here only as their lighter tints. Borders
+ * do the work a shadow does in light, because a raised shadow on near-black
+ * reads as a smudge rather than as depth.
+ *
+ * The literals are repeated in the media fallback below; keep the two blocks
+ * (and the shadow values) in sync.
+ */
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --p-canvas: #0e1114;
+  --p-surface: #171a1f;
+  --p-sunken: #1e2229;
+  --p-line: #2b313a;
+  --p-line-strong: #6c7683;
+
+  --p-ink: #edeff3;
+  --p-muted: #aeb6c2;
+  --p-subtle: #929ba8;
+  --p-ink-inverse: #0e1114;
+
+  --p-accent: #7ea2ff;
+  --p-accent-hover: #9bb7ff;
+  --p-accent-ink: #b9ceff;
+  --p-accent-soft: #1b2740;
+  --p-accent-line: #35486f;
+  --p-on-accent: #0a1020;
+
+  --p-signal: #ff8a4c;
+  --p-signal-ink: #ffc7a3;
+  --p-signal-soft: #2a1c12;
+  --p-signal-line: #4e3321;
+  --p-signal-mark: #3b2718;
+
+  --p-danger: #ff7a70;
+  --p-danger-hover: #ffa098;
+  --p-danger-ink: #ffb3ac;
+  --p-danger-soft: #2c1615;
+  --p-danger-line: #5a2a28;
+  --p-on-danger: #2a0b0a;
+
+  --p-success: #6bd3a2;
+  --p-success-soft: #10241b;
+  --p-success-line: #244c38;
+
+  --p-focus: #8fb2ff;
+  --p-selection: #24365c;
+
+  --p-shadow-1: 0 1px 0 rgb(0 0 0 / 0.5);
+  --p-shadow-2: 0 24px 48px -28px rgb(0 0 0 / 0.85);
+  --p-shadow-3: 0 40px 80px -40px rgb(0 0 0 / 0.9);
+}
+
+/* No-script fallback: follow the system unless an explicit theme is set. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    color-scheme: dark;
+
+    --p-canvas: #0e1114;
+    --p-surface: #171a1f;
+    --p-sunken: #1e2229;
+    --p-line: #2b313a;
+    --p-line-strong: #6c7683;
+
+    --p-ink: #edeff3;
+    --p-muted: #aeb6c2;
+    --p-subtle: #929ba8;
+    --p-ink-inverse: #0e1114;
+
+    --p-accent: #7ea2ff;
+    --p-accent-hover: #9bb7ff;
+    --p-accent-ink: #b9ceff;
+    --p-accent-soft: #1b2740;
+    --p-accent-line: #35486f;
+    --p-on-accent: #0a1020;
+
+    --p-signal: #ff8a4c;
+    --p-signal-ink: #ffc7a3;
+    --p-signal-soft: #2a1c12;
+    --p-signal-line: #4e3321;
+    --p-signal-mark: #3b2718;
+
+    --p-danger: #ff7a70;
+    --p-danger-ink: #ffb3ac;
+    --p-danger-soft: #2c1615;
+    --p-danger-line: #5a2a28;
+    --p-on-danger: #2a0b0a;
+
+    --p-success: #6bd3a2;
+    --p-success-soft: #10241b;
+    --p-success-line: #244c38;
+
+    --p-focus: #8fb2ff;
+    --p-selection: #24365c;
+
+    --p-shadow-1: 0 1px 0 rgb(0 0 0 / 0.5);
+    --p-shadow-2: 0 24px 48px -28px rgb(0 0 0 / 0.85);
+    --p-shadow-3: 0 40px 80px -40px rgb(0 0 0 / 0.9);
+  }
+}
+
+/**
+ * Reduced motion collapses the token layer instead of every component
+ * branching. JS-driven motion reads the same preference through
+ * `MotionConfig reducedMotion="user"`.
+ */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --habi-duration-fast: 1ms;
+    --habi-duration-base: 1ms;
+    --habi-duration-slow: 1ms;
+    --habi-duration-sheet: 1ms;
+  }
+}
