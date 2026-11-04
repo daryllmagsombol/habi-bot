@@ -95,11 +95,11 @@ export default function HomePage() {
             <p className="mt-4 flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-line pt-3 text-xs text-subtle">
               <span className="inline-flex items-center gap-1.5">
                 <span aria-hidden="true" className="h-[3px] w-4 bg-accent" />
-                Action
+                <span>Action</span>
               </span>
               <span className="inline-flex items-center gap-1.5">
                 <span aria-hidden="true" className="h-[3px] w-4 bg-signal" />
-                Evidence
+                <span>Evidence</span>
               </span>
               <span className="u-figures text-subtle">Habi · 2026</span>
             </p>
