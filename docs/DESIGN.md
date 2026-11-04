@@ -1,0 +1,134 @@
+# Habi design system
+
+How the web UI looks, how it is built, and how to add to it. This file is the working reference for
+anyone changing `apps/web`; the reasoning behind the direction is in
+[the design-system spec](superpowers/specs/2026-11-03-design-system.md) and does not need to be
+re-derived here.
+
+- **Direction:** Bot gallery home, thread list and conversation as cards, Document and Context opened
+  from the top bar. Card-based and centered, not a full-bleed pane shell.
+- **Scope:** `apps/web` only. The preview runs on local sample data; nothing in it calls an API or
+  claims a shipped capability.
+
+## 1. Non-negotiables
+
+1. **Reusable components only.** A route renders components. It does not contain card, bubble,
+   list-row, pill, or avatar markup of its own. See §3 for the contract.
+2. **Mobile-first.** Build the 320px case first, then widen. No desktop layout patched with negative
+   margins or overflow hacks.
+3. **Honest.** Sample data is labelled as sample data. If something is not wired, the copy says so.
+   Never render a success state the backend cannot produce.
+4. **Untrusted text stays untrusted.** Bot instructions, skill bodies, artifact content and citations
+   are data. They are rendered as text or sanitized Markdown, never as HTML, and never as UI chrome
+   that could grant an action.
+5. **Tokens, not literals.** Colour, spacing, radius, type and motion come from `app/tokens.css`. A
+   component that needs a new value adds a token; it does not hard-code a hex value.
+
+## 2. Tokens and layout
+
+`apps/web/app/tokens.css` is the single source. Light and dark resolve the same semantic names, so a
+component never branches on theme:
+
+| Group | Names |
+| --- | --- |
+| Surfaces | `--p-canvas`, `--p-surface`, `--p-sunken`, `--p-line`, `--p-line-strong` |
+| Text | `--p-ink`, `--p-ink-2`, `--p-muted`, `--p-subtle`, `--p-ink-inverse` |
+| Accent | `--p-accent`, `--p-accent-hover`, `--p-accent-soft`, `--p-on-accent` |
+| Signal | `--p-signal`, `--p-signal-soft` |
+| Tints | `--p-sage`, `--p-apricot`, `--p-plum` (Bot identities) |
+| Shape | radius, hairline, `--shadow-sm`, `--shadow-lift` |
+| Motion | `--habi-duration-fast/base`, `--habi-ease-standard/entrance` |
+
+Rules:
+
+- Pick the semantic token, not a primitive one. If a component needs a new role, add the role to both
+  themes in the same edit.
+- **Dark mode is designed, not inverted**: the field is graphite, cards sit one step lighter, depth
+  comes from a hairline rather than a raised shadow, and accents lift so they carry text.
+- The theme is applied before first paint by the inline script in `app/layout.tsx`
+  (`data-theme` on `<html>`), defaults to `prefers-color-scheme`, and is persisted by the toggle. No
+  component reads the theme.
+- Layout is a centered column with a card grid. Panes do not run edge to edge; a panel opens as a card
+  or a sheet and must not permanently shrink the reading column.
+
+## 3. The component contract
+
+Every component in `apps/web/components` satisfies all of these. Review rejects a component that does
+not.
+
+1. **Data in, callbacks out.** Everything comes through typed props. No component imports sample data,
+   fetches, or reads the URL. The route is the only place that knows where data came from.
+2. **No page-specific markup.** If two screens need the same shape, it is a component. If one screen
+   needs a variation, it is a prop or a variant, not a copy.
+3. **Variants are typed unions.** `variant: 'solid' | 'secondary' | 'ghost'`, `tone: 'accent' | 'sage' | …`.
+   Never a pile of booleans that can produce an impossible state.
+4. **States are props.** Loading, empty, error, disabled, streaming and selected are passed in and
+   rendered by the component. A component never invents a spinner or an error string.
+5. **One component per file, named export, barrel export.** `components/<group>/index.ts` re-exports
+   the group; the route imports from the group.
+6. **Independently renderable.** A component must render in isolation with fixture props — no page
+   context, no provider required beyond the app shell.
+7. **Accessible by construction.** Semantic element, label, visible focus, 44px target, and a live
+   region where content arrives asynchronously.
+8. **No business rules.** Approval logic, allowance math and authorization live on the server. The UI
+   may display their outcome; it never decides them.
+
+### Groups
+
+| Group | Contains | Reused by |
+| --- | --- | --- |
+| `components/ui` | `Button`, `ButtonLink`, `TextField`, `Card`, `Badge`, `Pill`, `Avatar`, `Segmented`, `Sheet`, `Toolbar`, `EmptyState`, `Skeleton`, `FormMessage`, `PageHeader`, `Container`, `Stack`, `SkipLink`, icons | every screen |
+| `components/bots` | `BotCard`, `NewBotCard`, `BotIdentity` | gallery, Bot page |
+| `components/threads` | `ThreadListCard`, `ThreadRow`, `ThreadCard`, `MessageBubble`, `RunStrip`, `Composer` | Bot page, threads route |
+| `components/panels` | `PanelCard`, `DocumentPanel`, `ContextPanel`, `MemoryCard` | Bot page, document/context routes |
+| `lib` | `preview-data`, `motion`, `links` | routes only |
+
+## 4. Composition rules
+
+- A **route** composes groups and owns data selection; it contains no visual primitives.
+- A **group component** may use `ui` primitives and may not reach into another group.
+- A **primitive** depends on tokens only. It never imports from `bots`, `threads` or `panels`.
+- Shared behaviour that is not visual (URL building, formatting, motion constants) lives in `lib`.
+
+## 5. Motion
+
+`motion@14.9.0`, imported from `motion/react`.
+
+- Purpose only: panel open/close, thread change, the gallery entrance, an optimistic send.
+- 130–200 ms. Animate `transform` and `opacity`; never animate width, height or layout properties.
+- Springs only where they communicate physics. No looping decoration, no orchestrated page loads.
+- Wrap live regions in `MotionConfig reducedMotion="user"`, and let the token layer collapse durations
+  under `prefers-reduced-motion`. Content is visible by default; animation never gates copy.
+
+## 6. Accessibility floor
+
+- One `h1` per route, no skipped heading levels.
+- Every control reachable by keyboard with a visible focus ring; skip link first in tab order.
+- Body and muted text ≥4.5:1 against their actual background in both themes; large text ≥3:1.
+- Targets ≥44px tall, except inline prose links and labels that are not themselves the target.
+- New messages, errors and streaming state are announced through an existing live region.
+
+## 7. Verification
+
+```bash
+pnpm --filter @habi/web build        # routes compile and prerender
+pnpm --filter @habi/web typecheck    # strict
+pnpm --filter @habi/web lint         # eslint + next core-web-vitals
+pnpm --filter @habi/web test         # server-rendered smoke assertions, fast and browser-free
+pnpm --filter @habi/web test:browser # Chromium: 3 viewports x 2 themes x 9 routes + stateful tests
+```
+
+`test:browser` skips with the install command when Chromium is absent. A UI change is not done until
+both test commands pass and the affected route has been checked at 320, 768 and 1440 in light and dark.
+
+## 8. Adding something
+
+Before writing markup in a route, answer in order:
+
+1. Does a component already do this? Use it.
+2. Does it do almost this? Add a variant or a prop.
+3. Is this the second screen needing it? Extract it into the right group first, then use it.
+4. Only then write a new component — with typed props, states as props, a barrel export, and a smoke
+   assertion for the state that is easy to break.
+
+Then update this file's §3 table if the component is new, and note the route that uses it.
