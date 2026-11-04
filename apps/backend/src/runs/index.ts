@@ -6,10 +6,27 @@
  * HarnessAdapter. HTTP routing, Nest providers, queue workers, and deadline
  * scheduling are not part of this slice.
  */
-export { RunIdempotencyConflictError } from './errors.js';
-export { RunRepository, toRunView } from './run-repository.js';
-export type { RunRow } from './run-repository.js';
+export { RunIdempotencyConflictError, RunContextError } from './errors.js';
+export {
+  deterministicEventId,
+  applyTerminalSideEffects,
+  terminalEventType,
+} from './finalization.js';
+export type { RunSideEffectDeps, RunSideEffectLogger } from './finalization.js';
+export {
+  MAX_CONTEXT_MESSAGES,
+  RunRepository,
+  toRunView,
+  triggerMessageId,
+} from './run-repository.js';
+export type {
+  RecoveryScanFilter,
+  RunContextMessageRow,
+  RunReservationRef,
+  RunRow,
+} from './run-repository.js';
 export { RunService } from './run-service.js';
+export type { RunServiceOptions } from './run-service.js';
 export { normalizeUsage, unknownUsage } from './usage.js';
 export type { PersistedRunUsage } from './usage.js';
 export {
@@ -28,9 +45,12 @@ export type {
   CreateRunOutcome,
   PersistedRunStatus,
   RunCancelReason,
+  RunDispatchOutcome,
   RunFailureOutcome,
   RunMessageInput,
+  RunRecoveryFilter,
   RunRecoveryKind,
+  RunRecoveryLeaseFilter,
   RunRecoveryResult,
   RunRecoverySummary,
   RunStatus,

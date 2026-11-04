@@ -25,6 +25,7 @@ import {
   Controller,
   Get,
   HttpCode,
+  HttpException,
   HttpStatus,
   Inject,
   Param,
@@ -36,6 +37,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import type { Response } from 'express';
+import { UsageLimitError, usageLimitErrorBody } from '../limits/index.js';
 import { SSE_MAX_CONNECTION_MS, readSseHeartbeatMs } from './api-config.js';
 import { ApiErrorFilter } from './api-errors.js';
 import type {
@@ -188,14 +190,25 @@ export class ApiController {
   @Post('threads/:threadId/messages')
   @HttpCode(HttpStatus.CREATED)
   @UseGuards(SessionCsrfGuard)
-  postMessage(
+  async postMessage(
     @Param('threadId') threadId: string,
     @Body() body: unknown,
     @Req() request: SessionRequest,
   ): Promise<PostMessageResult> {
     const { userId } = requireSession(request);
 
-    return this.runtime.getService().postMessage(userId, threadId, body);
+    try {
+      return await this.runtime.getService().postMessage(userId, threadId, body);
+    } catch (error) {
+      // Allowance refusal keeps the H-023 vocabulary and status (`429` for
+      // exhaustion, `409` for an unreconciled bucket). It is a recoverable
+      // admission outcome, not an internal failure.
+      if (error instanceof UsageLimitError) {
+        throw new HttpException(usageLimitErrorBody(error), error.status);
+      }
+
+      throw error;
+    }
   }
 
   @Post('runs/:runId/cancel')

@@ -15,13 +15,11 @@
 import type { Pool } from 'pg';
 import { RunRepository } from '../runs/run-repository.js';
 import type { RunRow } from '../runs/run-repository.js';
+import type { RunRecoverySummary } from '../runs/types.js';
 import type { WorkerLoopConfig } from './config.js';
 import type { WorkerLogger } from './logger.js';
 import type { WorkerRunRepository } from './run-claim-repository.js';
-import type {
-  RunDispatcher,
-  WorkerRecoverySummary,
-} from './run-dispatcher.js';
+import type { RunDispatcher } from './run-dispatcher.js';
 
 const FORCED_STOP_GRACE_MS = 2_000;
 
@@ -98,7 +96,7 @@ export class WorkerRunner {
   }
 
   /** Runs the same bounded reconciliation the loop performs when idle. */
-  recoverAfterRestart(): Promise<WorkerRecoverySummary> {
+  recoverAfterRestart(): Promise<RunRecoverySummary> {
     return this.options.dispatcher.recoverAfterRestart(
       this.options.config.recoveryLimit,
     );
