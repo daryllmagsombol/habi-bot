@@ -44,9 +44,17 @@ import {
   requireActorUserId,
   requireResourceId,
 } from '../persistence/rows.js';
-import { RunIdempotencyConflictError } from './errors.js';
-import { RunRepository, toRunView, type RunRow } from './run-repository.js';
+import { RunIdempotencyConflictError, RunContextError } from './errors.js';
 import {
+  RunRepository,
+  toRunView,
+  type RecoveryScanFilter,
+  type RunRow,
+} from './run-repository.js';
+import {
+  DEFAULT_DEADLINE_MS,
+  DEFAULT_MAX_INPUT_TOKENS,
+  DEFAULT_MAX_OUTPUT_TOKENS,
   normalizeAllowedTools,
   normalizeCancelReason,
   normalizeDeadlineAt,
@@ -62,11 +70,20 @@ import type {
   CreateRunInput,
   CreateRunOutcome,
   RunCancelReason,
+  RunDispatchOutcome,
   RunFailureOutcome,
+  RunRecoveryFilter,
   RunRecoveryResult,
   RunRecoverySummary,
   RunView,
 } from './types.js';
+import {
+  applyTerminalSideEffects,
+  type RunSideEffectDeps,
+  type RunSideEffectLogger,
+} from './finalization.js';
+import type { RunEventStore } from '../events/index.js';
+import type { UsageLimitService } from '../limits/index.js';
 
 interface BotStateRow {
   status: string;
@@ -119,14 +136,98 @@ function toSequence(value: string): number {
   return sequence;
 }
 
+function normalizeRecoveryFilter(
+  filter: string | RunRecoveryFilter | undefined,
+): RecoveryScanFilter {
+  if (filter === undefined) {
+    return {
+      ownerUserId: null,
+      runIds: null,
+      staleAfterMs: null,
+      excludeRunIds: [],
+      limit: null,
+    };
+  }
+
+  if (typeof filter === 'string') {
+    return {
+      ownerUserId: requireActorUserId(filter),
+      runIds: null,
+      staleAfterMs: null,
+      excludeRunIds: [],
+      limit: null,
+    };
+  }
+
+  const runIds =
+    filter.runIds === undefined
+      ? null
+      : filter.runIds.map((runId) => requireResourceId(runId));
+
+  let staleAfterMs: number | null = null;
+  let excludeRunIds: readonly string[] = [];
+  let limit: number | null = null;
+
+  if (filter.lease !== undefined) {
+    staleAfterMs = filter.lease.staleAfterMs;
+
+    if (!Number.isSafeInteger(staleAfterMs) || staleAfterMs < 0) {
+      throw new PersistenceValidationError('invalid_input');
+    }
+
+    excludeRunIds = (filter.lease.excludeRunIds ?? []).map((runId) =>
+      requireResourceId(runId),
+    );
+
+    if (filter.lease.limit !== undefined) {
+      limit = filter.lease.limit;
+
+      if (!Number.isSafeInteger(limit) || limit < 1) {
+        throw new PersistenceValidationError('invalid_input');
+      }
+    }
+  }
+
+  return {
+    ownerUserId:
+      filter.ownerUserId === undefined
+        ? null
+        : requireActorUserId(filter.ownerUserId),
+    runIds,
+    staleAfterMs,
+    excludeRunIds,
+    limit,
+  };
+}
+
+export interface RunServiceOptions {
+  /**
+   * Optional terminal side-effect writers. The API composition uses only the
+   * reservation/dispatch seam, while the worker passes the event store and
+   * allowance service so a dispatch or recovery failure still settles the hold
+   * and emits exactly one terminal event.
+   */
+  readonly events?: RunEventStore;
+  readonly limits?: UsageLimitService;
+  readonly logger?: RunSideEffectLogger;
+}
+
 export class RunService {
   private readonly repository: RunRepository;
+  private readonly finalization: RunSideEffectDeps;
 
   constructor(
     private readonly pool: Pool,
     private readonly adapter: HarnessAdapter,
+    options: RunServiceOptions = {},
   ) {
     this.repository = new RunRepository(pool);
+    this.finalization = {
+      repository: this.repository,
+      ...(options.events === undefined ? {} : { events: options.events }),
+      ...(options.limits === undefined ? {} : { limits: options.limits }),
+      ...(options.logger === undefined ? {} : { logger: options.logger }),
+    };
   }
 
   /**
@@ -217,7 +318,69 @@ export class RunService {
       allowedTools,
     };
 
-    return this.dispatchOnce(reserved, request);
+    const outcome = await this.dispatchOnce(reserved, request);
+
+    return { run: outcome.run, deduplicated: false };
+  }
+
+  /**
+   * Dispatches an already-reserved Run. This is the public seam the worker uses
+   * after claiming: it atomically moves `not_dispatched` to `unknown` before the
+   * provider call, so at most one caller can dispatch, and a crash after the
+   * call is recoverable as ambiguous rather than retried.
+   *
+   * A terminal Run, or one another dispatcher already claimed, returns its
+   * stored projection with `dispatched: false` and never reaches the adapter.
+   * Unknown, malformed, or foreign ids are the same non-enumerating
+   * `not_found`; a persisted Run whose context cannot be rebuilt is a permanent
+   * `invalid_request` terminal failure with no provider call.
+   */
+  async dispatchReserved(
+    ownerUserId: string,
+    runId: string,
+  ): Promise<RunDispatchOutcome> {
+    const owner = requireActorUserId(ownerUserId);
+    const id = requireResourceId(runId);
+    const current = await this.repository.loadOwnedRun(owner, id);
+
+    if (isTerminalRunStatus(current.status)) {
+      return { run: toRunView(current), dispatched: false };
+    }
+
+    if (current.dispatch_state !== 'not_dispatched') {
+      return { run: toRunView(current), dispatched: false };
+    }
+
+    const claimed = await this.repository.claimRun(id, owner);
+
+    if (claimed === null) {
+      const stored = await this.repository.loadOwnedRun(owner, id);
+      return { run: toRunView(stored), dispatched: false };
+    }
+
+    let request: CreateRunRequest;
+
+    try {
+      request = await this.buildPersistedRequest(claimed);
+    } catch (error) {
+      if (error instanceof RunContextError) {
+        this.finalization.logger?.log({
+          event: 'run.context_rejected',
+          runId: claimed.id,
+          reason: error.message,
+        });
+
+        const row = await this.failInvalidRequest(claimed);
+        return { run: toRunView(row), dispatched: false };
+      }
+
+      // No provider call happened, so give the claim back instead of leaving
+      // the Run leased until reconciliation.
+      await this.repository.releaseClaim(claimed.id, claimed.owner_user_id);
+      throw error;
+    }
+
+    return this.dispatchOnce(claimed, request);
   }
 
   /** Owner-scoped read. Foreign, missing, and malformed ids share one error. */
@@ -301,6 +464,8 @@ export class RunService {
       throw unexpectedError;
     }
 
+    await this.applyEffects(finalRow);
+
     return toRunView(finalRow);
   }
 
@@ -309,9 +474,24 @@ export class RunService {
    * `execution_uncertain` with no dispatch retry; `confirmed_terminal` adopts
    * the harness outcome and usage; `still_running` only advances the replay
    * cursor. An already-terminal row is never rewritten.
+   *
+   * Scope:
+   *   - no filter keeps the historical full sweep over every non-terminal row,
+   *     including fresh `queued` / `not_dispatched` reservations. It is the
+   *     safe whole-service restart reconciliation and must not run alongside a
+   *     live claim loop.
+   *   - a bare owner string keeps the original owner-scoped full sweep.
+   *   - `{ lease }` selects only rows whose claim/heartbeat expired and that may
+   *     already have been claimed or dispatched, so a fresh reservation stays
+   *     claimable. This is what the worker uses.
+   *   - `{ runIds }` reconciles exactly those Runs after ownership/format
+   *     validation by the repository predicate.
    */
-  async recoverAfterRestart(ownerUserId?: string): Promise<RunRecoverySummary> {
-    const rows = await this.repository.listNonTerminal(ownerUserId ?? null);
+  async recoverAfterRestart(
+    filter?: string | RunRecoveryFilter,
+  ): Promise<RunRecoverySummary> {
+    const scan = normalizeRecoveryFilter(filter);
+    const rows = await this.repository.listForRecovery(scan);
 
     if (rows.length === 0) {
       return { outcomes: [] };
@@ -403,6 +583,8 @@ export class RunService {
         updated ??
         (await this.repository.loadOwnedRun(row.owner_user_id, row.id));
 
+      await this.applyEffects(finalRow);
+
       outcomes.push({
         runId: row.id,
         outcome: 'confirmed_terminal',
@@ -425,7 +607,7 @@ export class RunService {
   private async dispatchOnce(
     reserved: RunRow,
     request: CreateRunRequest,
-  ): Promise<CreateRunOutcome> {
+  ): Promise<RunDispatchOutcome> {
     let result;
 
     try {
@@ -433,12 +615,12 @@ export class RunService {
     } catch (error) {
       if (error instanceof HarnessAdapterError) {
         const row = await this.finishDispatchFailure(reserved, error);
-        return { run: toRunView(row), deduplicated: false };
+        return { run: toRunView(row), dispatched: false };
       }
 
       // An unexpected controller/adapter bug is still an ambiguous external
       // effect: persist the safe outcome before surfacing the error.
-      await this.repository.terminalize({
+      const updated = await this.repository.terminalize({
         runId: reserved.id,
         ownerUserId: reserved.owner_user_id,
         status: 'execution_uncertain',
@@ -448,6 +630,13 @@ export class RunService {
         lastEventSeq: 0,
         startExecution: true,
       });
+      const row =
+        updated ??
+        (await this.repository.loadOwnedRun(
+          reserved.owner_user_id,
+          reserved.id,
+        ));
+      await this.applyEffects(row);
       throw error;
     }
 
@@ -469,7 +658,8 @@ export class RunService {
           reserved.owner_user_id,
           reserved.id,
         ));
-      return { run: toRunView(row), deduplicated: false };
+      await this.applyEffects(row);
+      return { run: toRunView(row), dispatched: false };
     }
 
     const updated = await this.repository.recordDispatch(
@@ -484,7 +674,15 @@ export class RunService {
       updated ??
       (await this.repository.loadOwnedRun(reserved.owner_user_id, reserved.id));
 
-    return { run: toRunView(row), deduplicated: false };
+    if (updated === null) {
+      // Another writer terminalized the Run between claim and acceptance.
+      await this.applyEffects(row);
+    }
+
+    return {
+      run: toRunView(row),
+      dispatched: updated !== null,
+    };
   }
 
   /**
@@ -512,12 +710,18 @@ export class RunService {
       usage,
       lastEventSeq: 0,
       startExecution: error.dispatchState !== 'not_dispatched',
+      // A proven pre-dispatch failure corrects the conservative `unknown` claim
+      // back to `not_dispatched`; an accepted dispatch is never downgraded.
+      replaceDispatchState: error.dispatchState === 'not_dispatched',
     });
 
-    return (
+    const finalRow =
       updated ??
-      (await this.repository.loadOwnedRun(reserved.owner_user_id, reserved.id))
-    );
+      (await this.repository.loadOwnedRun(reserved.owner_user_id, reserved.id));
+
+    await this.applyEffects(finalRow);
+
+    return finalRow;
   }
 
   /**
@@ -552,12 +756,89 @@ export class RunService {
       updated ??
       (await this.repository.loadOwnedRun(row.owner_user_id, row.id));
 
+    await this.applyEffects(finalRow);
+
     return {
       runId: row.id,
       outcome: 'lost',
       status: finalRow.status,
       lastEventSeq: toSequence(finalRow.last_event_seq),
     };
+  }
+
+  private async buildPersistedRequest(run: RunRow): Promise<CreateRunRequest> {
+    const botId = await this.repository.loadConversationBot(
+      run.owner_user_id,
+      run.conversation_id,
+    );
+
+    if (botId === null) {
+      throw new RunContextError(
+        'the Run conversation is missing or not owned',
+      );
+    }
+
+    const rows = await this.repository.loadContextMessages(
+      run.owner_user_id,
+      run.conversation_id,
+      run.id,
+      run.idempotency_key,
+    );
+
+    if (rows.length === 0) {
+      throw new RunContextError('the Run has no persisted context message');
+    }
+
+    const messages = rows.map(
+      (row): ChatMessage => ({
+        role: row.role,
+        content: row.content,
+        messageId: row.id as Id<'Message'>,
+      }),
+    );
+
+    return {
+      runId: asRunId(run.id),
+      idempotencyKey: run.idempotency_key,
+      correlationId: run.id,
+      ownerUserId: run.owner_user_id as Id<'User'>,
+      conversationId: run.conversation_id as Id<'Conversation'>,
+      botId: botId as Id<'Bot'>,
+      messages,
+      deadlineAt: new Date(Date.now() + DEFAULT_DEADLINE_MS).toISOString(),
+      tokenBudget: {
+        maxInputTokens: DEFAULT_MAX_INPUT_TOKENS,
+        maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
+      },
+      allowedTools: [],
+    };
+  }
+
+  /** Permanent persisted-context failure: terminal without a provider call. */
+  private async failInvalidRequest(claimed: RunRow): Promise<RunRow> {
+    const updated = await this.repository.terminalize({
+      runId: claimed.id,
+      ownerUserId: claimed.owner_user_id,
+      status: 'failed',
+      dispatchState: 'not_dispatched',
+      errorCode: 'invalid_request',
+      usage: unknownUsage(),
+      lastEventSeq: 0,
+      startExecution: false,
+      replaceDispatchState: true,
+    });
+
+    const finalRow =
+      updated ??
+      (await this.repository.loadOwnedRun(claimed.owner_user_id, claimed.id));
+
+    await this.applyEffects(finalRow);
+
+    return finalRow;
+  }
+
+  private applyEffects(row: RunRow): Promise<void> {
+    return applyTerminalSideEffects(this.finalization, row);
   }
 
   private async readUsage(

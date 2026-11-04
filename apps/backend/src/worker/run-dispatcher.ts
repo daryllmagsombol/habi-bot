@@ -1,65 +1,63 @@
 /**
  * Run dispatcher: the worker-side half of the H-022 run lifecycle.
  *
- * Claim (in `run-claim-repository.ts`) already moved a reservation into
- * worker ownership. This module then:
+ * The worker selects queued reservations and hands each one to
+ * `RunService.dispatchReserved`, which owns the single atomic
+ * `not_dispatched` -> `unknown` claim and the provider call. This module then:
  *
- *   1. rebuilds the request from the persisted conversation (`run-context.ts`);
- *   2. calls the same `HarnessAdapter.createRun` the controller contract
- *      defines, recording the accepted dispatch state exactly once;
- *   3. streams adapter events into `RunEventStore.append` *in adapter order*.
+ *   1. streams adapter events into `RunEventStore.append` *in adapter order*.
  *      The store allocates the server sequence and publishes the Run id on its
  *      hub after the append transaction commits, which is the existing replay
  *      contract; this module adds no second sequencing or fan-out;
- *   4. records exactly one terminal state and appends at most one terminal
+ *   2. records exactly one terminal state and appends at most one terminal
  *      event whose type matches the stored status;
- *   5. settles or releases the H-023 allowance reservation for the Run.
+ *   3. settles or releases the H-023 allowance reservation for the Run.
  *
- * Safety rules mirrored from `RunService`:
+ * Safety rules are shared with the service rather than reimplemented:
  *   - `unknown` dispatch is terminal `execution_uncertain` and is never retried;
  *   - a proven `not_dispatched` failure is `failed` (a user retry is a new Run);
  *   - usage is `known`/`partial`/`unknown`, and unknown stays null;
  *   - terminal writes are single atomic updates guarded by the non-terminal
  *     status, so a concurrent cancel or recovery wins without a rewrite.
  *
- * `RunService` has no public entry point for dispatching an already-reserved
- * Run (`createRun` deduplicates and returns without dispatch, and `dispatchOnce`
- * is private), so this lane composes the same repository primitives. That gap is
- * reported rather than changing `runs/**`.
+ * Recovery is also delegate-only: `RunService.recoverAfterRestart({ lease })`
+ * scans only expired claims, so a fresh queued reservation is never terminalized
+ * by a running worker.
  */
-import { createHash } from 'node:crypto';
 import type { Pool } from 'pg';
 import { HarnessAdapterError } from '../adapters/harness-adapter.js';
 import type {
   DispatchState,
   HarnessAdapter,
   Id,
-  RecoveryOutcome,
-  RecoveryReport,
   RunEvent,
   RunSnapshot,
   RunSnapshotStatus,
 } from '../adapters/harness-adapter.js';
-import { lostDispatchState } from '../adapters/recovery.js';
 import {
   RunEventStreamClosedError,
   isTerminalRunEventType,
 } from '../events/index.js';
 import type { RunEventStore } from '../events/index.js';
-import type { SettleUsageInput, UsageLimitService } from '../limits/index.js';
-import { RunRepository } from '../runs/run-repository.js';
-import type { RunRow } from '../runs/run-repository.js';
+import type { UsageLimitService } from '../limits/index.js';
+import {
+  RunRepository,
+  RunService,
+  applyTerminalSideEffects,
+  deterministicEventId,
+} from '../runs/index.js';
+import type {
+  RunDispatchOutcome,
+  RunRecoverySummary,
+  RunRow,
+  RunFailureOutcome,
+  RunSideEffectDeps,
+} from '../runs/index.js';
 import { normalizeUsage, unknownUsage } from '../runs/usage.js';
 import type { PersistedRunUsage } from '../runs/usage.js';
 import { isTerminalRunStatus } from '../runs/types.js';
-import type { PersistedRunStatus, RunFailureOutcome } from '../runs/types.js';
 import type { WorkerLogger } from './logger.js';
-import { buildCreateRunRequest, RunContextError } from './run-context.js';
 import type { WorkerRunRepository } from './run-claim-repository.js';
-
-const UUID_LENGTH = 32;
-const TERMINAL_EVENT_DISCRIMINATOR = 'terminal';
-const USAGE_EVENT_DISCRIMINATOR = 'usage';
 
 interface RunDecision {
   readonly status: RunFailureOutcome;
@@ -78,16 +76,6 @@ interface InFlightState {
   shutdown: boolean;
 }
 
-export interface WorkerRecoveryOutcome {
-  readonly runId: string;
-  readonly outcome: 'confirmed_terminal' | 'still_running' | 'lost';
-  readonly status: PersistedRunStatus;
-}
-
-export interface WorkerRecoverySummary {
-  readonly outcomes: readonly WorkerRecoveryOutcome[];
-}
-
 export interface RunDispatcherOptions {
   readonly pool: Pool;
   readonly adapter: HarnessAdapter;
@@ -96,61 +84,12 @@ export interface RunDispatcherOptions {
   readonly limits: UsageLimitService;
   readonly logger: WorkerLogger;
   readonly leaseMs: number;
-  readonly now?: () => number;
 }
 
 const HEARTBEAT_FLOOR_MS = 250;
 
 function asRunId(id: string): Id<'Run'> {
   return id as Id<'Run'>;
-}
-
-function toSequence(value: string | number): number {
-  const sequence = typeof value === 'number' ? value : Number(value);
-
-  return Number.isSafeInteger(sequence) && sequence >= 0 ? sequence : 0;
-}
-
-function toNullableNumber(value: string | number | null): number | null {
-  if (value === null) {
-    return null;
-  }
-
-  const parsed = typeof value === 'number' ? value : Number(value);
-
-  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
-}
-
-/**
- * Stable UUID-shaped idempotency key for an append. Adapter delivery is
- * at-least-once, so re-appending `(runId, adapterSeq)` must return the stored
- * event instead of allocating a second `seq`.
- */
-function deterministicEventId(runId: string, discriminator: string): string {
-  const hex = createHash('sha256')
-    .update(`${runId}\u0000${discriminator}`, 'utf8')
-    .digest('hex')
-    .slice(0, UUID_LENGTH);
-
-  return [
-    hex.slice(0, 8),
-    hex.slice(8, 12),
-    hex.slice(12, 16),
-    hex.slice(16, 20),
-    hex.slice(20, 32),
-  ].join('-');
-}
-
-function terminalEventType(status: PersistedRunStatus): string {
-  if (status === 'completed') {
-    return 'run.completed';
-  }
-
-  if (status === 'cancelled') {
-    return 'run.cancelled';
-  }
-
-  return 'run.failed';
 }
 
 function statusForTerminalEvent(type: string): RunFailureOutcome {
@@ -194,15 +133,26 @@ function snapshotErrorCode(status: RunSnapshotStatus): string | null {
 
 export class RunDispatcher {
   private readonly runs: RunRepository;
-  private readonly now: () => number;
+  private readonly service: RunService;
+  private readonly effects: RunSideEffectDeps;
 
   constructor(private readonly options: RunDispatcherOptions) {
     this.runs = new RunRepository(options.pool);
-    this.now = options.now ?? Date.now;
+    this.service = new RunService(options.pool, options.adapter, {
+      events: options.events,
+      limits: options.limits,
+      logger: options.logger,
+    });
+    this.effects = {
+      repository: this.runs,
+      events: options.events,
+      limits: options.limits,
+      logger: options.logger,
+    };
   }
 
   /**
-   * Dispatches one claimed Run. Resolves for every expected outcome; only an
+   * Dispatches one selected Run. Resolves for every expected outcome; only an
    * unexpected programming failure escapes, and the caller records it.
    */
   async dispatch(run: RunRow, shutdownSignal: AbortSignal): Promise<void> {
@@ -237,41 +187,11 @@ export class RunDispatcher {
    * previously dispatched or claimed. Fresh `queued` / `not_dispatched`
    * reservations are deliberately excluded so a restart never fails work the
    * claim loop can still dispatch.
-   *
-   * The outcome application mirrors `RunService.recoverAfterRestart`; that
-   * method scans *all* non-terminal rows, including fresh reservations, so it
-   * cannot be used here without terminalizing dispatchable work.
    */
-  async recoverAfterRestart(limit: number): Promise<WorkerRecoverySummary> {
-    const refs = await this.options.workerRepository.listStaleNonTerminal(
-      this.options.leaseMs,
-      [],
-      limit,
-    );
-
-    if (refs.length === 0) {
-      return { outcomes: [] };
-    }
-
-    const rows: RunRow[] = [];
-
-    for (const ref of refs) {
-      try {
-        rows.push(await this.runs.loadOwnedRun(ref.ownerUserId, ref.id));
-      } catch {
-        // Deleted between scan and load: nothing to reconcile.
-      }
-    }
-
-    if (rows.length === 0) {
-      return { outcomes: [] };
-    }
-
-    let report: RecoveryReport;
-
+  async recoverAfterRestart(limit: number): Promise<RunRecoverySummary> {
     try {
-      report = await this.options.adapter.recoverAfterRestart({
-        runIds: rows.map((row) => asRunId(row.id)),
+      return await this.service.recoverAfterRestart({
+        lease: { staleAfterMs: this.options.leaseMs, limit },
       });
     } catch (error) {
       this.options.logger.log({
@@ -281,25 +201,6 @@ export class RunDispatcher {
 
       return { outcomes: [] };
     }
-
-    const byRun = new Map<string, RecoveryOutcome>(
-      report.outcomes.map((outcome) => [outcome.runId as string, outcome]),
-    );
-    const outcomes: WorkerRecoveryOutcome[] = [];
-
-    for (const row of rows) {
-      try {
-        outcomes.push(await this.applyRecoveryOutcome(row, byRun.get(row.id)));
-      } catch (error) {
-        this.options.logger.log({
-          event: 'worker.recovery_apply_failed',
-          runId: row.id,
-          message: error instanceof Error ? error.name : 'unknown_error',
-        });
-      }
-    }
-
-    return { outcomes };
   }
 
   /** Reverts an undispatched claim on graceful shutdown (never a sent call). */
@@ -316,91 +217,22 @@ export class RunDispatcher {
   }
 
   private async runDispatch(run: RunRow, state: InFlightState): Promise<void> {
-    let request;
-
-    try {
-      request = await buildCreateRunRequest(
-        this.options.workerRepository,
-        run,
-        this.now,
-      );
-    } catch (error) {
-      if (error instanceof RunContextError) {
-        this.options.logger.log({
-          event: 'run.context_rejected',
-          runId: run.id,
-          reason: error.message,
-        });
-        await this.finalize(run, {
-          status: 'failed',
-          errorCode: 'invalid_request',
-          dispatchState: 'not_dispatched',
-          usage: unknownUsage(),
-          startExecution: false,
-          replaceDispatchState: true,
-        });
-        return;
-      }
-
-      // Nothing has been sent. Give the claim back so the loop can retry the
-      // same Run instead of failing it on a transient database error.
-      state.phase = 'finished';
-      await this.abandonClaim(run.id, run.owner_user_id);
-      throw error;
-    }
-
     if (state.shutdown) {
-      await this.abandonClaim(run.id, run.owner_user_id);
       return;
     }
 
-    state.phase = 'dispatching';
-
-    let created;
-
-    try {
-      created = await this.options.adapter.createRun(request);
-    } catch (error) {
-      if (error instanceof HarnessAdapterError) {
-        await this.finalizeFromError(run, error);
-        return;
-      }
-
-      // An unexpected adapter bug after the call may have produced an external
-      // effect. Record ambiguity before surfacing it; never retry.
-      await this.finalize(run, {
-        status: 'execution_uncertain',
-        errorCode: 'harness_unavailable',
-        dispatchState: 'unknown',
-        usage: unknownUsage(),
-        startExecution: true,
-      });
-      throw error;
-    }
-
-    if (created.dispatchState === 'unknown') {
-      await this.finalize(run, {
-        status: 'execution_uncertain',
-        errorCode: 'transport_ambiguous',
-        dispatchState: 'unknown',
-        usage: unknownUsage(),
-        startExecution: true,
-      });
-      return;
-    }
-
-    const recorded = await this.runs.recordDispatch(
-      run.id,
+    const outcome: RunDispatchOutcome = await this.service.dispatchReserved(
       run.owner_user_id,
-      created.dispatchState,
-      created.harnessRunId,
-      created.harnessSessionId,
+      run.id,
     );
 
-    if (recorded === null) {
-      // Cancellation or recovery terminalized the Run between claim and
-      // acceptance. Do not stream into a finished Run.
-      await this.finalizeFromStored(run);
+    if (!outcome.dispatched) {
+      // A terminal outcome already has its allowance/event side effects (or was
+      // terminalized by another writer); applying them again is idempotent.
+      if (isTerminalRunStatus(outcome.run.status)) {
+        await this.finalizeFromStored(run);
+      }
+
       return;
     }
 
@@ -591,8 +423,7 @@ export class RunDispatcher {
       return;
     }
 
-    await this.appendTerminal(run, current);
-    await this.settleReservation(run, current);
+    await applyTerminalSideEffects(this.effects, current);
     this.options.logger.log({
       event: 'run.terminal',
       runId: run.id,
@@ -636,8 +467,7 @@ export class RunDispatcher {
       return;
     }
 
-    await this.settleReservation(run, finalRow);
-    await this.appendTerminal(run, finalRow);
+    await applyTerminalSideEffects(this.effects, finalRow);
 
     this.options.logger.log({
       event: 'run.terminal',
@@ -663,125 +493,6 @@ export class RunDispatcher {
       payload,
       eventId: deterministicEventId(run.id, `event:${event.seq}`),
     });
-  }
-
-  private async appendTerminal(run: RunRow, finalRow: RunRow): Promise<void> {
-    if (!isTerminalRunStatus(finalRow.status)) {
-      return;
-    }
-
-    if (finalRow.usage_status !== 'unknown') {
-      await this.appendSafely(run, {
-        type: 'usage.recorded',
-        payload: {
-          usageStatus: finalRow.usage_status,
-          grossPromptTokens: toNullableNumber(finalRow.usage_gross_prompt_tokens),
-          grossCompletionTokens: toNullableNumber(
-            finalRow.usage_gross_completion_tokens,
-          ),
-          cachedPromptTokens: toNullableNumber(finalRow.usage_cached_prompt_tokens),
-          reasoningTokens: toNullableNumber(finalRow.usage_reasoning_tokens),
-          totalTokens: toNullableNumber(finalRow.usage_total_tokens),
-          costStatus: finalRow.usage_cost_status,
-        },
-        eventId: deterministicEventId(run.id, USAGE_EVENT_DISCRIMINATOR),
-      });
-    }
-
-    await this.appendSafely(run, {
-      type: terminalEventType(finalRow.status),
-      payload: {
-        errorCode: finalRow.error_code,
-        usageStatus: finalRow.usage_status,
-      },
-      eventId: deterministicEventId(run.id, TERMINAL_EVENT_DISCRIMINATOR),
-    });
-  }
-
-  private async appendSafely(
-    run: RunRow,
-    input: {
-      type: string;
-      payload: Readonly<Record<string, unknown>>;
-      eventId: string;
-    },
-  ): Promise<void> {
-    try {
-      await this.options.events.append(run.owner_user_id, {
-        runId: run.id,
-        type: input.type,
-        payload: input.payload,
-        eventId: input.eventId,
-      });
-    } catch (error) {
-      if (error instanceof RunEventStreamClosedError) {
-        return;
-      }
-
-      this.options.logger.log({
-        event: 'run.event_append_failed',
-        runId: run.id,
-        eventType: input.type,
-        message: error instanceof Error ? error.name : 'unknown_error',
-      });
-    }
-  }
-
-  /**
-   * Settles the H-023 reservation from the stored row. A proven pre-dispatch
-   * failure releases the hold; anything that may have run settles with the
-   * persisted usage, where `unknown` keeps the estimate held rather than zero.
-   */
-  private async settleReservation(run: RunRow, finalRow: RunRow): Promise<void> {
-    let reservation;
-
-    try {
-      reservation = await this.options.workerRepository.findReservation(
-        run.id,
-        run.owner_user_id,
-      );
-    } catch (error) {
-      this.options.logger.log({
-        event: 'run.usage_lookup_failed',
-        runId: run.id,
-        message: error instanceof Error ? error.name : 'unknown_error',
-      });
-      return;
-    }
-
-    if (reservation?.state !== 'reserved') {
-      return;
-    }
-
-    try {
-      if (finalRow.dispatch_state === 'not_dispatched') {
-        await this.options.limits.release(reservation.id, {
-          ownerUserId: run.owner_user_id,
-        });
-        return;
-      }
-
-      const usage: SettleUsageInput = {
-        status: finalRow.usage_status,
-        grossPromptTokens: toNullableNumber(finalRow.usage_gross_prompt_tokens),
-        grossCompletionTokens: toNullableNumber(
-          finalRow.usage_gross_completion_tokens,
-        ),
-        cachedPromptTokens: toNullableNumber(finalRow.usage_cached_prompt_tokens),
-        reasoningTokens: toNullableNumber(finalRow.usage_reasoning_tokens),
-        totalTokens: toNullableNumber(finalRow.usage_total_tokens),
-      };
-
-      await this.options.limits.settle(reservation.id, usage, {
-        ownerUserId: run.owner_user_id,
-      });
-    } catch (error) {
-      this.options.logger.log({
-        event: 'run.usage_settlement_failed',
-        runId: run.id,
-        message: error instanceof Error ? error.name : 'unknown_error',
-      });
-    }
   }
 
   private async readUsage(runId: string): Promise<PersistedRunUsage> {
@@ -818,7 +529,7 @@ export class RunDispatcher {
     }
 
     if (state.phase === 'claimed') {
-      // Nothing was sent; the claim was already released or can be.
+      // Nothing was sent; the claim, if any, was already released or can be.
       await this.abandonClaim(run.id, run.owner_user_id);
       this.options.logger.log({
         event: 'run.dispatch_deferred',
@@ -870,110 +581,5 @@ export class RunDispatcher {
     timer.unref();
 
     return timer;
-  }
-
-  private async applyRecoveryOutcome(
-    row: RunRow,
-    outcome: RecoveryOutcome | undefined,
-  ): Promise<WorkerRecoveryOutcome> {
-    if (outcome === undefined) {
-      await this.applyLost(row, 'harness_unavailable');
-      return { runId: row.id, outcome: 'lost', status: 'execution_uncertain' };
-    }
-
-    if (outcome.kind === 'still_running') {
-      const resumeAfter = Math.max(
-        outcome.resumeAfterSeq,
-        outcome.snapshot.lastSeq,
-        toSequence(row.last_event_seq),
-      );
-      const updated = await this.runs.recordStillRunning(
-        row.id,
-        row.owner_user_id,
-        resumeAfter,
-      );
-      const finalRow =
-        updated ?? (await this.runs.loadOwnedRun(row.owner_user_id, row.id));
-
-      return {
-        runId: row.id,
-        outcome: 'still_running',
-        status: finalRow.status,
-      };
-    }
-
-    if (outcome.kind === 'lost') {
-      const dispatchState = lostDispatchState(outcome.dispatchState);
-      await this.applyLost(
-        row,
-        dispatchState === 'not_dispatched'
-          ? 'harness_unavailable'
-          : 'transport_ambiguous',
-        dispatchState,
-      );
-
-      return { runId: row.id, outcome: 'lost', status: 'execution_uncertain' };
-    }
-
-    const snapshot = outcome.snapshot;
-    const status = mapSnapshotStatus(snapshot.status);
-
-    if (status === null) {
-      await this.applyLost(row, 'harness_unavailable');
-      return { runId: row.id, outcome: 'lost', status: 'execution_uncertain' };
-    }
-
-    if (snapshot.harnessStatus === 'waiting_for_approval') {
-      await this.finalize(row, {
-        status: 'failed',
-        errorCode: 'policy_denied',
-        dispatchState: 'dispatched',
-        usage: await this.readUsage(row.id),
-        startExecution: true,
-        lastEventSeq: snapshot.lastSeq,
-      });
-
-      return {
-        runId: row.id,
-        outcome: 'confirmed_terminal',
-        status: 'failed',
-      };
-    }
-
-    await this.finalize(row, {
-      status,
-      errorCode: snapshotErrorCode(snapshot.status),
-      dispatchState: 'dispatched',
-      usage: await this.readUsage(row.id),
-      startExecution: true,
-      lastEventSeq: snapshot.lastSeq,
-    });
-
-    return {
-      runId: row.id,
-      outcome: 'confirmed_terminal',
-      status,
-    };
-  }
-
-  private async applyLost(
-    row: RunRow,
-    errorCode: string,
-    dispatchState?: DispatchState,
-  ): Promise<void> {
-    const resolved = dispatchState ?? lostDispatchState(row.dispatch_state);
-    const usage =
-      resolved === 'not_dispatched'
-        ? unknownUsage()
-        : await this.readUsage(row.id);
-
-    await this.finalize(row, {
-      status: 'execution_uncertain',
-      errorCode,
-      dispatchState: resolved,
-      usage,
-      startExecution: resolved !== 'not_dispatched',
-      replaceDispatchState: true,
-    });
   }
 }

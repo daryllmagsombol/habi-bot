@@ -7,21 +7,25 @@
  * repository predicate.
  *
  * Deliberately not wired here:
- *   - model/provider dispatch (RunService.createRun calls a HarnessAdapter);
+ *   - model/provider dispatch (the worker claims and dispatches through
+ *     `RunService.dispatchReserved`);
  *   - streaming provider output, artifacts, attachments, memory writes;
  *   - conversation creation/rename (the UI can use an existing thread).
  *
- * `POST /api/threads/:id/messages` reserves a durable `queued` Run through the
- * existing RunRepository, so the client gets a stable run id and can replay
- * events. Dispatch is the same gap made explicit: it needs a harness adapter
- * and a provider call, which this surface is forbidden to make.
+ * `POST /api/threads/:id/messages` persists the message, reserves the daily
+ * allowance for a server-generated Run id, then writes the durable `queued` Run.
+ * The reservation is keyed by that id and by the message-derived idempotency
+ * key, so a retried client key reuses the same Run and is charged once. If
+ * admission is refused, no Run row is written and nothing is claimable.
  */
 import type { Message } from '@habi/contracts';
+import { randomUUID } from 'node:crypto';
 import type { Pool } from 'pg';
 import { BotRepository } from '../bots/bot-repository.js';
 import type { BotProfile, ListBotsOptions } from '../bots/types.js';
 import { RunEventStore } from '../events/run-event-store.js';
 import { RunEventStream } from '../events/run-event-stream.js';
+import { UsageLimitService } from '../limits/usage-limit-service.js';
 import { ConversationRepository } from '../persistence/conversation-repository.js';
 import {
   PersistenceConflictError,
@@ -48,6 +52,14 @@ import {
 
 const RUN_IDEMPOTENCY_PREFIX = 'api-message:';
 
+/**
+ * Provisional per-message admission bound. The acceptance design leaves the
+ * per-request cap open (design §8.2), so this is an admission estimate, not a
+ * claim that a Run cannot exceed it: the hold is settled to reported usage at
+ * terminal, and an overrun is recorded honestly.
+ */
+const RUN_ALLOWANCE_ESTIMATE_TOKENS = 10_000;
+
 export interface BotListPage {
   bots: BotSummary[];
   nextCursor: string | null;
@@ -57,7 +69,7 @@ export interface PostMessageResult {
   message: Message;
   /** Same value as `run.id`; explicit for clients that only need the handle. */
   runId: string;
-  /** Dry reservation only: `dispatchState` is `not_dispatched` until a worker exists. */
+  /** Reserved Run: `dispatchState` stays `not_dispatched` until the worker claims it. */
   run: RunView;
 }
 
@@ -105,6 +117,7 @@ export class ApiService {
   private readonly runs: RunRepository;
   private readonly projections: ApiProjectionRepository;
   private readonly eventStore: RunEventStore;
+  private readonly limits: UsageLimitService;
 
   constructor(pool: Pool) {
     this.bots = new BotRepository(pool);
@@ -113,6 +126,7 @@ export class ApiService {
     this.runs = new RunRepository(pool);
     this.projections = new ApiProjectionRepository(pool);
     this.eventStore = new RunEventStore(pool);
+    this.limits = new UsageLimitService(pool);
   }
 
   get events(): RunEventStore {
@@ -221,25 +235,72 @@ export class ApiService {
       ],
     });
 
-    let run = await this.runs.findByIdempotencyKey(actorUserId, idempotencyKey);
+    const existing = await this.runs.findByIdempotencyKey(
+      actorUserId,
+      idempotencyKey,
+    );
 
-    if (run === null) {
+    if (existing !== null) {
+      return { message, runId: existing.id, run: toRunView(existing) };
+    }
+
+    // Admission reserves before the Run row exists. A crash in this window
+    // leaves a hold but no dispatchable Run (fail closed); it never leaves a
+    // Run that could dispatch without an allowance hold.
+    const runId = randomUUID();
+    const reservation = await this.limits.reserve({
+      ownerUserId: actorUserId,
+      runId,
+      estimateTokens: RUN_ALLOWANCE_ESTIMATE_TOKENS,
+    });
+
+    let run;
+
+    try {
       run = await this.runs.insertQueued({
+        runId,
         ownerUserId: actorUserId,
         conversationId,
         idempotencyKey,
         requestFingerprint,
       });
-
-      // A concurrent submitter may have won the unique constraint.
-      run ??= await this.runs.findByIdempotencyKey(actorUserId, idempotencyKey);
+    } catch (error) {
+      await this.releaseQuietly(reservation.id, actorUserId);
+      throw error;
     }
 
     if (run === null) {
-      throw new Error('Run reservation disappeared after creation.');
+      // A concurrent submitter won the unique constraint. Its own reservation
+      // covers the Run, so this attempt's hold must be released rather than
+      // counted twice.
+      await this.releaseQuietly(reservation.id, actorUserId);
+
+      const winner = await this.runs.findByIdempotencyKey(
+        actorUserId,
+        idempotencyKey,
+      );
+
+      if (winner === null) {
+        throw new Error('Run reservation disappeared after a unique conflict.');
+      }
+
+      return { message, runId: winner.id, run: toRunView(winner) };
     }
 
     return { message, runId: run.id, run: toRunView(run) };
+  }
+
+  /** Best-effort release for a hold whose Run was not written. */
+  private async releaseQuietly(
+    reservationId: string,
+    ownerUserId: string,
+  ): Promise<void> {
+    try {
+      await this.limits.release(reservationId, { ownerUserId });
+    } catch {
+      // The hold is an admission failure artifact; the day boundary expires it.
+      // It is never converted into committed usage.
+    }
   }
 
   /**
@@ -274,6 +335,19 @@ export class ApiService {
 
     const finalRun =
       updated ?? (await this.runs.loadOwnedRun(actorUserId, runId));
+
+    // The Run provably never reached the provider, so its allowance hold is
+    // released rather than settled. Cancellation stays terminal even if the
+    // release is unavailable.
+    if (current.dispatch_state === 'not_dispatched') {
+      const reservation = await this.runs
+        .findReservation(finalRun.id, actorUserId)
+        .catch(() => null);
+
+      if (reservation?.state === 'reserved') {
+        await this.releaseQuietly(reservation.id, actorUserId);
+      }
+    }
 
     return toRunView(finalRun);
   }

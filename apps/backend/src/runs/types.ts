@@ -97,6 +97,39 @@ export interface CreateRunOutcome {
   deduplicated: boolean;
 }
 
+/**
+ * Result of dispatching an already-reserved Run.
+ *
+ * `dispatched` is true only when this call won the single atomic claim and the
+ * adapter accepted the dispatch. A terminal or already-claimed Run returns its
+ * stored projection with `dispatched: false` and never reaches the provider.
+ */
+export interface RunDispatchOutcome {
+  run: RunView;
+  dispatched: boolean;
+}
+
+/**
+ * Lease-scoped recovery filter. Only rows whose heartbeat/claim timestamp is
+ * older than `staleAfterMs` and that may already have been claimed/dispatched
+ * are selected, so a fresh queued reservation stays dispatchable.
+ */
+export interface RunRecoveryLeaseFilter {
+  staleAfterMs: number;
+  excludeRunIds?: readonly string[];
+  limit?: number;
+}
+
+/**
+ * Recovery scope. Omit it for the historical full sweep. A bare owner string is
+ * accepted for compatibility with the original owner-scoped call.
+ */
+export interface RunRecoveryFilter {
+  ownerUserId?: string;
+  runIds?: readonly string[];
+  lease?: RunRecoveryLeaseFilter;
+}
+
 export type RunRecoveryKind =
   | 'confirmed_terminal'
   | 'still_running'
