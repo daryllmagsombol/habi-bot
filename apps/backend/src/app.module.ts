@@ -22,14 +22,16 @@ const SESSION_SPIKE_MODULES =
 
 /**
  * Auth-identity gate: the H-014 slice is imported only when HABI_AUTH_SPIKE=1.
+ * The module re-exports the process-wide `SessionCoreModule`, so when the chat
+ * surface is also enabled both validate the same session records.
  */
 const AUTH_SPIKE_MODULES = authSpikeModules();
 
 /**
  * Chat composition gate (H-018): the `/api` surface is imported only when
- * HABI_P1_API=1. It is independent of the spike and auth gates. Importing it
- * adds no product authentication: routes still require an H-017 session, and
- * the session core is in-memory.
+ * HABI_P1_API=1. It is independent of the spike and auth gates: the flag adds
+ * no auth/login routes. Importing it adds no product authentication either;
+ * routes still require an H-017 session, and the session core is in-memory.
  */
 const P1_API_MODULES = process.env.HABI_P1_API === '1' ? [P1ApiModule] : [];
 
