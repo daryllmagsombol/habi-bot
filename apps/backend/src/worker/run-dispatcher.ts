@@ -85,6 +85,17 @@ interface InFlightState {
   cancelRequested: boolean;
 }
 
+/**
+ * What one streaming attempt decided. `finished` means the Run was already
+ * terminalized (or handed to restart reconciliation) by that attempt;
+ * `cancel` means the durable intent still needs the cancel path; `terminal`
+ * carries the terminal event type observed on the stream.
+ */
+type StreamResult =
+  | { readonly kind: 'terminal'; readonly status: RunFailureOutcome }
+  | { readonly kind: 'cancel' }
+  | { readonly kind: 'finished' };
+
 export interface RunDispatcherOptions {
   readonly pool: Pool;
   readonly adapter: HarnessAdapter;
@@ -323,50 +334,13 @@ export class RunDispatcher {
     state: InFlightState,
   ): Promise<void> {
     for (;;) {
-      let terminalOutcome: RunFailureOutcome | null = null;
+      const result = await this.streamOnce(run, state);
 
-      try {
-        const stream = this.options.adapter.subscribe({
-          runId: asRunId(run.id),
-          afterSeq: 0,
-          signal: state.controller.signal,
-        });
-
-        for await (const event of stream) {
-          if (state.cancelRequested || state.controller.signal.aborted) {
-            break;
-          }
-
-          if (isTerminalRunEventType(event.type)) {
-            // Persist after the DB outcome so the stored event type always
-            // matches the stored status, even if a cancel won the race.
-            terminalOutcome = statusForTerminalEvent(event.type);
-            break;
-          }
-
-          await this.appendAdapterEvent(run, event);
-        }
-      } catch (error) {
-        if (state.cancelRequested) {
-          // The abort was ours; the cancel path owns the outcome.
-        } else if (state.shutdown) {
-          await this.cancelOnShutdown(run);
-          return;
-        } else if (
-          state.leaseLost ||
-          error instanceof RunEventStreamClosedError
-        ) {
-          await this.finalizeFromStored(run);
-          return;
-        } else if (error instanceof HarnessAdapterError) {
-          await this.finalizeFromError(run, error);
-          return;
-        } else {
-          throw error;
-        }
+      if (result.kind === 'finished') {
+        return;
       }
 
-      if (state.cancelRequested) {
+      if (result.kind === 'cancel') {
         if (!(await this.processCancel(run, state))) {
           return;
         }
@@ -377,24 +351,115 @@ export class RunDispatcher {
         continue;
       }
 
-      if (state.shutdown) {
-        await this.cancelOnShutdown(run);
-        return;
-      }
-
-      if (state.leaseLost) {
-        await this.finalizeFromStored(run);
-        return;
-      }
-
-      if (terminalOutcome !== null) {
-        await this.finalizeFromTerminal(run, terminalOutcome);
-        return;
-      }
-
-      await this.finalizeFromSnapshot(run);
+      await this.finalizeFromTerminal(run, result.status);
       return;
     }
+  }
+
+  /**
+   * One streaming attempt: appends adapter events until the stream stops, then
+   * decides how the Run leaves this attempt. Abort, shutdown, lease loss and
+   * adapter failure keep the documented precedence.
+   */
+  private async streamOnce(
+    run: RunRow,
+    state: InFlightState,
+  ): Promise<StreamResult> {
+    let terminalOutcome: RunFailureOutcome | null = null;
+
+    try {
+      terminalOutcome = await this.drainStream(run, state);
+    } catch (error) {
+      const handled = await this.classifyStreamFailure(run, state, error);
+
+      if (handled !== null) {
+        return handled;
+      }
+    }
+
+    if (state.cancelRequested) {
+      return { kind: 'cancel' };
+    }
+
+    if (state.shutdown) {
+      await this.cancelOnShutdown(run);
+      return { kind: 'finished' };
+    }
+
+    if (state.leaseLost) {
+      await this.finalizeFromStored(run);
+      return { kind: 'finished' };
+    }
+
+    if (terminalOutcome !== null) {
+      return { kind: 'terminal', status: terminalOutcome };
+    }
+
+    await this.finalizeFromSnapshot(run);
+    return { kind: 'finished' };
+  }
+
+  /**
+   * Streams adapter events in adapter order until a terminal event, an abort or
+   * the end of the stream. Returns the terminal status when one was observed.
+   */
+  private async drainStream(
+    run: RunRow,
+    state: InFlightState,
+  ): Promise<RunFailureOutcome | null> {
+    const stream = this.options.adapter.subscribe({
+      runId: asRunId(run.id),
+      afterSeq: 0,
+      signal: state.controller.signal,
+    });
+
+    for await (const event of stream) {
+      if (state.cancelRequested || state.controller.signal.aborted) {
+        return null;
+      }
+
+      if (isTerminalRunEventType(event.type)) {
+        // Persist after the DB outcome so the stored event type always matches
+        // the stored status, even if a cancel won the race.
+        return statusForTerminalEvent(event.type);
+      }
+
+      await this.appendAdapterEvent(run, event);
+    }
+
+    return null;
+  }
+
+  /**
+   * Decides what a failed streaming attempt means. `null` means the abort was
+   * ours and the caller's cancel path owns the outcome; `finished` means this
+   * attempt already terminalized or handed the Run back to reconciliation.
+   */
+  private async classifyStreamFailure(
+    run: RunRow,
+    state: InFlightState,
+    error: unknown,
+  ): Promise<StreamResult | null> {
+    if (state.cancelRequested) {
+      return null;
+    }
+
+    if (state.shutdown) {
+      await this.cancelOnShutdown(run);
+      return { kind: 'finished' };
+    }
+
+    if (state.leaseLost || error instanceof RunEventStreamClosedError) {
+      await this.finalizeFromStored(run);
+      return { kind: 'finished' };
+    }
+
+    if (error instanceof HarnessAdapterError) {
+      await this.finalizeFromError(run, error);
+      return { kind: 'finished' };
+    }
+
+    throw error;
   }
 
   /**

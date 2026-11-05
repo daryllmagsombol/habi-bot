@@ -67,6 +67,21 @@ function postCreateCount(stub, runId) {
   ).length;
 }
 
+async function submitMessage(identity, content, clientMessageId) {
+  const result = await identity.request(
+    `/api/threads/${identity.conversationId}/messages`,
+    {
+      method: 'POST',
+      csrf: true,
+      body: { content, clientMessageId },
+    },
+  );
+
+  assert.equal(result.status, 201, `submit failed: ${JSON.stringify(result.body)}`);
+
+  return result.body;
+}
+
 export const runLifecycleScenario = {
   id: 'run-lifecycle',
   title: 'Cancel, retry, timeout, worker restart, and duplicate submission',
@@ -99,21 +114,6 @@ export const runLifecycleScenario = {
       };
     }
 
-    async function submit(identity, content, clientMessageId) {
-      const result = await identity.request(
-        `/api/threads/${identity.conversationId}/messages`,
-        {
-          method: 'POST',
-          csrf: true,
-          body: { content, clientMessageId },
-        },
-      );
-
-      assert.equal(result.status, 201, `submit failed: ${JSON.stringify(result.body)}`);
-
-      return result.body;
-    }
-
     async function waitTerminal(runId, expected, timeoutMs = 20_000) {
       return waitFor(
         async () => {
@@ -131,9 +131,9 @@ export const runLifecycleScenario = {
       await runCheck(checks, 'duplicate submission reuses one message and one Run', async () => {
         const identity = await freshIdentity('duplicate');
         stub.queueBehavior('normal');
-        const first = await submit(identity, 'duplicate probe', 'duplicate-1');
+        const first = await submitMessage(identity, 'duplicate probe', 'duplicate-1');
         const beforeMessages = await messageCount(ctx.pool, identity.conversationId);
-        const second = await submit(identity, 'duplicate probe', 'duplicate-1');
+        const second = await submitMessage(identity, 'duplicate probe', 'duplicate-1');
 
         assert.equal(second.messageId, first.messageId);
         assert.equal(second.runId, first.runId);
@@ -166,8 +166,8 @@ export const runLifecycleScenario = {
         const identity = await freshIdentity('retry');
         stub.queueBehavior('normal');
         stub.queueBehavior('normal');
-        const first = await submit(identity, 'retry probe one', 'retry-1');
-        const second = await submit(identity, 'retry probe two', 'retry-2');
+        const first = await submitMessage(identity, 'retry probe one', 'retry-1');
+        const second = await submitMessage(identity, 'retry probe two', 'retry-2');
 
         assert.notEqual(first.runId, second.runId);
 
@@ -202,7 +202,7 @@ export const runLifecycleScenario = {
       // 2. Cancel before dispatch.
       await runCheck(checks, 'pre-dispatch cancel is terminal and never dispatches', async () => {
         const identity = await freshIdentity('cancel-pre');
-        const created = await submit(identity, 'cancel before dispatch', 'cancel-pre-1');
+        const created = await submitMessage(identity, 'cancel before dispatch', 'cancel-pre-1');
         const cancelled = await identity.request(`/api/runs/${created.runId}/cancel`, {
           method: 'POST',
           csrf: true,
@@ -239,7 +239,7 @@ export const runLifecycleScenario = {
         async () => {
           const identity = await freshIdentity('cancel-mid');
           stub.queueBehavior('hold');
-          const created = await submit(identity, 'cancel mid run', 'cancel-mid-1');
+          const created = await submitMessage(identity, 'cancel mid run', 'cancel-mid-1');
 
           await ctx.startWorker();
           await waitFor(
@@ -326,7 +326,7 @@ export const runLifecycleScenario = {
         async () => {
           const identity = await freshIdentity('restart-kill');
           stub.queueBehavior('hold');
-          const created = await submit(
+          const created = await submitMessage(
             identity,
             'restart kill probe',
             'restart-kill-1',
@@ -386,7 +386,7 @@ export const runLifecycleScenario = {
       await runCheck(checks, 'timeout is bounded and never retried automatically', async () => {
         const identity = await freshIdentity('timeout');
         stub.queueBehavior('timeout');
-        const created = await submit(identity, 'timeout probe', 'timeout-1');
+        const created = await submitMessage(identity, 'timeout probe', 'timeout-1');
 
         await ctx.startWorker({ requestTimeoutMs: 400 });
 
@@ -418,14 +418,14 @@ export const runLifecycleScenario = {
       await runCheck(checks, 'a queued Run survives a worker restart and runs once', async () => {
         const identity = await freshIdentity('restart-graceful');
         stub.queueBehavior('normal');
-        const created = await submit(identity, 'restart probe', 'restart-1');
+        const created = await submitMessage(identity, 'restart probe', 'restart-1');
 
         await ctx.startWorker();
         const completed = await waitTerminal(created.runId, ['completed']);
 
         await ctx.stopWorker();
         stub.queueBehavior('normal');
-        const second = await submit(identity, 'restart probe two', 'restart-2');
+        const second = await submitMessage(identity, 'restart probe two', 'restart-2');
 
         await ctx.startWorker();
         const completedAgain = await waitTerminal(second.runId, ['completed']);
