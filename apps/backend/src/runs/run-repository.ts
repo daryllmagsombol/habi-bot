@@ -9,13 +9,14 @@
  * writer from rewriting a terminal row.
  */
 import type { Pool } from 'pg';
-import type { DispatchState } from '../adapters/harness-adapter.js';
+import type { CancelReason, DispatchState } from '../adapters/harness-adapter.js';
 import { PersistenceNotFoundError } from '../persistence/errors.js';
 import {
   requireActorUserId,
   requireResourceId,
 } from '../persistence/rows.js';
 import type { PersistedRunUsage } from './usage.js';
+import { MAX_CANCEL_ATTEMPTS } from './types.js';
 import type {
   PersistedRunStatus,
   RunFailureOutcome,
@@ -48,6 +49,11 @@ export interface RunRow {
   updated_at: Timestamp;
   started_at: NullableTimestamp;
   finished_at: NullableTimestamp;
+  cancel_requested_at: NullableTimestamp;
+  cancel_reason: CancelReason | null;
+  cancel_claimed_at: NullableTimestamp;
+  cancel_attempts: number;
+  cancel_error_code: string | null;
 }
 
 const RUN_COLUMNS = `id, owner_user_id, conversation_id, idempotency_key,
@@ -55,7 +61,9 @@ const RUN_COLUMNS = `id, owner_user_id, conversation_id, idempotency_key,
   harness_session_id, error_code, usage_status, usage_gross_prompt_tokens,
   usage_gross_completion_tokens, usage_cached_prompt_tokens,
   usage_reasoning_tokens, usage_total_tokens, usage_cost_status,
-  last_event_seq, created_at, updated_at, started_at, finished_at`;
+  last_event_seq, created_at, updated_at, started_at, finished_at,
+  cancel_requested_at, cancel_reason, cancel_claimed_at, cancel_attempts,
+  cancel_error_code`;
 
 const RUN_BY_ID = `SELECT ${RUN_COLUMNS}
    FROM runs
@@ -83,6 +91,7 @@ const CLAIM_RUN = `UPDATE runs
    AND owner_user_id = $2
    AND status = 'queued'
    AND dispatch_state = 'not_dispatched'
+   AND cancel_requested_at IS NULL
  RETURNING ${RUN_COLUMNS}`;
 
 /**
@@ -121,6 +130,66 @@ const RECOVERY_ROWS = `SELECT ${RUN_COLUMNS}
     AND NOT (id = ANY($5::uuid[]))
   ORDER BY created_at ASC, id ASC
   LIMIT $6::bigint`;
+
+/**
+ * Records (or re-reads) a durable user cancellation intent on a non-terminal
+ * Run. It deliberately does not advance `updated_at`: that column doubles as the
+ * worker lease, and an API write must not make an abandoned claim look alive.
+ * The first request wins the reason; every repeat is a no-op.
+ */
+const REQUEST_CANCEL = `UPDATE runs
+   SET cancel_requested_at = COALESCE(cancel_requested_at, now()),
+       cancel_reason = COALESCE(cancel_reason, $3)
+ WHERE id = $1
+   AND owner_user_id = $2
+   AND status = ANY($4::text[])
+ RETURNING ${RUN_COLUMNS}`;
+
+/**
+ * Claims one cancellation attempt for this Run. The compare-and-set is what
+ * makes "call adapter.cancel once" hold under concurrency: the owning stream's
+ * heartbeat and the idle cancel sweep can both observe the intent, but only one
+ * of them can claim it while the claim is fresh. A recorded failure releases the
+ * next attempt immediately; a crashed attempt becomes claimable after `$5` ms.
+ */
+const CLAIM_CANCEL = `UPDATE runs
+   SET cancel_attempts = cancel_attempts + 1,
+       cancel_claimed_at = now(),
+       cancel_error_code = NULL
+ WHERE id = $1
+   AND owner_user_id = $2
+   AND status = ANY($3::text[])
+   AND cancel_requested_at IS NOT NULL
+   AND cancel_attempts < $4
+   AND (
+     cancel_attempts = 0
+     OR cancel_error_code IS NOT NULL
+     OR cancel_claimed_at IS NULL
+     OR cancel_claimed_at <= now() - ($5::bigint * interval '1 millisecond')
+   )
+ RETURNING ${RUN_COLUMNS}`;
+
+/** Records a recoverable adapter failure without terminalizing the Run. */
+const RECORD_CANCEL_FAILURE = `UPDATE runs
+   SET cancel_error_code = $3
+ WHERE id = $1
+   AND owner_user_id = $2
+   AND status = ANY($4::text[])
+   AND cancel_requested_at IS NOT NULL
+ RETURNING ${RUN_COLUMNS}`;
+
+/**
+ * Outstanding intents for the idle worker. Local in-flight Runs are excluded by
+ * the caller because their own heartbeat owns the attempt.
+ */
+const CANCEL_PENDING = `SELECT ${RUN_COLUMNS}
+   FROM runs
+  WHERE status = ANY($1::text[])
+    AND cancel_requested_at IS NOT NULL
+    AND cancel_attempts < $2
+    AND NOT (id = ANY($3::uuid[]))
+  ORDER BY cancel_requested_at ASC, id ASC
+  LIMIT $4::bigint`;
 
 const RESERVATION_BY_RUN = `SELECT id, state
    FROM usage_reservations
@@ -220,6 +289,12 @@ export interface TerminalizeRunInput {
    * confirm a possible dispatch and H-021 collapses the state to `unknown`.
    */
   replaceDispatchState?: boolean;
+  /**
+   * Only terminalize when the stored dispatch state still matches. The API uses
+   * this to cancel an undispatched reservation atomically: if a worker claimed
+   * it first, this update matches nothing and the worker owns the stop.
+   */
+  expectedDispatchState?: DispatchState;
 }
 
 function toIso(value: Timestamp): string {
@@ -256,6 +331,8 @@ export function toRunView(row: RunRow): RunView {
     updatedAt: toIso(row.updated_at),
     startedAt: toNullableIso(row.started_at),
     finishedAt: toNullableIso(row.finished_at),
+    cancelRequestedAt: toNullableIso(row.cancel_requested_at),
+    cancelErrorCode: row.cancel_error_code,
     usage: {
       status: row.usage_status,
       grossPromptTokens: toBigInt(row.usage_gross_prompt_tokens),
@@ -379,6 +456,84 @@ export class RunRepository {
   }
 
   /**
+   * Records a durable cancellation intent for a non-terminal Run and returns the
+   * stored row. Null means the Run is terminal or does not belong to this actor;
+   * the caller reloads it to distinguish those with the usual 404/terminal read.
+   */
+  async requestCancel(
+    runId: string,
+    ownerUserId: string,
+    reason: CancelReason,
+  ): Promise<RunRow | null> {
+    const result = await this.pool.query<RunRow>(REQUEST_CANCEL, [
+      requireResourceId(runId),
+      requireActorUserId(ownerUserId),
+      reason,
+      NON_TERMINAL_STATUSES,
+    ]);
+
+    return result.rows[0] ?? null;
+  }
+
+  /**
+   * Claims exactly one cancellation attempt. Null means there is no outstanding
+   * intent, another processor holds a fresh claim, or the attempt bound is spent.
+   */
+  async claimCancel(
+    runId: string,
+    ownerUserId: string,
+    maxAttempts: number,
+    claimTtlMs: number,
+  ): Promise<RunRow | null> {
+    const result = await this.pool.query<RunRow>(CLAIM_CANCEL, [
+      requireResourceId(runId),
+      requireActorUserId(ownerUserId),
+      NON_TERMINAL_STATUSES,
+      maxAttempts,
+      claimTtlMs,
+    ]);
+
+    return result.rows[0] ?? null;
+  }
+
+  /**
+   * Records a recoverable adapter failure. The intent stays set so a bounded
+   * retry can still stop the Run; the Run is never relabelled cancelled here.
+   */
+  async recordCancelFailure(
+    runId: string,
+    ownerUserId: string,
+    errorCode: string,
+  ): Promise<RunRow | null> {
+    const result = await this.pool.query<RunRow>(RECORD_CANCEL_FAILURE, [
+      requireResourceId(runId),
+      requireActorUserId(ownerUserId),
+      errorCode,
+      NON_TERMINAL_STATUSES,
+    ]);
+
+    return result.rows[0] ?? null;
+  }
+
+  /**
+   * Non-terminal Runs with an outstanding intent, excluding ids another local
+   * task already owns. Bounded by `limit` so an idle sweep cannot run unbounded.
+   */
+  async listCancelPending(
+    limit: number,
+    excludeRunIds: readonly string[],
+  ): Promise<RunRow[]> {
+    const result = await this.pool.query<RunRow>(CANCEL_PENDING, [
+      NON_TERMINAL_STATUSES,
+      MAX_CANCEL_ATTEMPTS,
+      excludeRunIds.map((runId) => requireResourceId(runId)),
+      limit,
+    ]);
+
+    return result.rows;
+  }
+
+  /**
    * Records the adapter's accepted dispatch. Only a queued row can transition,
    * so a duplicate dispatch result cannot resurrect a terminal run.
    */
@@ -452,6 +607,7 @@ export class RunRepository {
         WHERE id = $1
           AND owner_user_id = $2
           AND status = ANY($16::text[])
+          AND ($18::text IS NULL OR dispatch_state = $18::text)
         RETURNING ${RUN_COLUMNS}`,
       [
         requireResourceId(input.runId),
@@ -471,6 +627,7 @@ export class RunRepository {
         input.startExecution,
         NON_TERMINAL_STATUSES,
         input.replaceDispatchState ?? false,
+        input.expectedDispatchState ?? null,
       ],
     );
 

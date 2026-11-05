@@ -13,6 +13,20 @@ import type {
 } from '../adapters/harness-adapter.js';
 
 /**
+ * Attempt bound for one durable cancellation intent. The first attempt plus two
+ * retries covers a transient harness outage without turning "stop this Run" into
+ * an unbounded loop against a provider.
+ */
+export const MAX_CANCEL_ATTEMPTS = 3;
+
+/**
+ * How long one claimed cancellation attempt blocks another processor from
+ * starting its own. It only spans the adapter call; a recorded failure is
+ * retryable immediately, and a crash makes the claim retryable after this bound.
+ */
+export const CANCEL_CLAIM_TTL_MS = 30_000;
+
+/**
  * Outcomes this controller writes. `retry_wait` and `timed_out` remain legal in
  * the schema for the H-002 state machine and legacy rows, but are not produced
  * by this slice (there is no retry or deadline scheduler here).
@@ -59,6 +73,14 @@ export interface RunView {
   updatedAt: string;
   startedAt: string | null;
   finishedAt: string | null;
+  /**
+   * Durable user intent to stop a Run that may already be dispatched. A
+   * non-null value on a non-terminal Run means the request was accepted and the
+   * owning worker has not confirmed the stop yet; `status` stays truthful.
+   */
+  cancelRequestedAt: string | null;
+  /** Last recoverable adapter failure while honouring the intent, if any. */
+  cancelErrorCode: string | null;
   usage: RunUsage;
 }
 
@@ -147,6 +169,35 @@ export interface RunRecoverySummary {
 }
 
 export type RunCancelReason = CancelReason;
+
+/**
+ * Outcome of honouring (or declining to honour) one durable cancellation
+ * intent. `run` is always the stored projection, never a fabricated state.
+ *
+ *   - `none`:      no intent is outstanding (already handled or never set).
+ *   - `terminal`:  the Run is terminal. Either this call confirmed `cancelled`,
+ *                  or the harness reported a different authoritative outcome.
+ *   - `deferred`:  another processor holds the current attempt; this caller did
+ *                  nothing and keeps the Run non-terminal.
+ *   - `failed`:    the adapter was not reached. The intent and its error code
+ *                  are durable, the attempt count advanced, and a bounded retry
+ *                  remains. The Run is NOT marked cancelled.
+ *   - `exhausted`: the attempt bound is spent with no acknowledgement. The Run
+ *                  is terminal `execution_uncertain` (never `cancelled`) and
+ *                  the honest last error stays on the row.
+ */
+export type CancelIntentKind =
+  | 'none'
+  | 'terminal'
+  | 'deferred'
+  | 'failed'
+  | 'exhausted';
+
+export interface CancelIntentOutcome {
+  kind: CancelIntentKind;
+  run: RunView;
+  errorCode: string | null;
+}
 
 export const RUN_TERMINAL_STATUSES: ReadonlySet<PersistedRunStatus> = new Set([
   'completed',

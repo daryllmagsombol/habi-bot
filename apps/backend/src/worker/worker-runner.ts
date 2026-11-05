@@ -6,6 +6,11 @@
  * (capped exponential) instead of polling in a tight loop, and periodically
  * asks the dispatcher to reconcile claims whose lease expired.
  *
+ * Cancellation intents are observed in two places: a live dispatch sees its
+ * intent on the next heartbeat (`leaseMs/3`, floored at 250 ms), and every idle
+ * iteration sweeps intents for Runs no local task owns (bounded by the idle
+ * backoff, whose default ceiling is 5 s).
+ *
  * Shutdown is deliberate: stop claiming, give in-flight work `drainMs` to
  * finish, then abort the subscriptions. A Run that was accepted is left
  * non-terminal for restart reconciliation; a Run that was only claimed is
@@ -116,6 +121,7 @@ export class WorkerRunner {
         }
 
         if (claimed === 0) {
+          await this.processCancels();
           await this.sweepIfDue();
 
           if (this.stopping) {
@@ -182,6 +188,38 @@ export class WorkerRunner {
     }
 
     return started;
+  }
+
+  /**
+   * Handles cancellation intents for Runs no local task is streaming. Runs with
+   * a live local stream observe their own intent on the heartbeat; this sweep
+   * covers a Run cancelled while queued and one orphaned by a restart. It runs
+   * on every idle iteration, so a surviving worker picks the intent up within
+   * one idle backoff (default ceiling 5 s, 100 ms in the smoke suites).
+   */
+  private async processCancels(): Promise<void> {
+    if (this.stopping) {
+      return;
+    }
+
+    try {
+      const processed = await this.options.dispatcher.processCancelIntents(
+        this.options.config.recoveryLimit,
+        [...this.tasks.keys()],
+      );
+
+      if (processed > 0) {
+        this.options.logger.log({
+          event: 'worker.cancel_sweep',
+          processed,
+        });
+      }
+    } catch (error) {
+      this.options.logger.log({
+        event: 'worker.cancel_sweep_failed',
+        message: error instanceof Error ? error.name : 'unknown_error',
+      });
+    }
   }
 
   /** Reconciliation runs only with no local dispatch in flight. */

@@ -7,13 +7,13 @@
  * malformed. Validation codes and same-owner conflicts are distinct only after
  * ownership has been resolved by the repository query itself.
  *
- * Two codes are new to this composition layer and describe transport wiring,
+ * One code is new to this composition layer and describes transport wiring,
  * not product policy:
  *
  *   - `api_unavailable` (503): the flag is on but no database is configured.
- *   - `cancel_unavailable` (409): the Run may already have executed, and no
- *     harness adapter is wired to stop it safely. The Run is never relabelled
- *     cancelled locally in that case.
+ *
+ * A dispatched cancellation is not an error: the API records a durable intent
+ * and returns the Run's current state (see `ApiService.cancelRun`).
  */
 import { Catch } from '@nestjs/common';
 import type { ArgumentsHost, ExceptionFilter } from '@nestjs/common';
@@ -23,11 +23,10 @@ import {
   type PersistenceErrorCode,
 } from '../persistence/errors.js';
 
-export type ApiErrorCode = 'api_unavailable' | 'cancel_unavailable';
+export type ApiErrorCode = 'api_unavailable';
 
 const STATUS_BY_API_CODE: Readonly<Record<ApiErrorCode, number>> = {
   api_unavailable: 503,
-  cancel_unavailable: 409,
 };
 
 const STATUS_BY_PERSISTENCE_CODE: Readonly<Record<PersistenceErrorCode, number>> = {

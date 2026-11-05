@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { createClient } from '../lib/http.mjs';
 import { waitFor } from '../lib/process.mjs';
-import { blocked, runCheck } from './_check.mjs';
+import { runCheck } from './_check.mjs';
 
 const NOT_DISPATCHED = 'not_dispatched';
 
@@ -67,21 +67,6 @@ function postCreateCount(stub, runId) {
   ).length;
 }
 
-async function submitMessage(identity, content, clientMessageId) {
-  const result = await identity.request(
-    `/api/threads/${identity.conversationId}/messages`,
-    {
-      method: 'POST',
-      csrf: true,
-      body: { content, clientMessageId },
-    },
-  );
-
-  assert.equal(result.status, 201, `submit failed: ${JSON.stringify(result.body)}`);
-
-  return result.body;
-}
-
 export const runLifecycleScenario = {
   id: 'run-lifecycle',
   title: 'Cancel, retry, timeout, worker restart, and duplicate submission',
@@ -114,6 +99,21 @@ export const runLifecycleScenario = {
       };
     }
 
+    async function submit(identity, content, clientMessageId) {
+      const result = await identity.request(
+        `/api/threads/${identity.conversationId}/messages`,
+        {
+          method: 'POST',
+          csrf: true,
+          body: { content, clientMessageId },
+        },
+      );
+
+      assert.equal(result.status, 201, `submit failed: ${JSON.stringify(result.body)}`);
+
+      return result.body;
+    }
+
     async function waitTerminal(runId, expected, timeoutMs = 20_000) {
       return waitFor(
         async () => {
@@ -131,9 +131,9 @@ export const runLifecycleScenario = {
       await runCheck(checks, 'duplicate submission reuses one message and one Run', async () => {
         const identity = await freshIdentity('duplicate');
         stub.queueBehavior('normal');
-        const first = await submitMessage(identity, 'duplicate probe', 'duplicate-1');
+        const first = await submit(identity, 'duplicate probe', 'duplicate-1');
         const beforeMessages = await messageCount(ctx.pool, identity.conversationId);
-        const second = await submitMessage(identity, 'duplicate probe', 'duplicate-1');
+        const second = await submit(identity, 'duplicate probe', 'duplicate-1');
 
         assert.equal(second.messageId, first.messageId);
         assert.equal(second.runId, first.runId);
@@ -166,8 +166,8 @@ export const runLifecycleScenario = {
         const identity = await freshIdentity('retry');
         stub.queueBehavior('normal');
         stub.queueBehavior('normal');
-        const first = await submitMessage(identity, 'retry probe one', 'retry-1');
-        const second = await submitMessage(identity, 'retry probe two', 'retry-2');
+        const first = await submit(identity, 'retry probe one', 'retry-1');
+        const second = await submit(identity, 'retry probe two', 'retry-2');
 
         assert.notEqual(first.runId, second.runId);
 
@@ -202,7 +202,7 @@ export const runLifecycleScenario = {
       // 2. Cancel before dispatch.
       await runCheck(checks, 'pre-dispatch cancel is terminal and never dispatches', async () => {
         const identity = await freshIdentity('cancel-pre');
-        const created = await submitMessage(identity, 'cancel before dispatch', 'cancel-pre-1');
+        const created = await submit(identity, 'cancel before dispatch', 'cancel-pre-1');
         const cancelled = await identity.request(`/api/runs/${created.runId}/cancel`, {
           method: 'POST',
           csrf: true,
@@ -231,17 +231,15 @@ export const runLifecycleScenario = {
 
       await ctx.stopWorker();
 
-      // 3. Cancel after dispatch: the API refuses explicitly.
-      let heldRunId;
-
+      // 3. Cancel after dispatch: the API accepts a durable intent, the owning
+      //    worker stops the harness run, and the Run terminalizes exactly once.
       await runCheck(
         checks,
-        'dispatched cancel is explicit, not a silent pretend-stop',
+        'a dispatched Run is stopped at the harness and terminalizes once',
         async () => {
           const identity = await freshIdentity('cancel-mid');
           stub.queueBehavior('hold');
-          const created = await submitMessage(identity, 'cancel mid run', 'cancel-mid-1');
-          heldRunId = created.runId;
+          const created = await submit(identity, 'cancel mid run', 'cancel-mid-1');
 
           await ctx.startWorker();
           await waitFor(
@@ -249,35 +247,76 @@ export const runLifecycleScenario = {
             'the held Run to stream its first event',
           );
 
-          const cancelled = await identity.request(`/api/runs/${created.runId}/cancel`, {
-            method: 'POST',
-            csrf: true,
-          });
+          const accepted = await identity.request(
+            `/api/runs/${created.runId}/cancel`,
+            { method: 'POST', csrf: true },
+          );
 
-          assert.equal(cancelled.status, 409);
-          assert.deepEqual(cancelled.body, { error: { code: 'cancel_unavailable' } });
+          assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
+          assert.equal(
+            typeof accepted.body.run.cancelRequestedAt,
+            'string',
+            'the accepted cancellation must be visible on the Run',
+          );
+          assert.ok(
+            accepted.body.run.status === 'running' ||
+              accepted.body.run.status === 'cancelled',
+            'the API reports the current state, never a fabricated terminal status',
+          );
 
-          const row = await runRow(ctx.pool, created.runId);
+          const cancelled = await waitTerminal(created.runId, ['cancelled']);
 
-          assert.equal(row.status, 'running');
+          assert.equal(cancelled.dispatch_state, 'dispatched');
+          assert.ok(cancelled.finished_at !== null);
           assert.equal(postCreateCount(stub, created.runId), 1);
+
+          await waitFor(
+            async () => (await terminalEventCount(ctx.pool, created.runId)) === 1,
+            'exactly one terminal event',
+          );
+
+          const events = await eventSeqs(ctx.pool, created.runId);
+
+          assert.equal(events.at(-1)?.type, 'run.cancelled');
+
+          const harnessRun = stub.runFor(created.runId);
+
+          assert.equal(
+            harnessRun.stopCalls,
+            1,
+            'adapter.cancel must be called exactly once',
+          );
+
+          // A repeat is the same outcome: no second stop and no second event.
+          const repeated = await identity.request(
+            `/api/runs/${created.runId}/cancel`,
+            { method: 'POST', csrf: true },
+          );
+
+          assert.equal(repeated.status, 200, JSON.stringify(repeated.body));
+          assert.equal(repeated.body.run.status, 'cancelled');
+          assert.equal(
+            repeated.body.run.finishedAt,
+            new Date(cancelled.finished_at).toISOString(),
+          );
+
+          await new Promise((resolve) => setTimeout(resolve, 400));
+
+          assert.equal(stub.runFor(created.runId).stopCalls, 1);
+          assert.equal(await terminalEventCount(ctx.pool, created.runId), 1);
 
           return {
             runId: created.runId,
+            acceptedStatus: accepted.body.run.status,
             status: cancelled.status,
-            code: cancelled.body.error.code,
-            runStatus: row.status,
+            dispatchState: cancelled.dispatch_state,
+            stopCalls: harnessRun.stopCalls,
+            terminalEvents: 1,
           };
         },
       );
 
-      checks.push(
-        blocked(
-          'a dispatched Run can be cancelled from the chat API',
-          'The P1 chat API returns 409 cancel_unavailable once a Run is dispatched; no adapter cancel is wired into that surface.',
-          { runId: heldRunId },
-        ),
-      );
+      await ctx.stopWorker();
 
       // 4. Hard worker restart while dispatched: no duplicate dispatch, no
       //    silent erasure of persisted events, explicit uncertainty.
@@ -285,7 +324,20 @@ export const runLifecycleScenario = {
         checks,
         'a killed worker leaves recoverable state with no duplicate dispatch',
         async () => {
-          assert.ok(heldRunId, 'the mid-run cancel fixture did not run');
+          const identity = await freshIdentity('restart-kill');
+          stub.queueBehavior('hold');
+          const created = await submit(
+            identity,
+            'restart kill probe',
+            'restart-kill-1',
+          );
+          const heldRunId = created.runId;
+
+          await ctx.startWorker();
+          await waitFor(
+            async () => (await eventSeqs(ctx.pool, heldRunId)).length >= 1,
+            'the held Run to stream its first event',
+          );
 
           const before = await eventSeqs(ctx.pool, heldRunId);
 
@@ -334,7 +386,7 @@ export const runLifecycleScenario = {
       await runCheck(checks, 'timeout is bounded and never retried automatically', async () => {
         const identity = await freshIdentity('timeout');
         stub.queueBehavior('timeout');
-        const created = await submitMessage(identity, 'timeout probe', 'timeout-1');
+        const created = await submit(identity, 'timeout probe', 'timeout-1');
 
         await ctx.startWorker({ requestTimeoutMs: 400 });
 
@@ -366,14 +418,14 @@ export const runLifecycleScenario = {
       await runCheck(checks, 'a queued Run survives a worker restart and runs once', async () => {
         const identity = await freshIdentity('restart-graceful');
         stub.queueBehavior('normal');
-        const created = await submitMessage(identity, 'restart probe', 'restart-1');
+        const created = await submit(identity, 'restart probe', 'restart-1');
 
         await ctx.startWorker();
         const completed = await waitTerminal(created.runId, ['completed']);
 
         await ctx.stopWorker();
         stub.queueBehavior('normal');
-        const second = await submitMessage(identity, 'restart probe two', 'restart-2');
+        const second = await submit(identity, 'restart probe two', 'restart-2');
 
         await ctx.startWorker();
         const completedAgain = await waitTerminal(second.runId, ['completed']);
@@ -401,7 +453,8 @@ export const runLifecycleScenario = {
       residualRisks: [
         'A hard kill after dispatch intentionally terminalizes as execution_uncertain and is not re-dispatched, because a possibly-paid call must not be repeated. Provider output that was emitted after the last persisted event is not recoverable.',
         'Pre-dispatch cancel in ApiService terminalizes the Run without appending a run.cancelled event, so an already-open event stream is not notified.',
-        'The chat API has no dispatched-cancel path; that capability remains blocked at the HTTP surface.',
+        'Dispatched cancel is observed by the owning worker on its next heartbeat (lease/3, floored at 250 ms). A Run orphaned by a killed worker is picked up by the idle cancel sweep within one idle backoff.',
+        'If the harness cannot be reached, the intent is retried at most three times and the Run stays running with cancelErrorCode set; it is never reported cancelled without a harness acknowledgement.',
       ],
     };
   },

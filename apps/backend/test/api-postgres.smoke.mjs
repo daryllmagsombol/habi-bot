@@ -1055,19 +1055,47 @@ describe(
       assert.equal(completed.status, 200);
       assert.equal(completed.body.run.status, 'completed');
 
-      // A Run that may already have executed needs a harness adapter; the
-      // surface reports the gap instead of pretending it stopped.
+      // A dispatched Run must not be reported stopped by the API process: it
+      // records a durable intent and returns the current state. The owning
+      // worker performs the adapter call (covered by the worker suite).
       const dispatched = await requestA(`/api/runs/${runDispatched}/cancel`, {
         method: 'POST',
         csrf: true,
       });
-      assert.equal(dispatched.status, 409);
-      expectError(dispatched.body, 'cancel_unavailable');
+      assert.equal(dispatched.status, 200);
+      assert.equal(dispatched.body.run.status, 'running');
+      assert.equal(typeof dispatched.body.run.cancelRequestedAt, 'string');
+      assert.equal(dispatched.body.run.cancelErrorCode, null);
 
-      const stillRunning = await pool.query('SELECT status FROM runs WHERE id = $1', [
-        runDispatched,
-      ]);
+      const stillRunning = await pool.query(
+        `SELECT status, cancel_requested_at, cancel_reason, cancel_attempts
+           FROM runs WHERE id = $1`,
+        [runDispatched],
+      );
       assert.equal(stillRunning.rows[0].status, 'running');
+      assert.equal(stillRunning.rows[0].cancel_reason, 'user');
+      assert.ok(stillRunning.rows[0].cancel_requested_at instanceof Date);
+      assert.equal(stillRunning.rows[0].cancel_attempts, 0);
+
+      // Repeating the request is the same outcome: no second adapter attempt is
+      // ever authorised by a duplicate HTTP call, and the original request time
+      // is preserved.
+      const repeated = await requestA(`/api/runs/${runDispatched}/cancel`, {
+        method: 'POST',
+        csrf: true,
+      });
+      assert.equal(repeated.status, 200);
+      assert.equal(repeated.body.run.status, 'running');
+      assert.equal(
+        repeated.body.run.cancelRequestedAt,
+        dispatched.body.run.cancelRequestedAt,
+      );
+
+      const stillOneIntent = await pool.query(
+        'SELECT cancel_attempts FROM runs WHERE id = $1',
+        [runDispatched],
+      );
+      assert.equal(stillOneIntent.rows[0].cancel_attempts, 0);
 
       const noCsrf = await requestA(`/api/runs/${runDispatched}/cancel`, {
         method: 'POST',

@@ -36,9 +36,8 @@ import type { ListMessagesOptions } from '../persistence/types.js';
 import { RunRepository, toRunView } from '../runs/run-repository.js';
 import { isTerminalRunStatus } from '../runs/types.js';
 import type { RunView } from '../runs/types.js';
-import { unknownUsage } from '../runs/usage.js';
 import { fingerprintRunRequest } from '../runs/validation.js';
-import { ApiError } from './api-errors.js';
+import { unknownUsage } from '../runs/usage.js';
 import {
   purposeFragment,
   type BotDetail,
@@ -304,12 +303,19 @@ export class ApiService {
   }
 
   /**
-   * Owner-scoped, idempotent cancellation for a Run that has not been dispatched.
+   * Owner-scoped, idempotent cancellation.
    *
-   * A Run that may already have executed cannot be cancelled correctly without
-   * asking the harness to stop; no adapter is wired here, so the surface reports
-   * `cancel_unavailable` instead of pretending the provider stopped. A terminal
-   * Run is returned unchanged, which makes repeated calls idempotent.
+   * The API process has no adapter, so it never claims that a dispatched Run was
+   * stopped. Instead it commits a durable cancellation intent on the Run row and
+   * returns the Run's *current* state; whichever worker owns the claim observes
+   * the intent on its next heartbeat, calls the adapter once, and terminalizes
+   * through the shared finalization path.
+   *
+   *   - undispatched: terminal `cancelled` immediately, hold released (unchanged);
+   *   - dispatched/unknown: intent recorded, `status` stays `running`;
+   *   - terminal: returned unchanged, so repeats are no-ops.
+   *
+   * A foreign, missing, or malformed id is still the same non-enumerating 404.
    */
   async cancelRun(actorUserId: string, runId: string): Promise<RunView> {
     const current = await this.runs.loadOwnedRun(actorUserId, runId);
@@ -318,12 +324,24 @@ export class ApiService {
       return toRunView(current);
     }
 
-    if (current.dispatch_state !== 'not_dispatched') {
-      throw new ApiError('cancel_unavailable');
+    const requested =
+      (await this.runs.requestCancel(current.id, actorUserId, 'user')) ??
+      (await this.runs.loadOwnedRun(actorUserId, runId));
+
+    if (isTerminalRunStatus(requested.status)) {
+      return toRunView(requested);
     }
 
-    const updated = await this.runs.terminalize({
-      runId: current.id,
+    if (requested.dispatch_state !== 'not_dispatched') {
+      // Accepted, not stopped. The owning worker owns the adapter call.
+      return toRunView(requested);
+    }
+
+    // Provably never reached the provider. The dispatch-state guard makes this
+    // atomic against a worker claim: if it won, this update matches nothing and
+    // the intent above is what the worker will honour.
+    const cancelled = await this.runs.terminalize({
+      runId: requested.id,
       ownerUserId: actorUserId,
       status: 'cancelled',
       dispatchState: null,
@@ -331,25 +349,25 @@ export class ApiService {
       usage: unknownUsage(),
       lastEventSeq: 0,
       startExecution: false,
+      expectedDispatchState: 'not_dispatched',
     });
 
-    const finalRun =
-      updated ?? (await this.runs.loadOwnedRun(actorUserId, runId));
+    if (cancelled === null) {
+      return toRunView(await this.runs.loadOwnedRun(actorUserId, runId));
+    }
 
     // The Run provably never reached the provider, so its allowance hold is
     // released rather than settled. Cancellation stays terminal even if the
     // release is unavailable.
-    if (current.dispatch_state === 'not_dispatched') {
-      const reservation = await this.runs
-        .findReservation(finalRun.id, actorUserId)
-        .catch(() => null);
+    const reservation = await this.runs
+      .findReservation(cancelled.id, actorUserId)
+      .catch(() => null);
 
-      if (reservation?.state === 'reserved') {
-        await this.releaseQuietly(reservation.id, actorUserId);
-      }
+    if (reservation?.state === 'reserved') {
+      await this.releaseQuietly(reservation.id, actorUserId);
     }
 
-    return toRunView(finalRun);
+    return toRunView(cancelled);
   }
 
   private toSummary(

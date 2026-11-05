@@ -13,6 +13,10 @@
  *   - Terminal state is written in one atomic UPDATE guarded by the expected
  *     non-terminal status, so cancel and recovery cannot double-finalize or
  *     rewrite a completed run.
+ *   - A cancel for a Run that may already be dispatched is a durable intent on
+ *     the Row, not a local status write: the API records it, and the owning
+ *     worker claims exactly one adapter stop before terminalizing through the
+ *     one finalization path.
  *   - Usage comes from the adapter; missing/unknown usage is null, never zero.
  *   - Ownership is enforced inside every query and by the H-016 helper; a
  *     guessed, foreign, or malformed id is the same `not_found`.
@@ -23,6 +27,7 @@
 import type { Pool } from 'pg';
 import { HarnessAdapterError } from '../adapters/harness-adapter.js';
 import type {
+  CancelResult,
   ChatMessage,
   CreateRunRequest,
   DispatchState,
@@ -65,8 +70,10 @@ import {
 } from './validation.js';
 import { normalizeUsage, unknownUsage } from './usage.js';
 import type { PersistedRunUsage } from './usage.js';
+import { CANCEL_CLAIM_TTL_MS, MAX_CANCEL_ATTEMPTS } from './types.js';
 import { isTerminalRunStatus } from './types.js';
 import type {
+  CancelIntentOutcome,
   CreateRunInput,
   CreateRunOutcome,
   RunCancelReason,
@@ -347,6 +354,13 @@ export class RunService {
       return { run: toRunView(current), dispatched: false };
     }
 
+    if (current.cancel_requested_at !== null) {
+      // A durable cancellation intent wins over dispatch: the Run must never be
+      // sent to the provider after the user asked to stop it. The worker's idle
+      // sweep terminalizes this reservation.
+      return { run: toRunView(current), dispatched: false };
+    }
+
     if (current.dispatch_state !== 'not_dispatched') {
       return { run: toRunView(current), dispatched: false };
     }
@@ -390,9 +404,15 @@ export class RunService {
   }
 
   /**
-   * Cancels a non-terminal Run and keeps cancellation terminal even while the
-   * provider unwinds. Repeating the call returns the same terminal row with its
-   * original finish time; a completed run is never rewritten to cancelled.
+   * Cancels a non-terminal Run. The intent is committed first, so a Run that may
+   * already be on the harness is stopped by whichever worker owns the claim: the
+   * API process has no adapter and never reports a stop it did not receive.
+   *
+   *   - undispatched: terminal `cancelled` immediately, allowance hold released;
+   *   - dispatched/unknown: durable intent, current non-terminal row returned;
+   *   - already terminal: the stored row, unchanged, which makes repeats no-ops.
+   *
+   * `applyCancelIntent` is the worker half and is idempotent with this call.
    */
   async cancelRun(
     ownerUserId: string,
@@ -409,64 +429,229 @@ export class RunService {
       return toRunView(current);
     }
 
-    const mayHaveExecuted = current.dispatch_state !== 'not_dispatched';
-    let dispatchState: DispatchState | null = null;
-    let errorCode: string | null = null;
-    let outcome: RunFailureOutcome = 'cancelled';
-    let unexpectedError: unknown = null;
+    // Null means the Run turned terminal between the read and this write, or it
+    // never belonged to the actor. Reloading produces the same 404 as any other
+    // owner-scoped read and the stored terminal row otherwise.
+    const requested = await this.repository.requestCancel(
+      ownedRunId,
+      actorUserId,
+      cancelReason,
+    );
 
-    if (mayHaveExecuted) {
-      try {
-        const result = await this.adapter.cancel({
-          runId: asRunId(ownedRunId),
-          reason: cancelReason,
-        });
-
-        dispatchState = result.dispatchState;
-        // A harness that already finished is authoritative; do not relabel a
-        // completed run as cancelled.
-        if (result.status === 'completed') {
-          outcome = 'completed';
-        } else if (result.status === 'failed') {
-          outcome = 'failed';
-          errorCode = 'provider_error';
-        }
-      } catch (error) {
-        if (error instanceof HarnessAdapterError) {
-          dispatchState = error.dispatchState;
-          errorCode = error.code;
-        } else {
-          dispatchState = 'unknown';
-          errorCode = 'harness_unavailable';
-          unexpectedError = error;
-        }
-        // Cancellation remains terminal for Habi even if the adapter rejected
-        // or lost the stop request; late output is discarded by state.
-      }
+    if (requested === null) {
+      return toRunView(
+        await this.repository.loadOwnedRun(actorUserId, ownedRunId),
+      );
     }
 
-    const usage = await this.readUsage(ownedRunId, mayHaveExecuted);
+    const outcome = await this.applyCancelIntent(actorUserId, ownedRunId);
+    return outcome.run;
+  }
+
+  /**
+   * Honours one durable cancellation intent exactly once.
+   *
+   * The adapter is only called after an atomic claim, so the owning stream's
+   * heartbeat and the idle worker sweep cannot both stop the same Run. A
+   * successful stop terminalizes `cancelled` (or the harness's authoritative
+   * terminal status) and runs the standard finalization side effects: the
+   * allowance hold is settled or released once, and the terminal event is
+   * appended through the same deterministic id as every other terminal path.
+   *
+   * A failure to reach the adapter is recorded on the Row and returns `failed`
+   * with the Run still non-terminal. The intent stays for a bounded retry.
+   */
+  async applyCancelIntent(
+    ownerUserId: string,
+    runId: string,
+  ): Promise<CancelIntentOutcome> {
+    const actorUserId = requireActorUserId(ownerUserId);
+    const ownedRunId = requireResourceId(runId);
+    const current = await this.repository.loadOwnedRun(actorUserId, ownedRunId);
+
+    if (isTerminalRunStatus(current.status)) {
+      return { kind: 'none', run: toRunView(current), errorCode: null };
+    }
+
+    if (current.cancel_requested_at === null) {
+      return { kind: 'none', run: toRunView(current), errorCode: null };
+    }
+
+    if (current.cancel_attempts >= MAX_CANCEL_ATTEMPTS) {
+      // A previous processor spent the bound and died before recording the
+      // outcome. Stop retrying and record the honest uncertainty.
+      return this.finishUnconfirmedCancel(
+        current,
+        current.cancel_error_code ?? 'harness_unavailable',
+      );
+    }
+
+    const claimed = await this.repository.claimCancel(
+      ownedRunId,
+      actorUserId,
+      MAX_CANCEL_ATTEMPTS,
+      CANCEL_CLAIM_TTL_MS,
+    );
+
+    if (claimed === null) {
+      const stored = await this.repository.loadOwnedRun(actorUserId, ownedRunId);
+      return {
+        // A terminal row means the outcome is already decided; anything else is
+        // another processor's fresh attempt, which this caller must not repeat.
+        kind: isTerminalRunStatus(stored.status) ? 'none' : 'deferred',
+        run: toRunView(stored),
+        errorCode: stored.cancel_error_code,
+      };
+    }
+
+    if (claimed.dispatch_state === 'not_dispatched') {
+      // Provably never reached the provider, so there is nothing to stop. The
+      // dispatch-state guard is what makes this safe against a concurrent claim.
+      const updated = await this.repository.terminalize({
+        runId: ownedRunId,
+        ownerUserId: actorUserId,
+        status: 'cancelled',
+        dispatchState: null,
+        errorCode: null,
+        usage: unknownUsage(),
+        lastEventSeq: 0,
+        startExecution: false,
+        expectedDispatchState: 'not_dispatched',
+      });
+
+      if (updated === null) {
+        const stored = await this.repository.loadOwnedRun(
+          actorUserId,
+          ownedRunId,
+        );
+        return {
+          kind: isTerminalRunStatus(stored.status) ? 'none' : 'deferred',
+          run: toRunView(stored),
+          errorCode: stored.cancel_error_code,
+        };
+      }
+
+      await this.applyEffects(updated);
+      return { kind: 'terminal', run: toRunView(updated), errorCode: null };
+    }
+
+    const cancelReason = normalizeCancelReason(claimed.cancel_reason ?? 'user');
+    let result: CancelResult;
+
+    try {
+      result = await this.adapter.cancel({
+        runId: asRunId(ownedRunId),
+        reason: cancelReason,
+      });
+    } catch (error) {
+      const errorCode =
+        error instanceof HarnessAdapterError ? error.code : 'harness_unavailable';
+      const failed =
+        (await this.repository.recordCancelFailure(
+          ownedRunId,
+          actorUserId,
+          errorCode,
+        )) ??
+        (await this.repository.loadOwnedRun(actorUserId, ownedRunId));
+
+      if (isTerminalRunStatus(failed.status)) {
+        // The Run finished while the stop was failing. Adopt the stored outcome
+        // rather than relabelling it.
+        await this.applyEffects(failed);
+        return {
+          kind: 'terminal',
+          run: toRunView(failed),
+          errorCode: failed.error_code,
+        };
+      }
+
+      if (failed.cancel_attempts >= MAX_CANCEL_ATTEMPTS) {
+        // The bound is spent. The Run must not be reported cancelled, and it
+        // must not stay non-terminal forever: record the uncertainty and let the
+        // standard terminal side effects settle the hold.
+        this.finalization.logger?.log({
+          event: 'run.cancel_exhausted',
+          runId: ownedRunId,
+          errorCode,
+          attempts: failed.cancel_attempts,
+        });
+
+        return this.finishUnconfirmedCancel(failed, errorCode);
+      }
+
+      this.finalization.logger?.log({
+        event: 'run.cancel_failed',
+        runId: ownedRunId,
+        errorCode,
+        attempts: failed.cancel_attempts,
+      });
+
+      return { kind: 'failed', run: toRunView(failed), errorCode };
+    }
+
+    // A harness that already finished is authoritative; never relabel it.
+    const status: RunFailureOutcome =
+      result.status === 'completed'
+        ? 'completed'
+        : result.status === 'failed'
+          ? 'failed'
+          : 'cancelled';
+
+    const usage = await this.readUsage(ownedRunId, true);
     const updated = await this.repository.terminalize({
       runId: ownedRunId,
       ownerUserId: actorUserId,
-      status: outcome,
-      dispatchState,
-      errorCode: outcome === 'cancelled' ? null : errorCode,
+      status,
+      dispatchState: result.dispatchState,
+      errorCode: status === 'failed' ? 'provider_error' : null,
       usage,
       lastEventSeq: 0,
-      startExecution: mayHaveExecuted,
+      startExecution: true,
     });
 
     const finalRow =
       updated ?? (await this.repository.loadOwnedRun(actorUserId, ownedRunId));
 
-    if (unexpectedError !== null) {
-      throw unexpectedError;
-    }
-
     await this.applyEffects(finalRow);
 
-    return toRunView(finalRow);
+    return {
+      kind: 'terminal',
+      run: toRunView(finalRow),
+      errorCode: finalRow.error_code,
+    };
+  }
+
+  /**
+   * Handles outstanding intents for Runs no local task owns: a Run cancelled
+   * while queued, or one orphaned by a worker restart. Bounded by `limit`; an
+   * unexpected failure on one Run is logged and does not stop the sweep.
+   */
+  async processCancelIntents(
+    limit: number,
+    excludeRunIds: readonly string[] = [],
+  ): Promise<CancelIntentOutcome[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1) {
+      throw new PersistenceValidationError('invalid_input');
+    }
+
+    const rows = await this.repository.listCancelPending(limit, excludeRunIds);
+    const outcomes: CancelIntentOutcome[] = [];
+
+    for (const row of rows) {
+      try {
+        outcomes.push(
+          await this.applyCancelIntent(row.owner_user_id, row.id),
+        );
+      } catch (error) {
+        this.finalization.logger?.log({
+          event: 'run.cancel_sweep_failed',
+          runId: row.id,
+          message: error instanceof Error ? error.name : 'unknown_error',
+        });
+      }
+    }
+
+    return outcomes;
   }
 
   /**
@@ -509,6 +694,22 @@ export class RunService {
     const outcomes: RunRecoveryResult[] = [];
 
     for (const row of rows) {
+      if (row.cancel_requested_at !== null) {
+        // A user-requested stop outranks restart reconciliation: stop the Run
+        // instead of adopting a snapshot claim that the intent was never seen.
+        const intent = await this.applyCancelIntent(row.owner_user_id, row.id);
+
+        outcomes.push({
+          runId: row.id,
+          outcome: isTerminalRunStatus(intent.run.status)
+            ? 'confirmed_terminal'
+            : 'still_running',
+          status: intent.run.status,
+          lastEventSeq: intent.run.lastEventSeq,
+        });
+        continue;
+      }
+
       const outcome = byRun.get(row.id);
 
       // A contract-compliant adapter returns exactly one outcome per run. A
@@ -764,6 +965,61 @@ export class RunService {
       status: finalRow.status,
       lastEventSeq: toSequence(finalRow.last_event_seq),
     };
+  }
+
+  /**
+   * Final honest outcome when the cancellation bound is spent without an adapter
+   * acknowledgement. The Run becomes terminal `execution_uncertain`, never
+   * `cancelled`: Habi could not confirm the stop. Usage is read from the harness
+   * when it can still answer, and the standard terminal side effects settle or
+   * release the hold exactly once.
+   */
+  private async finishUnconfirmedCancel(
+    row: RunRow,
+    errorCode: string,
+  ): Promise<CancelIntentOutcome> {
+    if (row.dispatch_state === 'not_dispatched') {
+      // Never sent, so there is nothing ambiguous to report: this is a real
+      // cancellation and the hold is released by the standard side effects.
+      const cancelled = await this.repository.terminalize({
+        runId: row.id,
+        ownerUserId: row.owner_user_id,
+        status: 'cancelled',
+        dispatchState: null,
+        errorCode: null,
+        usage: unknownUsage(),
+        lastEventSeq: 0,
+        startExecution: false,
+        expectedDispatchState: 'not_dispatched',
+      });
+
+      const finalRow =
+        cancelled ??
+        (await this.repository.loadOwnedRun(row.owner_user_id, row.id));
+
+      await this.applyEffects(finalRow);
+
+      return { kind: 'exhausted', run: toRunView(finalRow), errorCode: null };
+    }
+
+    const usage = await this.readUsage(row.id, true);
+    const updated = await this.repository.terminalize({
+      runId: row.id,
+      ownerUserId: row.owner_user_id,
+      status: 'execution_uncertain',
+      dispatchState: null,
+      errorCode,
+      usage,
+      lastEventSeq: 0,
+      startExecution: true,
+    });
+
+    const finalRow =
+      updated ?? (await this.repository.loadOwnedRun(row.owner_user_id, row.id));
+
+    await this.applyEffects(finalRow);
+
+    return { kind: 'exhausted', run: toRunView(finalRow), errorCode };
   }
 
   private async buildPersistedRequest(run: RunRow): Promise<CreateRunRequest> {
