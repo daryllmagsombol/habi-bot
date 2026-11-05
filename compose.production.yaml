@@ -1,8 +1,14 @@
 # Production stack for Habi (H-011). Authoring only: nothing is deployed, no
 # production host is live, and no domain, certificate, or registry is assumed.
 #
+# This is a P1 deployment *candidate*, not a P1 deployment. Every P1 gate below
+# defaults to off, so this file never silently enables a P1 surface; an owner
+# must set each value explicitly (see docs/runbooks/deployment.md). With all
+# gates off the stack is a P0 shell that serves /health and the web shell only.
+#
 # Images must come from the CI build, not from a local working tree:
 #   docker compose -f compose.production.yaml pull
+#   docker compose -f compose.production.yaml --profile tools run --rm migrate
 #   docker compose -f compose.production.yaml up -d --no-build --wait
 #
 # HABI_IMAGE_TAG is required here, unlike staging, so a production start always
@@ -10,8 +16,10 @@
 # latest/staging. The `build:` blocks mirror staging so both files can be
 # diffed and validated locally; never pass --build for production.
 #
-# Secrets and domain-dependent configuration are injected at deploy time. See
-# deploy/README.md and deploy/production.env.example.
+# Every value marked with `:?` is required and fails fast when it is missing
+# instead of booting a half-configured stack. Secrets and domain-dependent
+# configuration are injected at deploy time; see deploy/README.md,
+# deploy/production.env.example, and docs/runbooks/deployment.md.
 name: habi-production
 
 x-logging: &default-logging
@@ -43,6 +51,37 @@ services:
     cpus: 0.50
     logging: *default-logging
 
+  # One-shot schema migration, run explicitly and never by `up`:
+  #   docker compose -f compose.production.yaml --profile tools run --rm migrate
+  # It runs the real runner from the released checkout against the stack
+  # database, so the API and worker probes can assert the migrated schema
+  # exists. The image carries no migrations; they are mounted from the
+  # checkout, which must be the same revision as HABI_IMAGE_TAG.
+  migrate:
+    profiles: ["tools"]
+    image: habi-api:${HABI_IMAGE_TAG:?set HABI_IMAGE_TAG to the CI-built immutable tag (for example a commit SHA); production never builds locally}
+    pull_policy: always
+    build:
+      context: .
+      dockerfile: apps/backend/Dockerfile
+      target: api
+    restart: "no"
+    entrypoint: ["node", "/app/scripts/db/migrate.mjs"]
+    volumes:
+      - ./migrations:/app/migrations:ro
+      - ./scripts/db:/app/scripts/db:ro
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${POSTGRES_USER:-habi}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD for production (injected at deploy time; never commit it)}@postgres:5432/${POSTGRES_DB:-habi}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - internal
+    mem_limit: 128m
+    cpus: 0.25
+    logging: *default-logging
+
   api:
     image: habi-api:${HABI_IMAGE_TAG:?set HABI_IMAGE_TAG to the CI-built immutable tag (for example a commit SHA); production never builds locally}
     # Always resolve the named tag from its published source; a locally built
@@ -57,6 +96,21 @@ services:
       NODE_ENV: production
       HOST: 0.0.0.0
       PORT: "3001"
+      # The compose database service, never localhost. The password is the same
+      # required secret postgres receives, embedded in the URL, so it must be
+      # URL-safe (letters, digits, -_.~) or percent-encoded.
+      DATABASE_URL: postgresql://${POSTGRES_USER:-habi}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD for production (injected at deploy time; never commit it)}@postgres:5432/${POSTGRES_DB:-habi}
+      # P1 gates, all closed unless the owner opens them. 1 enables the
+      # surface, 0 keeps it out of the application entirely; any other value is
+      # also treated as off. These are composition gates, not product
+      # authentication: /api routes still require an H-017 session.
+      HABI_AUTH_SPIKE: ${HABI_AUTH_SPIKE:-0}
+      HABI_SESSION_SPIKE: ${HABI_SESSION_SPIKE:-0}
+      HABI_P1_API: ${HABI_P1_API:-0}
+      # Invite-only by default. HABI_REGISTRATION_MODE=closed refuses signups;
+      # public registration is not implemented.
+      HABI_REGISTRATION_MODE: ${HABI_REGISTRATION_MODE:-invite}
+      HABI_LOG_LEVEL: ${HABI_LOG_LEVEL:-info}
     # Loopback-only by default. Public routing, TLS, and header handling need an
     # owner-chosen reverse proxy/domain and are not configured here.
     ports:
@@ -68,13 +122,23 @@ services:
       - internal
       - edge
     healthcheck:
-      test:
-        [
-          "CMD",
-          "node",
-          "-e",
-          "fetch('http://127.0.0.1:3001/health').then((response) => { if (!response.ok) process.exit(1); }).catch(() => process.exit(1));",
-        ]
+      # Readiness, not liveness: /health alone reports a flag-off API as
+      # healthy, so this probe also asserts that the /api surface matches
+      # HABI_P1_API and, when it is on, that the database answers with the
+      # migrated schema. A mounted but unauthenticated route answers 401; a
+      # missing surface answers 404.
+      test: >-
+        node -e 'const check = async () => {
+        const base = "http://127.0.0.1:3001";
+        if (!(await fetch(base + "/health")).ok) throw new Error("health");
+        const enabled = process.env.HABI_P1_API === "1";
+        const surface = (await fetch(base + "/api/bots")).status;
+        if (enabled ? surface !== 401 : surface !== 404) throw new Error("p1 surface " + surface);
+        if (!enabled) return;
+        const { Pool } = require("pg");
+        const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 1, connectionTimeoutMillis: 3000 });
+        try { await pool.query("select 1 from schema_migrations limit 0"); } finally { await pool.end(); }
+        }; check().catch(() => process.exit(1));'
       interval: 10s
       timeout: 5s
       retries: 6
@@ -94,13 +158,42 @@ services:
     restart: unless-stopped
     environment:
       NODE_ENV: production
+      DATABASE_URL: postgresql://${POSTGRES_USER:-habi}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD for production (injected at deploy time; never commit it)}@postgres:5432/${POSTGRES_DB:-habi}
+      # Closed by default: enabling the runner is an owner decision. With 1 the
+      # worker claims Runs, and HABI_HERMES_BASE_URL plus
+      # HABI_HERMES_GATEWAY_KEY must both be set; the probe fails without them
+      # and the runner throws when only one is present.
+      HABI_P1_WORKER: ${HABI_P1_WORKER:-0}
+      HABI_HERMES_BASE_URL: ${HABI_HERMES_BASE_URL:-}
+      HABI_HERMES_GATEWAY_KEY: ${HABI_HERMES_GATEWAY_KEY:-}
+      # Optional adapter tunables; an empty value means "use the built-in
+      # default" and is never an invalid number.
+      HABI_HERMES_REQUEST_TIMEOUT_MS: ${HABI_HERMES_REQUEST_TIMEOUT_MS:-}
+      HABI_HERMES_EVENT_IDLE_TIMEOUT_MS: ${HABI_HERMES_EVENT_IDLE_TIMEOUT_MS:-}
+      HABI_LOG_LEVEL: ${HABI_LOG_LEVEL:-info}
     depends_on:
       postgres:
         condition: service_healthy
     networks:
       - internal
-    # No ports and no healthcheck: the worker is inert and exposes no listener,
-    # so a liveness probe would only assert that Node can exit cleanly.
+    # No ports. The worker exposes no listener, so this probe cannot assert
+    # claim-loop progress; it asserts what is observable from outside: when the
+    # runner is enabled, the provider pair is present and the database is
+    # reachable with the migrated schema. A flag-off worker has nothing to
+    # prove and is reported healthy as intentionally inert.
+    healthcheck:
+      test: >-
+        node -e 'const check = async () => {
+        if (process.env.HABI_P1_WORKER !== "1") return;
+        if (!process.env.HABI_HERMES_BASE_URL || !process.env.HABI_HERMES_GATEWAY_KEY) throw new Error("provider config");
+        const { Pool } = require("pg");
+        const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 1, connectionTimeoutMillis: 3000 });
+        try { await pool.query("select 1 from schema_migrations limit 0"); } finally { await pool.end(); }
+        }; check().catch(() => process.exit(1));'
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 20s
     stop_grace_period: 20s
     mem_limit: 384m
     cpus: 0.50
@@ -116,6 +209,17 @@ services:
     restart: unless-stopped
     environment:
       NODE_ENV: production
+      # Server-only origins. The browser calls the same-origin /api and
+      # /api/auth BFF routes, which forward here by compose service name; no
+      # origin or credential reaches client code. The API's CSRF guard compares
+      # the forwarded Origin with its Host header, so both values must name the
+      # API exactly as its clients reach it.
+      HABI_API_URL: ${HABI_API_URL:-http://api:3001}
+      HABI_AUTH_API_URL: ${HABI_AUTH_API_URL:-http://api:3001}
+      # Mirrors the API gate so the health probe asserts the same mode. With
+      # the gate closed the web shell still serves, but its data routes return
+      # the API's 404; that is the honest flag-off state, not a working P1 UI.
+      HABI_P1_API: ${HABI_P1_API:-0}
     ports:
       - "127.0.0.1:${WEB_HOST_PORT:-3000}:3000"
     depends_on:
@@ -124,13 +228,16 @@ services:
     networks:
       - edge
     healthcheck:
-      test:
-        [
-          "CMD",
-          "node",
-          "-e",
-          "fetch('http://127.0.0.1:3000/').then((response) => { if (!response.ok) process.exit(1); }).catch(() => process.exit(1));",
-        ]
+      # The page must render, and with P1 on the same-origin BFF must actually
+      # reach the API: 401/403 is a live upstream, 503/502 means the web has no
+      # usable API origin, and 404 means the API gate does not match this one.
+      test: >-
+        node -e 'const check = async () => {
+        if (!(await fetch("http://127.0.0.1:3000/")).ok) throw new Error("web");
+        if (process.env.HABI_P1_API !== "1") return;
+        const status = (await fetch("http://127.0.0.1:3000/api/bots")).status;
+        if (status !== 401 && status !== 403) throw new Error("bff " + status);
+        }; check().catch(() => process.exit(1));'
       interval: 10s
       timeout: 5s
       retries: 6

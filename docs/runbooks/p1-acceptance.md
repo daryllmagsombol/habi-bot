@@ -185,10 +185,12 @@ browser; browser/mobile rendering remains a web-lane check.
    silent success.
 6. **Artifact, attachment, memory, skill, and search routes are not exposed over
    HTTP.** Their isolation is proven at the service layer.
-7. **`compose.staging.yaml` in this commit does not pass `DATABASE_URL` or the P1
-   flags to the containers.** A stack started from that file would expose only
-   `/health`; this is a deployment blocker, not something the local harness can
-   fix.
+7. **No stack has been started from `compose.staging.yaml` or
+   `compose.production.yaml`.** Those files now pass `DATABASE_URL`, the P1
+   flags, the provider pair and the web's API origins, and their readiness
+   probes assert the real surface rather than `/health`, but a deployment host,
+   registry and immutable image tag are still owner-held. The local harness
+   cannot substitute for a deployed run.
 
 ## P1 exit
 

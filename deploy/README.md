@@ -47,7 +47,7 @@ The env examples are named `deploy/*.env.example` rather than `.env.staging.exam
 - `api` and `worker` get `stop_grace_period: 20s` so SIGTERM shutdown is not cut off at the 10 s default.
 - Startup order: `postgres` healthy → `api` and `worker`; `api` healthy → `web`.
 
-The worker has no health check on purpose. It is inert and exposes no listener, so any probe would only assert that Node can exit; a meaningful liveness signal belongs with the first real job. A crashed worker still shows as exited and is restarted by `restart: unless-stopped`, so failures are visible, but liveness is not asserted.
+The worker's probe depends on the stack. With `HABI_P1_WORKER=0` it is inert and exposes no listener, so a health check would only assert that Node can exit; a crashed worker still shows as exited and is restarted by `restart: unless-stopped`, but liveness is not asserted. With `HABI_P1_WORKER=1` the stack runs `scripts/ci/probe-worker.mjs`, which fails when the runner cannot reach the database or when either Hermes value is missing, so "healthy" means it can actually claim work. See [the deployment runbook](../docs/runbooks/deployment.md).
 
 ## Staging versus production
 

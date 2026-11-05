@@ -47,6 +47,9 @@ jobs:
       - name: Test SonarQube workflow checks
         run: node --test scripts/ci/sonarqube.test.mjs
 
+      - name: Test compose stack definitions
+        run: node --test scripts/ci/compose.test.mjs
+
   # Separate from `verify`: image builds are slow and use the Docker daemon, but
   # they must not change the foundation job's contract. No registry login, no
   # provider secret, and no third-party action, so pull-request validation stays
