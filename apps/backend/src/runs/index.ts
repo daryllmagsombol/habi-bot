@@ -36,11 +36,15 @@ export {
   fingerprintRunRequest,
 } from './validation.js';
 export {
+  CANCEL_CLAIM_TTL_MS,
   isTerminalRunStatus,
+  MAX_CANCEL_ATTEMPTS,
   RUN_NON_TERMINAL_STATUSES,
   RUN_TERMINAL_STATUSES,
 } from './types.js';
 export type {
+  CancelIntentKind,
+  CancelIntentOutcome,
   CreateRunInput,
   CreateRunOutcome,
   PersistedRunStatus,
