@@ -95,10 +95,11 @@ not.
 
 | Group | Contains | Reused by |
 | --- | --- | --- |
-| `components/ui` | `Avatar`, `Badge`, `Pill`, `Button`, `ButtonLink`, `IconButton`, `IconButtonLink`, `Card`, `ListRow`, `MetaRow`, `SectionHeader`, `Segmented`, `Sheet`, `Toolbar`, `Container`, `Stack`, `Inline`, `TextField`, `TextArea`, `FormMessage`, `EmptyState`, `Skeleton`, `SkeletonText`, `PageHeader`, `SkipLink`, `icons` | every screen |
+| `components/ui` | `Avatar`, `Badge`, `Pill`, `Button`, `ButtonLink`, `IconButton`, `IconButtonLink`, `Card`, `ListRow`, `MetaRow`, `SectionHeader`, `Segmented`, `Sheet`, `Toolbar`, `Container`, `Stack`, `Inline`, `TextField`, `TextArea`, `SelectField`, `FormMessage`, `EmptyState`, `Skeleton`, `SkeletonText`, `PageHeader`, `SkipLink`, `icons` | every screen |
 | `components/bots` | `BotCard`, `NewBotCard`, `BotGallery`, `BotIdentity`, `BotForm`, `BotFormCard`, `botTone` (helper) | gallery, Bot page |
 | `components/threads` | `ThreadListCard`, `ThreadRow`, `ThreadCard`, `ThreadConversation`, `MessageBubble`, `RunStrip`, `Composer`, `ThreadForm`, `ThreadActions` | Bot page, `/threads` |
-| `components/panels` | `PanelCard`, `PanelSwitch`, `DocumentPanel`, `ContextPanel`, `MemoryCard`, `MemoryGates`, `MemoryComposer`, `ArtifactPanel`, `SkillsPanel`, `SearchPanel` | Bot page, panel routes |
+| `components/panels` | `PanelCard`, `PanelSwitch`, `DocumentPanel`, `ContextPanel`, `MemoryCard`, `MemoryGates`, `MemoryComposer`, `ArtifactPanel`, `ArtifactForm`, `SkillsPanel`, `SkillForm`, `SearchPanel`, `PaginationFooter` | Bot page, panel routes |
+| `components/account` | `AccountExportCard`, `AccountDeleteCard`, `ACCOUNT_BACKUP_DISCLOSURE` | `/account` |
 | `components/chrome` (root files today) | `app-bar`, `wordmark`, `site-shell`, `weave-figure` | every route |
 | `components/theme` | `theme-toggle`, `theme` (store) | app bar, site shell |
 | `lib` | `preview-data`, `motion`, `links` | routes only |
@@ -123,6 +124,13 @@ props), receives one `WorkspaceData` object, and passes slices to the groups.
 - `ArtifactPanel`, `SkillsPanel` and `SearchPanel` are the content surfaces the live API provides.
   They render one page of results and never invent a record the API did not return; a missing
   attachment content route renders "Not stored on this server" rather than sample text.
+- `PaginationFooter` is the one load-more affordance. Every cursor list uses it: it renders nothing
+  when `nextCursor` is null, shows a busy state while a page is in flight, and appends without
+  moving scroll or the current selection. Never invent a cursor for a surface that has none.
+- `ArtifactForm` and `SkillForm` enforce the API bounds before submitting (artifact content 100 KB
+  over transport; skill name 1–80, description ≤500, body ≤64 KiB) and state the bound in the hint.
+- `components/account` owns the destructive surface: `ACCOUNT_BACKUP_DISCLOSURE` is the single
+  source of the retention wording, so the 184-day claim cannot drift between copy and API.
 
 ## 4. Composition rules
 
