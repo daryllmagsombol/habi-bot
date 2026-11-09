@@ -2,18 +2,24 @@
 // scripts/backup/pg-restore-rehearsal.sh.
 //
 // The test starts a throwaway postgres:18.6-alpine container on a random
-// loopback port, seeds a synthetic table, backs it up, changes the source,
-// restores into a new disposable database, and asserts the restored rows match
-// the backup rather than the mutated source.
+// loopback port, seeds a synthetic table, generates a throwaway age keypair,
+// backs the table up into an encrypted archive, changes the source, restores
+// the archive with the private key into a new disposable database, and asserts
+// the restored rows match the backup rather than the mutated source. It also
+// asserts that the published file is ciphertext, that restore without the key
+// fails, that the wrong key and corrupt ciphertext fail, and that cleanup
+// leaves no container, disposable database, or temp file.
 //
 // It is not wired into pnpm verify:foundation (no package.json or CI change was
 // in scope for H-012). Run it directly:
 //
 //   node --test scripts/backup/backup.test.mjs
 //
-// It skips cleanly when Docker or the PostgreSQL client tools are unavailable.
-// It never touches the Compose databases or any existing cluster: it creates
-// its own container and database names and removes them on the way out.
+// It skips cleanly when Docker, the PostgreSQL client tools, or age/age-keygen
+// are unavailable. It never touches the Compose databases or any existing
+// cluster: it creates its own container and database names and removes them on
+// the way out. The age keypair is generated in the test's temp directory and is
+// never a real key.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
@@ -63,6 +69,10 @@ function postgresClientAvailable() {
   return PG_CLIENTS.every((tool) => run(tool, ['--version']).status === 0);
 }
 
+function ageAvailable() {
+  return ['age', 'age-keygen'].every((tool) => run(tool, ['--version']).status === 0);
+}
+
 function imageAvailable() {
   if (run('docker', ['image', 'inspect', IMAGE]).status === 0) {
     return true;
@@ -79,6 +89,10 @@ function skipReason() {
 
   if (!postgresClientAvailable()) {
     return `PostgreSQL client tools are not on PATH (${PG_CLIENTS.join(', ')}); skipping the backup rehearsal`;
+  }
+
+  if (!ageAvailable()) {
+    return 'age and age-keygen are not on PATH; skipping the encrypted backup rehearsal';
   }
 
   if (!imageAvailable()) {
@@ -112,6 +126,19 @@ test('backup and restore rehearsal against a disposable PostgreSQL container', {
     PGCONNECT_TIMEOUT: '5',
     TMPDIR: scriptTmp,
   };
+
+  // Throwaway keypair for this run only. The private key stays in the test's
+  // temp directory and is removed with it; no real key is ever used.
+  const identityFile = path.join(workRoot, 'backup.key');
+  const keygen = run('age-keygen', ['-o', identityFile]);
+  assert.equal(keygen.status, 0, `age-keygen failed: ${keygen.stderr}`);
+  const recipientMatch = readFileSync(identityFile, 'utf8').match(/^# public key: (age1\S+)$/m);
+  assert.ok(recipientMatch, 'age-keygen did not report a public key');
+  const recipient = recipientMatch[1];
+
+  const wrongIdentityFile = path.join(workRoot, 'wrong.key');
+  const wrongKeygen = run('age-keygen', ['-o', wrongIdentityFile]);
+  assert.equal(wrongKeygen.status, 0, `second age-keygen failed: ${wrongKeygen.stderr}`);
 
   const psqlArgs = (database) => [
     '--no-password',
@@ -196,7 +223,13 @@ test('backup and restore rehearsal against a disposable PostgreSQL container', {
   );
   assert.equal(seeded.status, 0, `seed failed: ${seeded.stderr}`);
 
-  const backup = run(
+  // No recipient must fail before touching the database: plaintext backups are
+  // not supported, so there is no silent unsafe fallback.
+  const noRecipientEnv = { ...baseEnv };
+  delete noRecipientEnv.BACKUP_RECIPIENT;
+  delete noRecipientEnv.BACKUP_RECIPIENT_FILE;
+
+  const noRecipient = run(
     BACKUP_SCRIPT,
     [
       '--host',
@@ -210,6 +243,65 @@ test('backup and restore rehearsal against a disposable PostgreSQL container', {
       '--output-dir',
       backupDir,
     ],
+    { env: noRecipientEnv },
+  );
+
+  assert.notEqual(noRecipient.status, 0, 'backup without a recipient must fail');
+  assert.match(
+    noRecipient.stdout + noRecipient.stderr,
+    /no backup recipient/,
+    'backup should explain that a recipient public key is required',
+  );
+  assert.equal(
+    existsSync(backupDir) ? readdirSync(backupDir).length : 0,
+    0,
+    'a rejected backup must not leave files behind',
+  );
+
+  // A failed dump must not leave a partial archive looking publishable.
+  const failedDump = run(
+    BACKUP_SCRIPT,
+    [
+      '--host',
+      '127.0.0.1',
+      '--port',
+      port,
+      '--database',
+      'habi_no_such_database',
+      '--user',
+      user,
+      '--recipient',
+      recipient,
+      '--output-dir',
+      backupDir,
+    ],
+    { env: baseEnv },
+  );
+
+  assert.notEqual(failedDump.status, 0, 'a dump of a missing database must fail');
+  assert.match(failedDump.stdout + failedDump.stderr, /pg_dump failed/);
+  assert.equal(
+    existsSync(backupDir) ? readdirSync(backupDir).length : 0,
+    0,
+    'a failed dump must not leave a partial archive or plaintext dotfile',
+  );
+
+  const backup = run(
+    BACKUP_SCRIPT,
+    [
+      '--host',
+      '127.0.0.1',
+      '--port',
+      port,
+      '--database',
+      sourceDb,
+      '--user',
+      user,
+      '--recipient',
+      recipient,
+      '--output-dir',
+      backupDir,
+    ],
     { env: { ...baseEnv, BACKUP_COMPRESS_LEVEL: '6' } },
   );
 
@@ -220,26 +312,52 @@ test('backup and restore rehearsal against a disposable PostgreSQL container', {
   assert.equal(backup.stdout.includes(password), false, 'backup printed the password');
   assert.equal(backup.stderr.includes(password), false, 'backup printed the password to stderr');
 
-  const dumpNames = readdirSync(backupDir).filter((name) => name.endsWith('.dump'));
+  const dumpNames = readdirSync(backupDir).filter((name) => name.endsWith('.dump.age'));
   assert.equal(dumpNames.length, 1, `expected exactly one archive, found ${dumpNames.join(', ')}`);
 
   const archive = path.join(backupDir, dumpNames[0]);
   const checksumFile = `${archive}.sha256`;
+  const verifiedFile = `${archive}.verified`;
 
   assert.ok(existsSync(checksumFile), 'checksum sidecar was not created');
+  assert.ok(existsSync(verifiedFile), 'verification receipt was not created');
   assert.ok(statSync(archive).size > 0, 'archive is empty');
   assert.equal(statSync(archive).mode & 0o777, 0o600, 'archive must be owner-only');
   assert.equal(statSync(checksumFile).mode & 0o777, 0o600, 'checksum must be owner-only');
+  assert.equal(statSync(verifiedFile).mode & 0o777, 0o600, 'receipt must be owner-only');
 
-  const archiveHash = createHash('sha256').update(readFileSync(archive)).digest('hex');
+  // The published file is ciphertext, not a pg_dump archive. The sidecar hashes
+  // the ciphertext, and the age header is present.
+  const ciphertext = readFileSync(archive);
+  assert.equal(ciphertext.subarray(0, 21).toString(), 'age-encryption.org/v1');
+  assert.equal(ciphertext.includes('alpha'), false, 'plaintext row data leaked into the ciphertext');
+  assert.equal(
+    ciphertext.includes('rehearsal_items'),
+    false,
+    'plaintext table name leaked into the ciphertext',
+  );
+  assert.notEqual(
+    run('pg_restore', ['--list', archive]).status,
+    0,
+    'the encrypted archive must not be readable by pg_restore without decryption',
+  );
+
+  const archiveHash = createHash('sha256').update(ciphertext).digest('hex');
   const [declaredHash, declaredName] = readFileSync(checksumFile, 'utf8').trim().split(/\s+/);
 
-  assert.equal(declaredHash, archiveHash, 'sidecar checksum does not match the archive');
+  assert.equal(declaredHash, archiveHash, 'sidecar checksum does not match the ciphertext');
   assert.equal(declaredName, dumpNames[0], 'sidecar does not name the archive');
-  assert.equal(
-    readdirSync(backupDir).filter((name) => name.includes('.partial')).length,
-    0,
-    'backup left a partial file behind',
+
+  const receipt = readFileSync(verifiedFile, 'utf8');
+  assert.match(receipt, /^format=habi-backup-verified-v1$/m);
+  assert.match(receipt, new RegExp(`^archive=${dumpNames[0]}$`, 'm'));
+  assert.match(receipt, new RegExp(`^sha256=${archiveHash}$`, 'm'));
+  assert.match(receipt, /^toc_entries=[0-9]+$/m);
+
+  assert.deepEqual(
+    readdirSync(backupDir).sort(),
+    [dumpNames[0], `${dumpNames[0]}.sha256`, `${dumpNames[0]}.verified`].sort(),
+    'backup left an unexpected file (partial plaintext or ciphertext) behind',
   );
 
   // Change the source after the backup: a restore must return the backup rows,
@@ -250,11 +368,64 @@ test('backup and restore rehearsal against a disposable PostgreSQL container', {
   const sourceCount = sourceSql('SELECT count(*) FROM rehearsal_items;');
   assert.equal(sourceCount.stdout.trim(), '3');
 
+  // Without the private key the rehearsal must fail loudly and create nothing.
+  const noIdentity = run(
+    REHEARSAL_SCRIPT,
+    [
+      '--archive',
+      archive,
+      '--host',
+      '127.0.0.1',
+      '--port',
+      port,
+      '--user',
+      user,
+      '--expect',
+      'public.rehearsal_items=3',
+    ],
+    { env: baseEnv },
+  );
+
+  assert.equal(noIdentity.status, 2, 'a missing identity must be a usage error');
+  assert.match(noIdentity.stdout + noIdentity.stderr, /no decryption identity/);
+  assert.equal(rehearsalDatabases(), '0', 'missing identity must not create a database');
+  assert.deepEqual(readdirSync(scriptTmp), [], 'missing identity must not leave temp files');
+
+  // The wrong private key must fail at decryption, not restore garbage.
+  const wrongIdentity = run(
+    REHEARSAL_SCRIPT,
+    [
+      '--archive',
+      archive,
+      '--identity',
+      wrongIdentityFile,
+      '--host',
+      '127.0.0.1',
+      '--port',
+      port,
+      '--user',
+      user,
+      '--expect',
+      'public.rehearsal_items=3',
+    ],
+    { env: baseEnv },
+  );
+
+  assert.notEqual(wrongIdentity.status, 0, 'a wrong identity must fail the rehearsal');
+  assert.match(
+    wrongIdentity.stdout + wrongIdentity.stderr,
+    /decryption failed/,
+    'wrong-key failure should name decryption, not a restore error',
+  );
+  assert.equal(rehearsalDatabases(), '0', 'wrong identity must not create a database');
+
   const rehearsal = run(
     REHEARSAL_SCRIPT,
     [
       '--archive',
       archive,
+      '--identity',
+      identityFile,
       '--host',
       '127.0.0.1',
       '--port',
@@ -289,6 +460,8 @@ test('backup and restore rehearsal against a disposable PostgreSQL container', {
       port,
       '--user',
       user,
+      '--identity',
+      identityFile,
       '--expect',
       'public.rehearsal_items=999',
     ],
@@ -312,6 +485,8 @@ test('backup and restore rehearsal against a disposable PostgreSQL container', {
       port,
       '--user',
       user,
+      '--identity',
+      identityFile,
       '--expect',
       'public.no_such_table=0',
     ],
@@ -349,6 +524,8 @@ test('backup and restore rehearsal against a disposable PostgreSQL container', {
       port,
       '--user',
       user,
+      '--identity',
+      identityFile,
       '--expect',
       'public.rehearsal_items=3',
     ],
@@ -358,8 +535,8 @@ test('backup and restore rehearsal against a disposable PostgreSQL container', {
   assert.notEqual(corruptRun.status, 0, 'a corrupt archive must fail the rehearsal');
   assert.match(
     corruptRun.stdout + corruptRun.stderr,
-    /not a readable pg_restore archive|error: pg_restore/,
-    'corrupt archive failure should explain that the archive is unreadable',
+    /decryption failed/,
+    'corrupt ciphertext failure should name decryption',
   );
   assert.equal(rehearsalDatabases(), '0', 'corrupt archive run left a database behind');
   assert.deepEqual(readdirSync(scriptTmp), [], 'corrupt archive run left temp files behind');
@@ -378,6 +555,8 @@ test('backup and restore rehearsal against a disposable PostgreSQL container', {
       port,
       '--user',
       user,
+      '--identity',
+      identityFile,
       '--expect',
       'public.rehearsal_items=3',
     ],
@@ -402,6 +581,8 @@ test('backup and restore rehearsal against a disposable PostgreSQL container', {
       port,
       '--user',
       user,
+      '--identity',
+      identityFile,
       '--expect',
       'public.rehearsal_items=3',
     ],

@@ -7,13 +7,21 @@
  * malformed. Validation codes and same-owner conflicts are distinct only after
  * ownership has been resolved by the repository query itself.
  *
- * Codes added by the composition layer describe transport/wiring, not product
- * policy:
+ * Codes added by this composition layer describe transport and wiring, not
+ * product policy:
  *
- *   - `api_unavailable` (503): the flag is on but no database is configured.
+ *   - `api_unavailable` (503): the flag is on but no database or attachment
+ *     storage root is configured.
+ *   - `unsupported_media_type` (415): the attachment exists and is owned by the
+ *     caller, but its content type is not one this text route serves. Ownership
+ *     was proven first, so this cannot enumerate another user's uploads.
  *   - `account_storage_unavailable` (503): an account deletion has attachment
  *     rows but this process has no private attachment-storage root, so it
  *     cannot honestly remove the bytes. Nothing has been deleted at that point.
+ *
+ * Owner-visible lifecycle failures from the artifact, attachment, and skill
+ * services already carry their own code. They are mapped here rather than
+ * leaking a Nest 500 without the shared envelope.
  *
  * A dispatched cancellation is not an error: the API records a durable intent
  * and returns the Run's current state (see `ApiService.cancelRun`).
@@ -22,15 +30,29 @@ import { Catch } from '@nestjs/common';
 import type { ArgumentsHost, ExceptionFilter } from '@nestjs/common';
 import type { Response } from 'express';
 import { AccountStorageUnavailableError } from '../account/account-errors.js';
+import { ArtifactIntegrityError } from '../artifacts/errors.js';
+import {
+  AttachmentIntegrityError,
+  AttachmentRejectedError,
+} from '../attachments/errors.js';
 import {
   PersistenceError,
   type PersistenceErrorCode,
 } from '../persistence/errors.js';
+import {
+  SkillNameConflictError,
+  SkillUnavailableError,
+  SkillVersionConflictError,
+} from '../skills/errors.js';
 
-export type ApiErrorCode = 'api_unavailable' | 'account_storage_unavailable';
+export type ApiErrorCode =
+  | 'api_unavailable'
+  | 'unsupported_media_type'
+  | 'account_storage_unavailable';
 
 const STATUS_BY_API_CODE: Readonly<Record<ApiErrorCode, number>> = {
   api_unavailable: 503,
+  unsupported_media_type: 415,
   account_storage_unavailable: 503,
 };
 
@@ -45,6 +67,15 @@ const STATUS_BY_PERSISTENCE_CODE: Readonly<Record<PersistenceErrorCode, number>>
   message_tombstoned: 409,
   run_result_exists: 409,
   message_sequence_conflict: 409,
+};
+
+const STATUS_BY_DOMAIN_CODE: Readonly<Record<string, number>> = {
+  skill_unavailable: 409,
+  skill_name_conflict: 409,
+  skill_version_conflict: 409,
+  attachment_rejected: 409,
+  artifact_integrity: 500,
+  attachment_integrity: 500,
 };
 
 export interface ApiErrorBody {
@@ -72,20 +103,61 @@ export function statusForPersistenceCode(code: PersistenceErrorCode): number {
  * Nest's own `HttpException`s (401/403 from the session guards, 400 from the
  * body parser) are deliberately not caught and keep their existing semantics.
  */
-@Catch(PersistenceError, ApiError, AccountStorageUnavailableError)
+@Catch(
+  PersistenceError,
+  ApiError,
+  SkillUnavailableError,
+  SkillNameConflictError,
+  SkillVersionConflictError,
+  AttachmentRejectedError,
+  ArtifactIntegrityError,
+  AttachmentIntegrityError,
+  AccountStorageUnavailableError,
+)
 export class ApiErrorFilter implements ExceptionFilter {
   catch(
-    error: PersistenceError | ApiError | AccountStorageUnavailableError,
+    error:
+      | PersistenceError
+      | ApiError
+      | SkillUnavailableError
+      | SkillNameConflictError
+      | SkillVersionConflictError
+      | AttachmentRejectedError
+      | ArtifactIntegrityError
+      | AttachmentIntegrityError
+      | AccountStorageUnavailableError,
     host: ArgumentsHost,
   ): void {
     const response = host.switchToHttp().getResponse<Response>();
-    const status =
-      error instanceof AccountStorageUnavailableError
-        ? STATUS_BY_API_CODE.account_storage_unavailable
-        : error instanceof ApiError
-          ? error.status
-          : statusForPersistenceCode(error.code);
+    const status = this.statusOf(error);
 
     response.status(status).json({ error: { code: error.code } });
+  }
+
+  private statusOf(
+    error:
+      | PersistenceError
+      | ApiError
+      | SkillUnavailableError
+      | SkillNameConflictError
+      | SkillVersionConflictError
+      | AttachmentRejectedError
+      | ArtifactIntegrityError
+      | AttachmentIntegrityError
+      | AccountStorageUnavailableError,
+  ): number {
+    if (error instanceof ApiError) {
+      return error.status;
+    }
+
+    if (error instanceof AccountStorageUnavailableError) {
+      return STATUS_BY_API_CODE.account_storage_unavailable;
+    }
+
+    if (error instanceof PersistenceError) {
+      return statusForPersistenceCode(error.code);
+    }
+
+    return STATUS_BY_DOMAIN_CODE[error.code] ?? 500;
   }
 }

@@ -1,10 +1,13 @@
 /**
  * H-025 scenario: backup and restore.
  *
- * Uses the H-012 scripts:
- *   - `pg-backup.sh` produces a checksummed custom-format archive;
- *   - `pg-restore-rehearsal.sh` restores it into a disposable database and
- *     asserts exact table counts, then drops that database by design.
+ * Uses the H-012 scripts, which publish age ciphertext only:
+ *   - `pg-backup.sh` dumps, verifies, and encrypts to `*.dump.age` with a
+ *     ciphertext SHA-256 sidecar and a `.verified` receipt. The VM needs only
+ *     the owner's public key.
+ *   - `pg-restore-rehearsal.sh` decrypts with the private key supplied at
+ *     invocation and asserts exact table counts, then drops its database.
+ * The scenario generates a throwaway keypair so no real key is ever involved.
  *
  * The rehearsal script drops its target, so ownership is verified on a second
  * direct restore into a database this harness owns. That restore uses the same
@@ -12,7 +15,7 @@
  */
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
-import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -79,12 +82,46 @@ export const backupRestoreScenario = {
       };
     }
 
+    const ageTools = run('bash', ['-lc', 'command -v age age-keygen'], { timeoutMs: 15_000 });
+
+    if (ageTools.status !== 0) {
+      return {
+        checks: [
+          blocked(
+            'H-012 encrypted backup and restore can run',
+            'age and age-keygen are not both available on PATH.',
+          ),
+        ],
+        blockers: ['The age encryption tools are missing on this host.'],
+      };
+    }
+
     const work = await mkdtemp(join(tmpdir(), 'habi-acceptance-backup-'));
     const backupDir = join(work, 'backups');
     const restoreDbName = `habi_acceptance_restore_${randomBytes(6).toString('hex')}`;
     let restoredPool;
     let archive;
     let sourceCounts;
+    const identityFile = join(work, 'throwaway-identity.txt');
+    const recipientFile = join(work, 'throwaway-recipient.txt');
+
+    // A throwaway keypair stands in for the owner's. The private key exists
+    // only inside `work` and is removed with it in `finally`.
+    const keygen = run('age-keygen', ['-o', identityFile], { timeoutMs: 15_000 });
+
+    if (keygen.status !== 0) {
+      throw new Error(`age-keygen failed (${keygen.status}): ${(keygen.stderr ?? '').trim()}`);
+    }
+
+    const identityText = await readFile(identityFile, 'utf8');
+    const publicKey = identityText
+      .split('\n')
+      .find((line) => line.startsWith('# public key:'))
+      ?.replace('# public key:', '')
+      .trim();
+
+    assert.ok(publicKey, 'age-keygen produced no public key');
+    await writeFile(recipientFile, `${publicKey}\n`, { mode: 0o600 });
 
     try {
       sourceCounts = {};
@@ -93,7 +130,7 @@ export const backupRestoreScenario = {
         sourceCounts[table] = await count(ctx.pool, table);
       }
 
-      await runCheck(checks, 'H-012 backup writes a checksummed archive', async () => {
+      await runCheck(checks, 'H-012 backup writes an encrypted, checksummed archive', async () => {
         const result = run(
           'bash',
           [
@@ -108,6 +145,8 @@ export const backupRestoreScenario = {
             ctx.postgres.user,
             '--output-dir',
             backupDir,
+            '--recipient-file',
+            recipientFile,
           ],
           { env: scriptEnv(ctx.postgres), timeoutMs: 120_000 },
         );
@@ -119,19 +158,30 @@ export const backupRestoreScenario = {
         }
 
         const files = await readdir(backupDir);
-        const dump = files.find((file) => file.endsWith('.dump'));
+        const dump = files.find((file) => file.endsWith('.dump.age'));
 
-        assert.ok(dump, 'no .dump archive was written');
+        assert.ok(dump, 'no .dump.age archive was written');
         archive = join(backupDir, dump);
 
-        const checksum = files.find((file) => file.endsWith('.dump.sha256'));
+        assert.ok(files.some((file) => file.endsWith('.dump.age.sha256')), 'no SHA-256 sidecar was written');
+        assert.ok(files.some((file) => file.endsWith('.dump.age.verified')), 'no verified receipt was written');
 
-        assert.ok(checksum, 'no SHA-256 sidecar was written');
+        const bytes = await readFile(archive);
+
+        assert.ok(
+          bytes.subarray(0, 30).toString('utf8').includes('age-encryption.org'),
+          'the archive does not carry an age header',
+        );
+        assert.ok(
+          !bytes.toString('latin1').includes('PostgreSQL database dump'),
+          'the archive contains plaintext dump bytes',
+        );
 
         return {
           archive: dump,
           checksumSidecar: true,
-          checksumValidatedBeforeRestore: true,
+          verifiedReceipt: true,
+          ciphertextNotPlaintext: true,
         };
       });
 
@@ -140,6 +190,8 @@ export const backupRestoreScenario = {
           join(REPOSITORY_ROOT, 'scripts/backup/pg-restore-rehearsal.sh'),
           '--archive',
           archive,
+          '--identity',
+          identityFile,
           '--host',
           ctx.postgres.host,
           '--port',
@@ -179,6 +231,17 @@ export const backupRestoreScenario = {
       await runCheck(checks, 'a second restore preserves every owner column', async () => {
         const restoredUrl = createDatabase(ctx.postgres, restoreDbName);
         const { Pool } = requireBackendModule('pg');
+        const plaintext = join(work, 'restored.dump');
+
+        const decrypt = run('age', ['-d', '-i', identityFile, '-o', plaintext, archive], {
+          timeoutMs: 60_000,
+        });
+
+        if (decrypt.status !== 0) {
+          throw new Error(
+            `age decryption failed (${decrypt.status}): ${(decrypt.stderr ?? '').trim().slice(0, 2000)}`,
+          );
+        }
 
         const restore = run(
           'pg_restore',
@@ -194,7 +257,7 @@ export const backupRestoreScenario = {
             '--exit-on-error',
             '--dbname',
             restoredUrl,
-            archive,
+            plaintext,
           ],
           { env: scriptEnv(ctx.postgres), timeoutMs: 120_000 },
         );
@@ -269,6 +332,7 @@ export const backupRestoreScenario = {
         sourceCounts,
         backupScript: 'scripts/backup/pg-backup.sh',
         restoreRehearsalScript: 'scripts/backup/pg-restore-rehearsal.sh',
+        encryption: 'age, throwaway keypair generated per run; the private key exists only inside the scenario temp dir',
       },
       residualRisks: [
         'The rehearsal script drops its disposable database; ownership assertions use a second direct pg_restore because the H-012 script has no keep-open mode.',

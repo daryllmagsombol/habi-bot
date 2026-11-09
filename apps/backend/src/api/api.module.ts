@@ -19,13 +19,14 @@ import { Module } from '@nestjs/common';
 import { AccountRuntime } from '../account/account-runtime.js';
 import { SessionCoreModule } from '../session/session-core.module.js';
 import { ApiAccountController } from './api-account.controller.js';
+import { ApiContentController } from './api-content.controller.js';
 import { ApiController } from './api.controller.js';
 import { ApiErrorFilter } from './api-errors.js';
 import { ApiRuntime } from './api-runtime.js';
 
 @Module({
   imports: [SessionCoreModule],
-  controllers: [ApiController, ApiAccountController],
+  controllers: [ApiController, ApiContentController, ApiAccountController],
   providers: [ApiErrorFilter, ApiRuntime, AccountRuntime],
 })
 export class P1ApiModule {}
