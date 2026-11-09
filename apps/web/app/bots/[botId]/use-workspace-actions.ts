@@ -949,7 +949,7 @@ export function useWorkspaceActions(
 
     const current = artifactDetail;
 
-    if (current === undefined || current.artifact.id !== artifactId) {
+    if (current?.artifact.id !== artifactId) {
       setArtifactMetadataError('Select the artifact again before editing its metadata.');
       return;
     }
