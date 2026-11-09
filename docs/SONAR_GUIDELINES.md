@@ -81,15 +81,18 @@ real gate, so the table and the scan carry it.
 | Callbacks nested past four levels | a named module- or hook-scope function | `S2004` | **lint** |
 | `str.replace(/…/g, …)` | `str.replaceAll(…)` | `S7781` | scan |
 | `rows[rows.length - 1]` | `rows.at(-1)` | `S7755` | scan |
-| `x === null \|\| x.y` | `x?.y` | `S6582` | scan |
+| `x === null \|\| x.y` | `x?.y` | `S6582` | **lint** |
 | `window.location`, `window.matchMedia` | `globalThis.…` in client components | `S7764` | scan |
 | Two `import` statements from one module | one statement | `S3863` | **lint** |
 | `?:` combined with `\| undefined` | one or the other: optional, or required-with-explicit-`undefined` | `S4782` | scan |
 | A wrapper that only returns `Number(x)` | `Number(x)` at the call site | `S7770` | scan |
 | `catch (caught)` | `catch (error_)` | `S7718` | scan |
 
-`S2004` and `S3863` are enforced by `packages/config/eslint/base.mjs`, so a wrong form fails `pnpm lint`
-before any scan runs. `S3358` is **not** lint-enforced on purpose: `no-nested-ternary` cannot tell a
+`S2004`, `S3863` and `S6582` are enforced by `packages/config/eslint/base.mjs`, so a wrong form fails
+`pnpm lint` before any scan runs. `S6582` runs under typed linting (`projectService`), opted into on
+2026-11-10 after guidance alone proved insufficient — an optional-chain miss landed in PR #107 with
+this table already on the page. The cost is that lint type-checks: about 4 s for `apps/web` and 2 s
+for `apps/backend` on this repository. `S3358` is **not** lint-enforced on purpose: `no-nested-ternary` cannot tell a
 value-position chain from JSX conditional rendering, so it would reject idiomatic React while the real
 gate stays silent — the table's guidance is the control there.
 
@@ -190,4 +193,5 @@ No validated findings have been recorded yet. Do not add hypothetical AI output,
 | Date | Source | Guideline | Evidence | Decision |
 |---|---|---|---|---|
 | 2026-11-09 | SonarQube PR analyses, PRs #86–#106 | Idiomatic-form table above (`S7778`, `S3776`, `S3358`, `S2004`, `S7781`, `S7755`, `S6582`, `S7764`, `S3863`, `S4782`, `S7770`, `S7718`) | ~100 findings across 12 PRs; each reproduced from a configured scan with rule key, file and line, and corrected by the documented rewrite | **Validated by owner 2026-11-09** — write-time guidance, not a new gate |
+| 2026-11-10 | SonarQube PR #107 (`S6582`, `use-workspace-actions.ts`) | Enable typed linting so `prefer-optional-chain` is enforceable | The idiom was already in the table below and the miss still landed: guidance alone did not hold. Two further `S6582` cases surfaced the moment `projectService` was enabled (`artifact-panel.tsx`, `skill-form.tsx`) | **Validated by owner 2026-11-10** — policy change; lint type-checks (4 s web / 2 s backend here) |
 | 2026-11-09 | SonarQube PR #103 hotspots `S5852` | Measure a backtracking report before accepting it; anchor `^`-anchored per-line patterns are linear | `0.20 / 0.40 / 0.80 ms` at 200k / 400k / 800k chars — linear; contrasted with `URL_CREDENTIALS` at `6.0 s` for 100 KB before anchoring | **Validated by owner 2026-11-09** |

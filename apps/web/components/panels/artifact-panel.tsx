@@ -219,7 +219,7 @@ export function ArtifactPanel({
 
   const bytes = utf8Bytes(draft);
   const overCap = bytes > ARTIFACT_CONTENT_MAX_BYTES;
-  const unchanged = detail !== undefined && draft === detail.content;
+  const unchanged = draft === detail?.content;
   const saving = busy === 'save';
   const canSave = detail !== undefined && !overCap && !unchanged && !saving;
 

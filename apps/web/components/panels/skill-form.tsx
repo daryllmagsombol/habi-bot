@@ -79,10 +79,9 @@ export function SkillForm({
   const editing = mode === 'edit';
   const unchanged =
     editing &&
-    initial !== undefined &&
-    name.trim() === initial.name.trim() &&
-    description.trim() === initial.description.trim() &&
-    bodyMarkdown === initial.bodyMarkdown;
+    name.trim() === initial?.name.trim() &&
+    description.trim() === initial?.description.trim() &&
+    bodyMarkdown === initial?.bodyMarkdown;
   const canSubmit = !pending && name.trim().length > 0 && !overCap && !unchanged;
 
   function submit(event: FormEvent<HTMLFormElement>) {

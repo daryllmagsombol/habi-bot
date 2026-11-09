@@ -26,7 +26,17 @@ export default tseslint.config(
   },
   {
     files: ['**/*.{ts,tsx}'],
+    languageOptions: {
+      parserOptions: {
+        // Typed linting, opted into 2026-11-10 so `prefer-optional-chain`
+        // (S6582) can be enforced. `projectService` discovers each package's
+        // tsconfig from the file being linted, so one shared base still works
+        // across workspaces.
+        projectService: true,
+      },
+    },
     rules: {
+      '@typescript-eslint/prefer-optional-chain': 'error',
       '@typescript-eslint/consistent-type-imports': [
         'error',
         { prefer: 'type-imports' },
@@ -52,10 +62,11 @@ export default tseslint.config(
    *
    * Deliberately absent, and why:
    *
-   *   - `prefer-optional-chain` (S6582): needs typed linting
-   *     (`parserOptions.project`), which this repository does not use.
-   *     Enabling that is a project-level decision with a real lint-runtime
-   *     cost, so the idiom stays guided and scanned rather than half-enforced.
+   *   - `prefer-optional-chain` (S6582) IS enforced, via typed linting. The
+   *     repository opted into `projectService` on 2026-11-10 because guidance
+   *     alone did not hold: an S6582 slipped into PR #107 after the table
+   *     documented it. The cost is that lint type-checks, so it is slower
+   *     than the untyped pass it replaces.
    *   - `no-nested-ternary` (S3358): it cannot tell a value-position chain
    *     from JSX conditional rendering. Sonar flags the first and not the
    *     second, so lint would reject idiomatic React while the actual gate
