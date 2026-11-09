@@ -7,7 +7,12 @@ export { ApiError, ApiErrorFilter, type ApiErrorCode } from './api-errors.js';
 export { P1ApiModule } from './api.module.js';
 export { ApiRuntime } from './api-runtime.js';
 export { ApiService } from './api-service.js';
-export type { BotListPage, PostMessageResult } from './api-service.js';
+export type {
+  BotListPage,
+  MemoryListPage,
+  PostMessageResult,
+  SearchResultPage,
+} from './api-service.js';
 export type { BotDetail, BotSummary } from './api-projection.js';
 export type {
   BotThreadPage,

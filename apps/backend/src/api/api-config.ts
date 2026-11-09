@@ -18,6 +18,13 @@ export const P1_API_FLAG = 'HABI_P1_API';
  */
 export const SSE_HEARTBEAT_ENV = 'HABI_P1_API_SSE_HEARTBEAT_MS';
 
+/**
+ * Private attachment storage root for the read route. There is no default: a
+ * flag-on process with no root can read attachment metadata but answers
+ * `503 api_unavailable` for bytes rather than guessing a filesystem path.
+ */
+export const ATTACHMENT_STORAGE_ROOT_ENV = 'HABI_ATTACHMENT_STORAGE_ROOT';
+
 export const DEFAULT_SSE_HEARTBEAT_MS = 15_000;
 export const MIN_SSE_HEARTBEAT_MS = 250;
 export const MAX_SSE_HEARTBEAT_MS = 60_000;

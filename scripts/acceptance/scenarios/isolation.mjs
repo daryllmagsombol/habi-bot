@@ -1,12 +1,13 @@
 /**
  * H-025 scenario: two-account isolation.
  *
- * Exercises every owner-scoped HTTP surface the P1 API exposes, then the
- * services whose routes are not wired yet. A cross-user read must be the same
- * `404 {"error":{"code":"not_found"}}` as an unknown or malformed id; a
- * service-level cross-user read must be `PersistenceNotFoundError`.
+ * Exercises every owner-scoped HTTP surface the P1 API exposes. A cross-user
+ * read must be the same `404 {"error":{"code":"not_found"}}` as an unknown or
+ * malformed id. Artifacts, attachments, memory, skills, and search are now
+ * checked through their routes, not by calling the services directly.
  */
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { createClient } from '../lib/http.mjs';
 import { MALFORMED_ID } from '../lib/seed.mjs';
 import { runCheck } from './_check.mjs';
@@ -18,15 +19,20 @@ function expectHttpNotFound(result, label) {
   assert.deepEqual(result.body, NOT_FOUND, `${label}: body leaks a distinction`);
 }
 
-async function expectServiceNotFound(promise, label) {
-  try {
-    await promise;
-  } catch (error) {
-    assert.equal(error?.code, 'not_found', `${label}: ${error?.name ?? 'error'}`);
-    return { error: 'not_found' };
-  }
+function redactPath(path, world) {
+  return path
+    .replaceAll(world.bots.B.id, ':foreignBot')
+    .replaceAll(world.conversations.B.id, ':foreignConversation')
+    .replaceAll(world.runs.B.runId, ':foreignRun')
+    .replaceAll(world.artifacts.B.artifact.id, ':foreignArtifact')
+    .replaceAll(world.attachments.B.id, ':foreignAttachment')
+    .replaceAll(world.memories.B.id, ':foreignMemory')
+    .replaceAll(world.skills.B.id, ':foreignSkill')
+    .replaceAll(MALFORMED_ID, ':malformed');
+}
 
-  throw new Error(`${label}: expected not_found, service returned a row`);
+function sha256(value) {
+  return createHash('sha256').update(value).digest('hex');
 }
 
 export const isolationScenario = {
@@ -35,8 +41,14 @@ export const isolationScenario = {
   async run(ctx) {
     const checks = [];
     const world = await ctx.ensureWorld();
+
+    // The API reads attachment bytes from the same private root the fixture
+    // wrote them to. Metadata needs no root; the byte route does.
+    process.env.HABI_ATTACHMENT_STORAGE_ROOT = world.storageRoot;
+
     const p1 = await ctx.ensureP1();
     const requestA = createClient(p1.base, p1.sessionFor(world.users.A));
+    const requestB = createClient(p1.base, p1.sessionFor(world.users.B));
 
     await runCheck(checks, 'bot list is owner scoped', async () => {
       const result = await requestA('/api/bots');
@@ -60,19 +72,99 @@ export const isolationScenario = {
         ['GET', `/api/runs/${world.runs.B.runId}/events`],
         ['GET', `/api/runs/${MALFORMED_ID}/events`],
         ['POST', `/api/runs/${world.runs.B.runId}/cancel`],
-        ['POST', `/api/threads/${world.conversations.B.id}/messages`],
-        ['POST', `/api/threads/${MALFORMED_ID}/messages`],
+        ['POST', `/api/threads/${world.conversations.B.id}/messages`, { content: 'cross-user attempt' }],
+        ['POST', `/api/threads/${MALFORMED_ID}/messages`, { content: 'cross-user attempt' }],
+
+        // Bot archive/edit and thread creation.
+        ['PATCH', `/api/bots/${world.bots.B.id}`, { name: 'cross-user rename' }],
+        ['PATCH', `/api/bots/${MALFORMED_ID}`, { name: 'malformed rename' }],
+        ['DELETE', `/api/bots/${world.bots.B.id}`],
+        ['DELETE', `/api/bots/${MALFORMED_ID}`],
+        ['POST', `/api/bots/${world.bots.B.id}/threads`, { title: 'cross-user thread' }],
+        ['POST', `/api/bots/${MALFORMED_ID}/threads`, { title: 'malformed thread' }],
+        ['PATCH', `/api/threads/${world.conversations.B.id}`, { title: 'cross-user rename' }],
+        ['PATCH', `/api/threads/${MALFORMED_ID}`, { title: 'malformed rename' }],
+        ['DELETE', `/api/threads/${world.conversations.B.id}`],
+        ['DELETE', `/api/threads/${MALFORMED_ID}`],
+
+        // Attachments: list, metadata, and bytes.
+        ['GET', `/api/threads/${world.conversations.B.id}/attachments`],
+        ['GET', `/api/threads/${MALFORMED_ID}/attachments`],
+        ['GET', `/api/attachments/${world.attachments.B.id}`],
+        ['GET', `/api/attachments/${MALFORMED_ID}`],
+        ['GET', `/api/attachments/${world.attachments.B.id}/content`],
+        ['GET', `/api/attachments/${MALFORMED_ID}/content`],
+
+        // Artifacts: create scope, read, update, history, restore.
+        [
+          'POST',
+          '/api/artifacts',
+          {
+            kind: 'text',
+            title: 'cross-user artifact',
+            content: 'must not land',
+            conversationId: world.conversations.B.id,
+          },
+        ],
+        ['GET', `/api/artifacts/${world.artifacts.B.artifact.id}`],
+        ['GET', `/api/artifacts/${MALFORMED_ID}`],
+        ['PATCH', `/api/artifacts/${world.artifacts.B.artifact.id}`, { content: 'cross-user' }],
+        ['PATCH', `/api/artifacts/${MALFORMED_ID}`, { content: 'malformed' }],
+        ['GET', `/api/artifacts/${world.artifacts.B.artifact.id}/versions`],
+        ['GET', `/api/artifacts/${MALFORMED_ID}/versions`],
+        ['POST', `/api/artifacts/${world.artifacts.B.artifact.id}/restore`, { version: 1 }],
+        ['POST', `/api/artifacts/${MALFORMED_ID}/restore`, { version: 1 }],
+
+        // Memory: list, propose, and approvals.
+        ['GET', `/api/bots/${world.bots.B.id}/memories`],
+        ['GET', `/api/bots/${MALFORMED_ID}/memories`],
+        [
+          'POST',
+          `/api/bots/${world.bots.B.id}/memories`,
+          { text: 'cross-user memory', threadId: world.conversations.B.id },
+        ],
+        [
+          'POST',
+          `/api/bots/${MALFORMED_ID}/memories`,
+          { text: 'malformed memory', threadId: world.conversations.A.id },
+        ],
+        [
+          'POST',
+          `/api/memories/${world.memories.B.id}/approvals`,
+          { bot: true, thread: false },
+        ],
+        [
+          'POST',
+          `/api/memories/${MALFORMED_ID}/approvals`,
+          { bot: true, thread: false },
+        ],
+
+        // Skills: read, attach, detach, and Bot filter.
+        ['GET', `/api/skills/${world.skills.B.id}`],
+        ['GET', `/api/skills/${MALFORMED_ID}`],
+        ['POST', `/api/skills/${world.skills.B.id}/attach`, { botId: world.bots.A.id }],
+        ['POST', `/api/skills/${MALFORMED_ID}/attach`, { botId: world.bots.A.id }],
+        ['POST', `/api/skills/${world.skills.B.id}/detach`],
+        ['POST', `/api/skills/${MALFORMED_ID}/detach`],
+        ['GET', `/api/skills?botId=${world.bots.B.id}`],
+        ['GET', `/api/skills?botId=${MALFORMED_ID}`],
       ];
       const statuses = [];
 
-      for (const [method, path] of probes) {
+      for (const [method, path, body] of probes) {
         const result = await requestA(path, {
           method,
-          ...(method === 'POST' ? { body: { content: 'cross-user attempt' }, csrf: true } : {}),
+          ...(body === undefined ? {} : { body }),
+          ...(method === 'GET' ? {} : { csrf: true }),
         });
 
         expectHttpNotFound(result, `${method} ${path}`);
-        statuses.push({ method, path: path.replaceAll(world.bots.B.id, ':foreignBot').replaceAll(world.conversations.B.id, ':foreignConversation').replaceAll(world.runs.B.runId, ':foreignRun').replaceAll(MALFORMED_ID, ':malformed'), status: result.status, code: result.body.error.code });
+        statuses.push({
+          method,
+          path: redactPath(path, world),
+          status: result.status,
+          code: result.body.error.code,
+        });
       }
 
       return statuses;
@@ -112,84 +204,148 @@ export const isolationScenario = {
       };
     });
 
-    await runCheck(checks, 'artifact service denies cross-owner reads', async () => {
-      await expectServiceNotFound(
-        world.services.artifacts.get(world.users.A, world.artifacts.B.artifact.id),
-        'artifact get',
-      );
-      const list = await world.services.artifacts.list(world.users.A);
+    await runCheck(checks, 'artifact HTTP reads are owner scoped', async () => {
+      const own = await requestA(`/api/artifacts/${world.artifacts.A.artifact.id}`);
 
-      assert.ok(!list.artifacts.some((item) => item.id === world.artifacts.B.artifact.id));
+      assert.equal(own.status, 200);
+      assert.equal(own.body.artifact.artifact.id, world.artifacts.A.artifact.id);
 
-      return { foreignVisibleInList: false };
-    });
+      const list = await requestA('/api/artifacts');
+      assert.equal(list.status, 200);
+      const ids = list.body.artifacts.map((item) => item.id);
 
-    await runCheck(checks, 'attachment metadata and bytes deny cross-owner reads', async () => {
-      await expectServiceNotFound(
-        world.services.attachments.getMetadata(world.users.A, world.attachments.B.id),
-        'attachment metadata',
-      );
-      await expectServiceNotFound(
-        world.services.attachments.readContent(world.users.A, world.attachments.B.id),
-        'attachment bytes',
-      );
-      await expectServiceNotFound(
-        world.services.attachments.listForConversation(
-          world.users.A,
-          world.conversations.B.id,
-        ),
-        'attachment list',
-      );
-
-      return { metadata: 'not_found', bytes: 'not_found', list: 'not_found' };
-    });
-
-    await runCheck(checks, 'memory service denies cross-owner reads', async () => {
-      await expectServiceNotFound(
-        world.services.memory.get(world.users.A, world.memories.B.id),
-        'memory get',
-      );
-      const list = await world.services.memory.list(world.users.A);
-
-      assert.ok(!list.some((item) => item.id === world.memories.B.id));
-
-      return { foreignVisibleInList: false };
-    });
-
-    await runCheck(checks, 'skill service denies cross-owner reads', async () => {
-      await expectServiceNotFound(
-        world.services.skills.get(world.users.A, world.skills.B.id),
-        'skill get',
-      );
-      const list = await world.services.skills.list(world.users.A);
-
-      assert.ok(!list.skills.some((item) => item.id === world.skills.B.id));
-
-      return { foreignVisibleInList: false };
-    });
-
-    await runCheck(checks, 'search is owner scoped', async () => {
-      const foreign = await world.services.search.searchMessages({
-        actorUserId: world.users.A,
-        query: 'zebrabeta',
-      });
-      const foreignConversations = await world.services.conversationSearch.searchConversations({
-        actorUserId: world.users.A,
-        query: 'zebrabeta',
-      });
-      const own = await world.services.search.searchMessages({
-        actorUserId: world.users.A,
-        query: 'zebraalpha',
-      });
-
-      assert.equal(foreign.hits.length, 0, 'A search must not return B content');
-      assert.equal(foreignConversations.conversations.length, 0);
-      assert.ok(own.hits.length > 0, 'A search must return A content');
+      assert.ok(ids.includes(world.artifacts.A.artifact.id));
+      assert.ok(!ids.includes(world.artifacts.B.artifact.id));
 
       return {
-        foreignMessageHits: foreign.hits.length,
-        foreignConversationHits: foreignConversations.conversations.length,
-        ownMessageHits: own.hits.length,
+        ownReadStatus: own.status,
+        ownVersion: own.body.artifact.version.version,
+        foreignVisibleInList: false,
+      };
+    });
+
+    await runCheck(checks, 'attachment HTTP metadata and bytes are owner scoped', async () => {
+      const list = await requestA(
+        `/api/threads/${world.conversations.A.id}/attachments`,
+      );
+
+      assert.equal(list.status, 200);
+      assert.ok(list.body.attachments.some((item) => item.id === world.attachments.A.id));
+      assert.ok(!list.body.attachments.some((item) => item.id === world.attachments.B.id));
+
+      const metadata = await requestA(`/api/attachments/${world.attachments.A.id}`);
+      assert.equal(metadata.status, 200);
+      assert.equal(metadata.body.attachment.id, world.attachments.A.id);
+      assert.equal(metadata.body.attachment.sha256, world.attachments.A.sha256);
+
+      const content = await requestA(
+        `/api/attachments/${world.attachments.A.id}/content`,
+      );
+      assert.equal(content.status, 200);
+      assert.equal(content.body, 'zebraalpha attachment');
+      assert.equal(sha256(content.body), metadata.body.attachment.sha256);
+
+      // A stored non-text attachment is refused at the representation layer,
+      // after ownership was proven.
+      const png = await world.services.attachments.createUpload(
+        world.users.A,
+        world.conversations.A.id,
+        {
+          filename: 'alpha.png',
+          contentType: 'image/png',
+          source: (async function* pngBytes() {
+            yield Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+          })(),
+        },
+      );
+      await world.services.attachments.finalize(world.users.A, png.id);
+      const refused = await requestA(`/api/attachments/${png.id}/content`);
+      assert.equal(refused.status, 415);
+      assert.deepEqual(refused.body, { error: { code: 'unsupported_media_type' } });
+
+      return {
+        listStatus: list.status,
+        contentShaVerified: true,
+        nonTextStatus: refused.status,
+      };
+    });
+
+    await runCheck(checks, 'memory HTTP reads and approvals are owner scoped', async () => {
+      const list = await requestA(`/api/bots/${world.bots.A.id}/memories`);
+
+      assert.equal(list.status, 200);
+      assert.ok(list.body.memories.some((item) => item.id === world.memories.A.id));
+      assert.ok(!list.body.memories.some((item) => item.id === world.memories.B.id));
+
+      const approved = await requestA(
+        `/api/memories/${world.memories.A.id}/approvals`,
+        {
+          method: 'POST',
+          csrf: true,
+          body: {
+            bot: true,
+            thread: true,
+            threadId: world.conversations.A.id,
+          },
+        },
+      );
+      assert.equal(approved.status, 200);
+      assert.equal(approved.body.memory.botApproved, true);
+      assert.equal(approved.body.memory.conversationApproved, true);
+      assert.equal(approved.body.memory.status, 'accepted');
+
+      return {
+        listStatus: list.status,
+        foreignVisibleInList: false,
+        acceptedThroughHttp: approved.body.memory.status === 'accepted',
+      };
+    });
+
+    await runCheck(checks, 'skill HTTP attach and detach are owner scoped', async () => {
+      const list = await requestA(`/api/skills?botId=${world.bots.A.id}`);
+
+      assert.equal(list.status, 200);
+      assert.ok(list.body.skills.some((item) => item.id === world.skills.A.id));
+      assert.ok(!list.body.skills.some((item) => item.id === world.skills.B.id));
+
+      const detached = await requestA(`/api/skills/${world.skills.A.id}/detach`, {
+        method: 'POST',
+        csrf: true,
+      });
+      assert.equal(detached.status, 200);
+      assert.equal(detached.body.skill.botId, null);
+
+      const attached = await requestA(`/api/skills/${world.skills.A.id}/attach`, {
+        method: 'POST',
+        csrf: true,
+        body: { botId: world.bots.A.id },
+      });
+      assert.equal(attached.status, 200);
+      assert.equal(attached.body.skill.botId, world.bots.A.id);
+
+      return {
+        listStatus: list.status,
+        detached: detached.body.skill.botId,
+        reattached: attached.body.skill.botId,
+      };
+    });
+
+    await runCheck(checks, 'search is owner scoped over HTTP', async () => {
+      const foreign = await requestA('/api/search?q=zebrabeta');
+      const foreignFiltered = await requestA(
+        `/api/search?q=zebraalpha&botId=${world.bots.B.id}`,
+      );
+      const own = await requestA('/api/search?q=zebraalpha');
+
+      assert.equal(foreign.status, 200);
+      assert.equal(foreign.body.results.length, 0, 'A search must not return B content');
+      assert.equal(foreignFiltered.body.results.length, 0);
+      assert.ok(own.body.results.length > 0, 'A search must return A content');
+
+      return {
+        foreignMessageHits: foreign.body.results.length,
+        foreignFilteredHits: foreignFiltered.body.results.length,
+        ownMessageHits: own.body.results.length,
       };
     });
 
@@ -222,7 +378,8 @@ export const isolationScenario = {
         skillB: world.skills.B.id,
       },
       residualRisks: [
-        'Artifact, attachment, memory, and skill HTTP routes are not wired in this commit; their isolation is proven at the service layer, not through the browser surface.',
+        'Attachment byte reads require HABI_ATTACHMENT_STORAGE_ROOT; metadata alone does not, and an unconfigured root answers 503 api_unavailable.',
+        'A Memory proposal is still sourced from a live thread, so POST /api/bots/:botId/memories needs a threadId in addition to text.',
       ],
     };
   },
