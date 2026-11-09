@@ -27,7 +27,7 @@
  * available. The route revokes every live session for the owner immediately
  * after this method commits.
  */
-import type { Pool } from 'pg';
+import type { Pool, PoolClient } from 'pg';
 import type { AttachmentStorage } from '../attachments/storage.js';
 import { canonicalizeEmail } from '../auth/email.js';
 import {
@@ -129,6 +129,20 @@ function sleep(milliseconds: number): Promise<void> {
  * The confirmation must be the server-loaded email, canonicalized on both
  * sides. It never selects an account; it only proves the caller meant this one.
  */
+/**
+ * An already-deleted account needs no confirmation: the request is a repeat
+ * and the outcome is the same tombstone. Everything else must match.
+ */
+function isConfirmationSatisfied(
+  state: { readonly status: string },
+  confirmationEmail: string | undefined,
+): boolean {
+  return (
+    state.status === 'deleted' ||
+    matchesConfirmation(state as never, confirmationEmail)
+  );
+}
+
 function matchesConfirmation(
   state: { email: string | null },
   confirmationEmail: string | undefined,
@@ -371,10 +385,7 @@ export class AccountService {
       throw new PersistenceNotFoundError();
     }
 
-    if (
-      preflight.status !== 'deleted' &&
-      !matchesConfirmation(preflight, confirmationEmail)
-    ) {
+    if (!isConfirmationSatisfied(preflight, confirmationEmail)) {
       await this.recordRefusal(this.pool, userId, confirmationEmail);
       throw new PersistenceValidationError('invalid_input');
     }
@@ -393,10 +404,7 @@ export class AccountService {
         throw new PersistenceNotFoundError();
       }
 
-      if (
-        state.status !== 'deleted' &&
-        !matchesConfirmation(state, confirmationEmail)
-      ) {
+      if (!isConfirmationSatisfied(state, confirmationEmail)) {
         // The email changed between the preflight and the lock. Commit the
         // refusal record, then report the refusal.
         await this.recordRefusal(client, userId, confirmationEmail);
@@ -405,24 +413,7 @@ export class AccountService {
         throw new PersistenceValidationError('invalid_input');
       }
 
-      // Bytes live outside PostgreSQL. Remove them before the rows so a storage
-      // failure leaves a retryable account instead of a row that points at
-      // content this process could no longer delete.
-      const locators = await this.repository.attachmentLocators(client, userId);
-
-      if (locators.length > 0) {
-        if (this.storage === undefined) {
-          throw new AccountStorageUnavailableError();
-        }
-
-        for (const locator of locators) {
-          await this.storage.deleteObject({
-            ownerUserId: userId,
-            conversationId: locator.conversationId,
-            attachmentId: locator.attachmentId,
-          });
-        }
-      }
+      await this.removeAttachmentBytes(client, userId);
 
       const removed = await this.repository.deleteOwnedRows(client, userId);
       const deletedAt = await this.repository.tombstoneAccount(
@@ -432,14 +423,11 @@ export class AccountService {
       );
       const alreadyDeleted = state.status === 'deleted';
 
-      // The account's own audit rows were removed with the rest of its data
-      // above. This record is the exception: NULL owner, so it outlives the
-      // deletion and is never reachable from an owner-scoped read.
-      await this.repository.insertDeletionAudit(client, {
-        ownerUserId: null,
+      await this.recordDeletion(client, {
         actorUserId: userId,
-        outcome: alreadyDeleted ? 'already_deleted' : 'deleted',
-        detail: { removed, runReconciliation },
+        alreadyDeleted,
+        removed,
+        runReconciliation,
       });
 
       await client.query('COMMIT');
@@ -471,6 +459,56 @@ export class AccountService {
       }
       client.release();
     }
+  }
+
+  /**
+   * Bytes live outside PostgreSQL. They are removed before the rows so a
+   * storage failure leaves a retryable account instead of rows pointing at
+   * content this process could no longer delete.
+   */
+  private async removeAttachmentBytes(
+    client: PoolClient,
+    userId: string,
+  ): Promise<void> {
+    const locators = await this.repository.attachmentLocators(client, userId);
+
+    if (locators.length === 0) {
+      return;
+    }
+
+    if (this.storage === undefined) {
+      throw new AccountStorageUnavailableError();
+    }
+
+    for (const locator of locators) {
+      await this.storage.deleteObject({
+        ownerUserId: userId,
+        conversationId: locator.conversationId,
+        attachmentId: locator.attachmentId,
+      });
+    }
+  }
+
+  /**
+   * The account's own audit rows were removed with the rest of its data. This
+   * record is the exception: NULL owner, so it outlives the deletion and is
+   * never reachable from an owner-scoped read.
+   */
+  private async recordDeletion(
+    client: PoolClient,
+    input: {
+      readonly actorUserId: string;
+      readonly alreadyDeleted: boolean;
+      readonly removed: Readonly<Record<string, number>>;
+      readonly runReconciliation: RunReconciliationSummary;
+    },
+  ): Promise<void> {
+    await this.repository.insertDeletionAudit(client, {
+      ownerUserId: null,
+      actorUserId: input.actorUserId,
+      outcome: input.alreadyDeleted ? 'already_deleted' : 'deleted',
+      detail: { removed: input.removed, runReconciliation: input.runReconciliation },
+    });
   }
 
   /**
