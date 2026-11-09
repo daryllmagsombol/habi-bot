@@ -7,10 +7,18 @@
  * malformed. Validation codes and same-owner conflicts are distinct only after
  * ownership has been resolved by the repository query itself.
  *
- * One code is new to this composition layer and describes transport wiring,
- * not product policy:
+ * Two codes are new to this composition layer and describe the transport, not
+ * product policy:
  *
- *   - `api_unavailable` (503): the flag is on but no database is configured.
+ *   - `api_unavailable` (503): the flag is on but no database or attachment
+ *     storage root is configured.
+ *   - `unsupported_media_type` (415): the attachment exists and is owned by the
+ *     caller, but its content type is not one this text route serves. Ownership
+ *     was proven first, so this cannot enumerate another user's uploads.
+ *
+ * Owner-visible lifecycle failures from the artifact, attachment, and skill
+ * services already carry their own code. They are mapped here rather than
+ * leaking a Nest 500 without the shared envelope.
  *
  * A dispatched cancellation is not an error: the API records a durable intent
  * and returns the Run's current state (see `ApiService.cancelRun`).
@@ -18,15 +26,26 @@
 import { Catch } from '@nestjs/common';
 import type { ArgumentsHost, ExceptionFilter } from '@nestjs/common';
 import type { Response } from 'express';
+import { ArtifactIntegrityError } from '../artifacts/errors.js';
+import {
+  AttachmentIntegrityError,
+  AttachmentRejectedError,
+} from '../attachments/errors.js';
 import {
   PersistenceError,
   type PersistenceErrorCode,
 } from '../persistence/errors.js';
+import {
+  SkillNameConflictError,
+  SkillUnavailableError,
+  SkillVersionConflictError,
+} from '../skills/errors.js';
 
-export type ApiErrorCode = 'api_unavailable';
+export type ApiErrorCode = 'api_unavailable' | 'unsupported_media_type';
 
 const STATUS_BY_API_CODE: Readonly<Record<ApiErrorCode, number>> = {
   api_unavailable: 503,
+  unsupported_media_type: 415,
 };
 
 const STATUS_BY_PERSISTENCE_CODE: Readonly<Record<PersistenceErrorCode, number>> = {
@@ -40,6 +59,15 @@ const STATUS_BY_PERSISTENCE_CODE: Readonly<Record<PersistenceErrorCode, number>>
   message_tombstoned: 409,
   run_result_exists: 409,
   message_sequence_conflict: 409,
+};
+
+const STATUS_BY_DOMAIN_CODE: Readonly<Record<string, number>> = {
+  skill_unavailable: 409,
+  skill_name_conflict: 409,
+  skill_version_conflict: 409,
+  attachment_rejected: 409,
+  artifact_integrity: 500,
+  attachment_integrity: 500,
 };
 
 export interface ApiErrorBody {
@@ -67,15 +95,54 @@ export function statusForPersistenceCode(code: PersistenceErrorCode): number {
  * Nest's own `HttpException`s (401/403 from the session guards, 400 from the
  * body parser) are deliberately not caught and keep their existing semantics.
  */
-@Catch(PersistenceError, ApiError)
+@Catch(
+  PersistenceError,
+  ApiError,
+  SkillUnavailableError,
+  SkillNameConflictError,
+  SkillVersionConflictError,
+  AttachmentRejectedError,
+  ArtifactIntegrityError,
+  AttachmentIntegrityError,
+)
 export class ApiErrorFilter implements ExceptionFilter {
-  catch(error: PersistenceError | ApiError, host: ArgumentsHost): void {
+  catch(
+    error:
+      | PersistenceError
+      | ApiError
+      | SkillUnavailableError
+      | SkillNameConflictError
+      | SkillVersionConflictError
+      | AttachmentRejectedError
+      | ArtifactIntegrityError
+      | AttachmentIntegrityError,
+    host: ArgumentsHost,
+  ): void {
     const response = host.switchToHttp().getResponse<Response>();
-    const status =
-      error instanceof ApiError
-        ? error.status
-        : statusForPersistenceCode(error.code);
+    const status = this.statusOf(error);
 
     response.status(status).json({ error: { code: error.code } });
+  }
+
+  private statusOf(
+    error:
+      | PersistenceError
+      | ApiError
+      | SkillUnavailableError
+      | SkillNameConflictError
+      | SkillVersionConflictError
+      | AttachmentRejectedError
+      | ArtifactIntegrityError
+      | AttachmentIntegrityError,
+  ): number {
+    if (error instanceof ApiError) {
+      return error.status;
+    }
+
+    if (error instanceof PersistenceError) {
+      return statusForPersistenceCode(error.code);
+    }
+
+    return STATUS_BY_DOMAIN_CODE[error.code] ?? 500;
   }
 }

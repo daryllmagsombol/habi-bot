@@ -13,13 +13,14 @@
  */
 import { Module } from '@nestjs/common';
 import { SessionCoreModule } from '../session/session-core.module.js';
+import { ApiContentController } from './api-content.controller.js';
 import { ApiController } from './api.controller.js';
 import { ApiErrorFilter } from './api-errors.js';
 import { ApiRuntime } from './api-runtime.js';
 
 @Module({
   imports: [SessionCoreModule],
-  controllers: [ApiController],
+  controllers: [ApiController, ApiContentController],
   providers: [ApiErrorFilter, ApiRuntime],
 })
 export class P1ApiModule {}
