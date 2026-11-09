@@ -343,10 +343,6 @@ function toNumber(value: string | number | null): number | null {
   return value === null ? null : Number(value);
 }
 
-function toSequence(value: string | number): number {
-  return Number(value);
-}
-
 function mapProfile(row: ProfileRow): AccountProfileExport {
   return {
     userId: row.id,
@@ -393,7 +389,7 @@ function mapConversation(row: ConversationExportRow): Record<string, unknown> {
     botId: row.bot_id,
     title: row.title,
     status: row.status,
-    lastMessageSeq: toSequence(row.last_message_seq),
+    lastMessageSeq: Number(row.last_message_seq),
     createdAt: toIso(row.created_at),
     updatedAt: toIso(row.updated_at),
     deletedAt: toNullableIso(row.deleted_at),
@@ -406,7 +402,7 @@ function mapMessage(row: MessageExportRow): Record<string, unknown> {
     conversationId: row.conversation_id,
     role: row.role,
     content: row.content,
-    seq: toSequence(row.seq),
+    seq: Number(row.seq),
     status: row.status,
     clientMessageId: row.client_message_id,
     runId: row.run_id,
@@ -435,7 +431,7 @@ function mapRun(row: RunExportRow): Record<string, unknown> {
       costStatus: row.usage_cost_status,
       raw: row.usage_raw,
     },
-    lastEventSeq: toSequence(row.last_event_seq),
+    lastEventSeq: Number(row.last_event_seq),
     createdAt: toIso(row.created_at),
     updatedAt: toIso(row.updated_at),
     startedAt: toNullableIso(row.started_at),
@@ -453,7 +449,7 @@ function mapRunEvent(row: RunEventExportRow): Record<string, unknown> {
     id: row.id,
     runId: row.run_id,
     conversationId: row.conversation_id,
-    seq: toSequence(row.seq),
+    seq: Number(row.seq),
     type: row.type,
     payload: row.payload,
     createdAt: toIso(row.created_at),
@@ -575,9 +571,9 @@ function mapSkillVersion(row: SkillVersionRow): Record<string, unknown> {
 function mapUsageBucket(row: UsageBucketRow): Record<string, unknown> {
   return {
     dayBucket: row.day_bucket,
-    inputTokens: toSequence(row.input_tokens),
-    outputTokens: toSequence(row.output_tokens),
-    reservedTokens: toSequence(row.reserved_tokens),
+    inputTokens: Number(row.input_tokens),
+    outputTokens: Number(row.output_tokens),
+    reservedTokens: Number(row.reserved_tokens),
     state: row.state,
     createdAt: toIso(row.created_at),
     updatedAt: toIso(row.updated_at),
@@ -589,8 +585,8 @@ function mapUsageReservation(row: UsageReservationRow): Record<string, unknown> 
     id: row.id,
     runId: row.run_id,
     dayBucket: row.day_bucket,
-    estimatedTokens: toSequence(row.estimated_tokens),
-    chargedTokens: toSequence(row.charged_tokens),
+    estimatedTokens: Number(row.estimated_tokens),
+    chargedTokens: Number(row.charged_tokens),
     state: row.state,
     usageStatus: row.usage_status,
     createdAt: toIso(row.created_at),
@@ -608,7 +604,7 @@ function mapUsageAudit(row: UsageAuditRow): Record<string, unknown> {
     dayBucket: row.day_bucket,
     actorUserId: row.actor_user_id,
     action: row.action,
-    tokensDelta: toSequence(row.tokens_delta),
+    tokensDelta: Number(row.tokens_delta),
     note: row.note,
     createdAt: toIso(row.created_at),
   };
@@ -620,7 +616,7 @@ function mapSearch(row: SearchRow): Record<string, unknown> {
     conversationId: row.conversation_id,
     botId: row.bot_id,
     role: row.role,
-    seq: toSequence(row.seq),
+    seq: Number(row.seq),
     text: row.content,
     createdAt: toIso(row.created_at),
   };
@@ -885,7 +881,7 @@ export class AccountRepository {
         return;
       }
 
-      const last = result.rows[result.rows.length - 1];
+      const last = result.rows.at(-1);
 
       if (last === undefined) {
         return;
@@ -925,7 +921,7 @@ export class AccountRepository {
         return;
       }
 
-      const last = result.rows[result.rows.length - 1];
+      const last = result.rows.at(-1);
 
       if (last === undefined) {
         return;
@@ -962,7 +958,7 @@ export class AccountRepository {
         return;
       }
 
-      const last = result.rows[result.rows.length - 1];
+      const last = result.rows.at(-1);
 
       if (last === undefined) {
         return;
@@ -1005,7 +1001,7 @@ export class AccountRepository {
         return;
       }
 
-      const last = result.rows[result.rows.length - 1];
+      const last = result.rows.at(-1);
 
       if (last === undefined) {
         return;

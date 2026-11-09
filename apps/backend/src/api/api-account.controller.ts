@@ -86,7 +86,7 @@ function readConfirmation(body: unknown): string {
 }
 
 function exportFilename(at: Date): string {
-  return `habi-account-export-${at.toISOString().replace(/[:.]/g, '-')}.json`;
+  return `habi-account-export-${at.toISOString().replaceAll(/[:.]/g, '-')}.json`;
 }
 
 @Controller('api/account')
