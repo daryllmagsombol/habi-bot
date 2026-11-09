@@ -7,7 +7,7 @@
  * malformed. Validation codes and same-owner conflicts are distinct only after
  * ownership has been resolved by the repository query itself.
  *
- * Two codes are new to this composition layer and describe the transport, not
+ * Codes added by this composition layer describe transport and wiring, not
  * product policy:
  *
  *   - `api_unavailable` (503): the flag is on but no database or attachment
@@ -15,6 +15,9 @@
  *   - `unsupported_media_type` (415): the attachment exists and is owned by the
  *     caller, but its content type is not one this text route serves. Ownership
  *     was proven first, so this cannot enumerate another user's uploads.
+ *   - `account_storage_unavailable` (503): an account deletion has attachment
+ *     rows but this process has no private attachment-storage root, so it
+ *     cannot honestly remove the bytes. Nothing has been deleted at that point.
  *
  * Owner-visible lifecycle failures from the artifact, attachment, and skill
  * services already carry their own code. They are mapped here rather than
@@ -26,6 +29,7 @@
 import { Catch } from '@nestjs/common';
 import type { ArgumentsHost, ExceptionFilter } from '@nestjs/common';
 import type { Response } from 'express';
+import { AccountStorageUnavailableError } from '../account/account-errors.js';
 import { ArtifactIntegrityError } from '../artifacts/errors.js';
 import {
   AttachmentIntegrityError,
@@ -41,11 +45,15 @@ import {
   SkillVersionConflictError,
 } from '../skills/errors.js';
 
-export type ApiErrorCode = 'api_unavailable' | 'unsupported_media_type';
+export type ApiErrorCode =
+  | 'api_unavailable'
+  | 'unsupported_media_type'
+  | 'account_storage_unavailable';
 
 const STATUS_BY_API_CODE: Readonly<Record<ApiErrorCode, number>> = {
   api_unavailable: 503,
   unsupported_media_type: 415,
+  account_storage_unavailable: 503,
 };
 
 const STATUS_BY_PERSISTENCE_CODE: Readonly<Record<PersistenceErrorCode, number>> = {
@@ -91,7 +99,7 @@ export function statusForPersistenceCode(code: PersistenceErrorCode): number {
 }
 
 /**
- * Converts the two domain error families into the shared HTTP envelope.
+ * Converts the domain error families into the shared HTTP envelope.
  * Nest's own `HttpException`s (401/403 from the session guards, 400 from the
  * body parser) are deliberately not caught and keep their existing semantics.
  */
@@ -104,6 +112,7 @@ export function statusForPersistenceCode(code: PersistenceErrorCode): number {
   AttachmentRejectedError,
   ArtifactIntegrityError,
   AttachmentIntegrityError,
+  AccountStorageUnavailableError,
 )
 export class ApiErrorFilter implements ExceptionFilter {
   catch(
@@ -115,7 +124,8 @@ export class ApiErrorFilter implements ExceptionFilter {
       | SkillVersionConflictError
       | AttachmentRejectedError
       | ArtifactIntegrityError
-      | AttachmentIntegrityError,
+      | AttachmentIntegrityError
+      | AccountStorageUnavailableError,
     host: ArgumentsHost,
   ): void {
     const response = host.switchToHttp().getResponse<Response>();
@@ -133,10 +143,15 @@ export class ApiErrorFilter implements ExceptionFilter {
       | SkillVersionConflictError
       | AttachmentRejectedError
       | ArtifactIntegrityError
-      | AttachmentIntegrityError,
+      | AttachmentIntegrityError
+      | AccountStorageUnavailableError,
   ): number {
     if (error instanceof ApiError) {
       return error.status;
+    }
+
+    if (error instanceof AccountStorageUnavailableError) {
+      return STATUS_BY_API_CODE.account_storage_unavailable;
     }
 
     if (error instanceof PersistenceError) {
