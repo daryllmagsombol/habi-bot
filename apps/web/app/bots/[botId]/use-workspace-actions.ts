@@ -212,6 +212,16 @@ function appendSkills(
   return [...skills, ...page.filter((skill) => !seen.has(skill.id)).map(skillView)];
 }
 
+/** Appends a cursor page of search hits, dropping rows already loaded. */
+function appendSearchResults(
+  results: readonly SearchResultView[],
+  page: readonly SearchHitDto[],
+): readonly SearchResultView[] {
+  const seen = new Set(results.map((result) => result.messageId));
+
+  return [...results, ...page.filter((hit) => !seen.has(hit.messageId)).map(searchHitView)];
+}
+
 /** Appends a cursor page of memory gates, dropping rows already loaded. */
 function appendMemories(
   memories: readonly MemoryGateItem[],
@@ -1011,16 +1021,7 @@ export function useWorkspaceActions(
           return;
         }
 
-        setSearchResults((previous) => {
-          const seen = new Set(previous.map((result) => result.messageId));
-
-          return [
-            ...previous,
-            ...page.results
-              .filter((hit) => !seen.has(hit.messageId))
-              .map(searchHitView),
-          ];
-        });
+        setSearchResults((previous) => appendSearchResults(previous, page.results));
         setSearchCursor(page.nextCursor);
       })
       .catch((error: unknown) => {
