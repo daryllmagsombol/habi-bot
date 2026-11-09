@@ -69,22 +69,29 @@ if (!Number.isInteger(limit) || limit < 1 || limit > MAX_LIMIT) {
 
 The repository's own Sonar analyses keep landing on the same handful of idioms. Each is a small
 write-time choice; none needs a suppression, and every one was fixed the same way after the fact.
-Write them correctly the first time:
+Write them correctly the first time. The **Enforced** column says whether `pnpm lint` rejects the
+wrong form outright; where it says *scan*, lint cannot decide the case without disagreeing with the
+real gate, so the table and the scan carry it.
 
-| Instead of | Write | Rule |
-| --- | --- | --- |
-| Several `array.push(a)` calls in a row | one `array.push(a, b, c)`, or build with `map`/spread | `S7778` |
-| A long method with many branches | one named helper per decision, called in order | `S3776` |
-| A nested ternary chain | an early return, or a named lookup | `S3358` |
-| Callbacks nested past four levels | a named module- or hook-scope function | `S2004` |
-| `str.replace(/…/g, …)` | `str.replaceAll(…)` | `S7781` |
-| `rows[rows.length - 1]` | `rows.at(-1)` | `S7755` |
-| `x === null \|\| x.y` | `x?.y` | `S6582` |
-| `window.location`, `window.matchMedia` | `globalThis.…` in client components | `S7764` |
-| Two `import` statements from one module | one statement | `S3863` |
-| `?:` combined with `\| undefined` | one or the other: optional, or required-with-explicit-`undefined` | `S4782` |
-| A wrapper that only returns `Number(x)` | `Number(x)` at the call site | `S7770` |
-| `catch (caught)` | `catch (error_)` | `S7718` |
+| Instead of | Write | Rule | Enforced |
+| --- | --- | --- | --- |
+| Several `array.push(a)` calls in a row | one `array.push(a, b, c)`, or build with `map`/spread | `S7778` | scan |
+| A long method with many branches | one named helper per decision, called in order | `S3776` | scan |
+| A nested ternary chain | an early return, or a named lookup | `S3358` | scan |
+| Callbacks nested past four levels | a named module- or hook-scope function | `S2004` | **lint** |
+| `str.replace(/…/g, …)` | `str.replaceAll(…)` | `S7781` | scan |
+| `rows[rows.length - 1]` | `rows.at(-1)` | `S7755` | scan |
+| `x === null \|\| x.y` | `x?.y` | `S6582` | scan |
+| `window.location`, `window.matchMedia` | `globalThis.…` in client components | `S7764` | scan |
+| Two `import` statements from one module | one statement | `S3863` | **lint** |
+| `?:` combined with `\| undefined` | one or the other: optional, or required-with-explicit-`undefined` | `S4782` | scan |
+| A wrapper that only returns `Number(x)` | `Number(x)` at the call site | `S7770` | scan |
+| `catch (caught)` | `catch (error_)` | `S7718` | scan |
+
+`S2004` and `S3863` are enforced by `packages/config/eslint/base.mjs`, so a wrong form fails `pnpm lint`
+before any scan runs. `S3358` is **not** lint-enforced on purpose: `no-nested-ternary` cannot tell a
+value-position chain from JSX conditional rendering, so it would reject idiomatic React while the real
+gate stays silent — the table's guidance is the control there.
 
 Complexity rules (`S3776`, `S2004`) are not asking for fewer features. They are asking for the
 decision to have a name. When a function is genuinely an ordered sequence of trust checks, keep the
