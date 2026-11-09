@@ -43,7 +43,12 @@ import type { Memory } from '../memory/types.js';
 import { SearchService } from '../search/search-service.js';
 import type { MessageSearchHit } from '../search/types.js';
 import { SkillService } from '../skills/skill-service.js';
-import type { Skill, SkillPage, SkillStatus } from '../skills/types.js';
+import type {
+  Skill,
+  SkillPage,
+  SkillStatus,
+  UpdateSkillInput,
+} from '../skills/types.js';
 import { RunEventStore } from '../events/run-event-store.js';
 import { RunEventStream } from '../events/run-event-stream.js';
 import { UsageLimitService } from '../limits/usage-limit-service.js';
@@ -680,6 +685,40 @@ export class ApiService {
     skillId: string,
   ): Promise<{ skill: Skill }> {
     return { skill: await this.skills.get(actorUserId, skillId) };
+  }
+
+  /**
+   * Applies a partial patch as a new immutable skill version.
+   *
+   * Ownership is resolved before the body is normalized, so a guessed, foreign,
+   * malformed, or tombstoned id stays the same non-enumerating 404 regardless
+   * of what the body contains. Omitted fields are not read, so the service
+   * keeps the current value; it appends exactly one version and never rewrites
+   * history. An archived skill is owned but read-only (`409 skill_unavailable`),
+   * a name already used in the same owner/Bot scope is
+   * `409 skill_name_conflict`, and an empty patch is `400 invalid_input`.
+   */
+  async updateSkill(
+    actorUserId: string,
+    skillId: string,
+    body: unknown,
+  ): Promise<{ skill: Skill }> {
+    await this.skills.get(actorUserId, skillId);
+
+    const record = readObjectBody(body);
+    const name = readOptionalField<string>(record, 'name');
+    const description = readOptionalField<string | null>(record, 'description');
+    const bodyMarkdown = readOptionalField<string | null>(
+      record,
+      'bodyMarkdown',
+    );
+    const input: UpdateSkillInput = {
+      ...(name === undefined ? {} : { name }),
+      ...(description === undefined ? {} : { description }),
+      ...(bodyMarkdown === undefined ? {} : { bodyMarkdown }),
+    };
+
+    return { skill: await this.skills.update(actorUserId, skillId, input) };
   }
 
   /** Attaches an owned live skill to an owned active Bot. */
