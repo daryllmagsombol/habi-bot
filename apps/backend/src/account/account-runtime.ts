@@ -18,6 +18,26 @@ import { AccountService } from './account-service.js';
 
 export const ATTACHMENT_STORAGE_ROOT_ENV = 'HABI_ATTACHMENT_STORAGE_ROOT';
 
+/**
+ * How long a deletion waits for a worker to terminalize the account's Runs
+ * after their durable cancel intent is written. It is configuration, not
+ * policy: a deployment with slow workers can raise it, and `0` means "do not
+ * wait". An unset or malformed value uses the service default.
+ */
+export const RUN_CANCEL_WAIT_ENV = 'HABI_ACCOUNT_RUN_CANCEL_WAIT_MS';
+
+function readRunCancelWaitMs(raw: string | undefined): number | undefined {
+  const value = raw?.trim();
+
+  if (value === undefined || !/^\d+$/.test(value)) {
+    return undefined;
+  }
+
+  const parsed = Number(value);
+
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
+}
+
 @Injectable()
 export class AccountRuntime implements OnModuleDestroy {
   private pool: Pool | undefined;
@@ -35,12 +55,14 @@ export class AccountRuntime implements OnModuleDestroy {
     }
 
     const storageRoot = process.env[ATTACHMENT_STORAGE_ROOT_ENV]?.trim();
+    const runCancelWaitMs = readRunCancelWaitMs(process.env[RUN_CANCEL_WAIT_ENV]);
     this.pool = createPersistencePool({ connectionString });
     this.service = new AccountService(
       this.pool,
       storageRoot === undefined || storageRoot.length === 0
         ? undefined
         : new LocalAttachmentStorage(storageRoot),
+      runCancelWaitMs === undefined ? {} : { runCancelWaitMs },
     );
 
     return this.service;

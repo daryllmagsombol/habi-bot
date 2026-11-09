@@ -10,6 +10,7 @@
  *
  *   GET    /api/account          the owner's identity profile (lightweight)
  *   GET    /api/account/export   stream the owner's complete export
+ *   GET    /api/account/audit    the owner's export/deletion audit trail
  *   DELETE /api/account          delete the owner's account and owned rows
  *
  * The profile read returns only the identity fields the account page shows —
@@ -33,9 +34,24 @@
  * every owned surface, removes private attachment bytes, tombstones the
  * identity, clears credential material, and revokes every live session in the
  * process-wide H-017 session store (the only session authority this POC has).
+ * Before that transaction it writes the durable cancel intent for every
+ * non-terminal Run the account owns and waits a bounded, configurable time
+ * (`HABI_ACCOUNT_RUN_CANCEL_WAIT_MS`, default 3000 ms) for a present worker to
+ * terminalize them. The response reports `runReconciliation`: Runs still
+ * non-terminal when the bound expired are listed in `unreconciledRuns` rather
+ * than reported as stopped. This process has no adapter, so an adapter call a
+ * worker already has in flight is not stopped here; the row is removed, and the
+ * harness session remains the worker's responsibility.
  * A repeat is idempotent at the storage boundary and reports the first
  * deletion instant; the HTTP retry itself is `401` because the caller's
  * session was already revoked.
+ *
+ * Export and deletion are audited. The export's row records the section counts
+ * as reported; the deletion's per-surface removal counts and reconciliation
+ * outcome are written in the deletion transaction. Audit rows are account data
+ * and are removed by deletion, except the deletion record itself: it is written
+ * with a NULL owner so it survives, and a NULL owner can never match the
+ * owner-scoped read used by `GET /api/account/audit`.
  *
  * Backup honesty: deletion is immediate for the live database only. A copy of
  * the account's data survives in age-encrypted backups created before the
@@ -56,6 +72,7 @@ import {
   HttpCode,
   HttpStatus,
   Inject,
+  Query,
   Req,
   Res,
   UseFilters,
@@ -74,26 +91,62 @@ import {
 } from '../session/session-request.js';
 import { SessionService } from '../session/session.service.js';
 import { PersistenceValidationError } from '../persistence/errors.js';
-import type { AccountDeletionResponse } from '../account/account-service.js';
+import { normalizeLimit } from '../persistence/pagination.js';
+import type {
+  AccountAuditPage,
+  AccountDeletionResponse,
+} from '../account/index.js';
 import { AccountRuntime } from '../account/account-runtime.js';
 import { ApiErrorFilter } from './api-errors.js';
 
-function readConfirmation(body: unknown): string {
+/**
+ * The confirmation is the only field a deletion body may carry. A wrong type,
+ * a blank value, or a missing body is passed through as `undefined` so the
+ * service can audit the refusal and answer with the same `invalid_input`.
+ */
+function readConfirmationValue(body: unknown): unknown {
   if (typeof body !== 'object' || body === null || Array.isArray(body)) {
-    throw new PersistenceValidationError('invalid_input');
+    return undefined;
   }
 
-  const confirm = (body as Record<string, unknown>).confirm;
-
-  if (typeof confirm !== 'string' || confirm.trim().length === 0) {
-    throw new PersistenceValidationError('invalid_input');
-  }
-
-  return confirm;
+  return (body as Record<string, unknown>).confirm;
 }
 
 function exportFilename(at: Date): string {
   return `habi-account-export-${at.toISOString().replaceAll(/[:.]/g, '-')}.json`;
+}
+
+const UNSIGNED_INTEGER = /^\d+$/;
+
+/** Audit pages key on the identity sequence; anything else is `invalid_cursor`. */
+function readAuditCursor(value: unknown): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (typeof value !== 'string' || !UNSIGNED_INTEGER.test(value)) {
+    throw new PersistenceValidationError('invalid_cursor');
+  }
+
+  return value;
+}
+
+function readAuditLimit(value: unknown): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (typeof value !== 'string' || !UNSIGNED_INTEGER.test(value)) {
+    throw new PersistenceValidationError('invalid_input');
+  }
+
+  const limit = Number(value);
+
+  if (!Number.isSafeInteger(limit) || limit < 1) {
+    throw new PersistenceValidationError('invalid_input');
+  }
+
+  return normalizeLimit(limit);
 }
 
 /**
@@ -183,6 +236,29 @@ export class ApiAccountController {
     }
   }
 
+  /**
+   * One owner-scoped page of the audit trail, newest first. The envelope is
+   * `{ entries, nextCursor }`; entries contain counts and identifiers only.
+   * The owner is the session actor, and a NULL-owner deletion record can never
+   * match this predicate.
+   */
+  @Get('audit')
+  async listAudit(
+    @Req() request: SessionRequest,
+    @Res({ passthrough: true }) response: Response,
+    @Query('cursor') cursor: unknown,
+    @Query('limit') limit: unknown,
+  ): Promise<AccountAuditPage> {
+    const { userId } = requireSession(request);
+    const page = await this.runtime
+      .getService()
+      .listAudit(userId, readAuditCursor(cursor), readAuditLimit(limit));
+
+    response.setHeader('cache-control', 'no-store');
+
+    return page;
+  }
+
   @Delete()
   @HttpCode(HttpStatus.OK)
   @UseGuards(SessionCsrfGuard)
@@ -192,7 +268,7 @@ export class ApiAccountController {
     @Res({ passthrough: true }) response: Response,
   ): Promise<AccountDeletionResponse> {
     const { userId } = requireSession(request);
-    const confirmation = readConfirmation(body);
+    const confirmation = readConfirmationValue(body);
     const result = await this.runtime.getService().deleteAccount(userId, confirmation);
     // The committed deletion is the point of no return: revoke every live
     // session for this account across devices, including the caller's.

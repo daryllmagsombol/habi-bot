@@ -73,6 +73,39 @@ export interface AccountDeletionState {
   deletedAt: string | null;
 }
 
+export type AccountAuditAction = 'export' | 'delete';
+
+export type AccountAuditOutcome =
+  | 'requested'
+  | 'deleted'
+  | 'already_deleted'
+  | 'refused';
+
+/** One owner-visible audit row. `detail` is counts and identifiers only. */
+export interface AccountAuditEntry {
+  id: string;
+  action: AccountAuditAction;
+  outcome: AccountAuditOutcome;
+  requestedAt: string;
+  detail: Record<string, unknown>;
+}
+
+export interface AccountAuditPage {
+  entries: AccountAuditEntry[];
+  nextCursor: string | null;
+}
+
+export interface DeletionAuditInput {
+  /**
+   * Null only for the deletion record that must survive the deletion. Every
+   * other row is scoped to the owner whose data it describes.
+   */
+  ownerUserId: string | null;
+  actorUserId: string;
+  outcome: AccountAuditOutcome;
+  detail: Record<string, unknown>;
+}
+
 export interface AccountProfileExport {
   userId: string;
   email: string | null;
@@ -338,6 +371,21 @@ interface SearchRow {
 interface CountRow {
   count: number;
 }
+
+interface AccountAuditRow {
+  id: string;
+  action: AccountAuditAction;
+  outcome: AccountAuditOutcome;
+  requested_at: Timestamp;
+  detail: Record<string, unknown>;
+}
+
+/**
+ * Statuses a Run can be in while a worker may still be acting on it. Kept in
+ * step with the Run repository's own list; this is a read-only mirror used to
+ * find the Runs an account deletion must reconcile.
+ */
+const NON_TERMINAL_RUN_STATUSES = ['queued', 'running', 'retry_wait'] as const;
 
 function toNumber(value: string | number | null): number | null {
   return value === null ? null : Number(value);
@@ -622,6 +670,16 @@ function mapSearch(row: SearchRow): Record<string, unknown> {
   };
 }
 
+function mapAudit(row: AccountAuditRow): AccountAuditEntry {
+  return {
+    id: row.id,
+    action: row.action,
+    outcome: row.outcome,
+    requestedAt: toIso(row.requested_at),
+    detail: row.detail,
+  };
+}
+
 const SEARCH_SCOPE = `m.owner_user_id = $1
    AND c.owner_user_id = $1
    AND c.deleted_at IS NULL
@@ -754,6 +812,32 @@ const BY_ID_SQL: Readonly<
 };
 
 export class AccountRepository {
+  /**
+   * Unlocked identity read used to validate a deletion request before any
+   * cancellation side effect. The deletion transaction re-reads under
+   * `FOR UPDATE`, so this value is a preflight, not the authoritative state.
+   */
+  async readAccountState(
+    client: Queryable,
+    ownerUserId: string,
+  ): Promise<AccountDeletionState | null> {
+    const result = await client.query<AccountRow>(
+      'SELECT id, email, status, deleted_at FROM users WHERE id = $1',
+      [ownerUserId],
+    );
+    const row = result.rows[0];
+
+    if (row === undefined) {
+      return null;
+    }
+
+    return {
+      email: row.email,
+      status: row.status,
+      deletedAt: toNullableIso(row.deleted_at),
+    };
+  }
+
   async lockAccount(
     client: Queryable,
     ownerUserId: string,
@@ -811,6 +895,115 @@ export class AccountRepository {
       attachmentId: row.id,
       conversationId: row.conversation_id,
     }));
+  }
+
+  /**
+   * Records one export request with the section counts its own snapshot
+   * reported. It is written on a separate connection because the export
+   * snapshot itself is `READ ONLY`; it commits before the first body byte is
+   * yielded, so an export that streams (or that the client aborts halfway) is
+   * still recorded.
+   */
+  async insertExportAudit(
+    client: Queryable,
+    ownerUserId: string,
+    counts: ExportCounts,
+  ): Promise<void> {
+    await client.query(
+      `INSERT INTO account_audit (
+         owner_user_id, actor_user_id, action, outcome, detail
+       )
+       VALUES ($1, $1, 'export', 'requested', $2::jsonb)`,
+      [ownerUserId, JSON.stringify({ sections: counts })],
+    );
+  }
+
+  /**
+   * Records one deletion attempt. `ownerUserId: null` is the surviving
+   * deletion record; everything else is removed with the account.
+   */
+  async insertDeletionAudit(
+    client: Queryable,
+    input: DeletionAuditInput,
+  ): Promise<void> {
+    await client.query(
+      `INSERT INTO account_audit (
+         owner_user_id, actor_user_id, action, outcome, detail
+       )
+       VALUES ($1, $2, 'delete', $3, $4::jsonb)`,
+      [
+        input.ownerUserId,
+        input.actorUserId,
+        input.outcome,
+        JSON.stringify(input.detail),
+      ],
+    );
+  }
+
+  /** Newest-first owner page. Another account's rows are never selectable. */
+  async listAudit(
+    client: Queryable,
+    ownerUserId: string,
+    cursor: string | null,
+    limit: number,
+  ): Promise<AccountAuditPage> {
+    const result = await client.query<AccountAuditRow>(
+      `SELECT id, action, outcome, requested_at, detail
+         FROM account_audit
+        WHERE owner_user_id = $1
+          AND ($2::bigint IS NULL OR id < $2::bigint)
+        ORDER BY id DESC
+        LIMIT $3`,
+      [ownerUserId, cursor, limit],
+    );
+    const entries = result.rows.map(mapAudit);
+    const last = result.rows.at(-1);
+
+    return {
+      entries,
+      nextCursor:
+        result.rows.length === limit && last !== undefined ? last.id : null,
+    };
+  }
+
+  /** Runs a deletion must reconcile before it removes their rows. */
+  async listNonTerminalRunIds(
+    client: Queryable,
+    ownerUserId: string,
+  ): Promise<string[]> {
+    const result = await client.query<{ id: string }>(
+      `SELECT id
+         FROM runs
+        WHERE owner_user_id = $1
+          AND status = ANY($2::text[])
+        ORDER BY id`,
+      [ownerUserId, NON_TERMINAL_RUN_STATUSES],
+    );
+
+    return result.rows.map((row) => row.id);
+  }
+
+  /** Subset of `runIds` that is still non-terminal. */
+  async listOutstandingRunIds(
+    client: Queryable,
+    ownerUserId: string,
+    runIds: readonly string[],
+  ): Promise<string[]> {
+    if (runIds.length === 0) {
+      return [];
+    }
+
+    const result = await client.query<{ id: string }>(
+      `SELECT id
+         FROM runs
+        WHERE owner_user_id = $1
+          AND id = ANY($2::uuid[])
+          AND status = ANY($3::text[])
+        ORDER BY id`,
+      [ownerUserId, runIds, NON_TERMINAL_RUN_STATUSES],
+    );
+
+    return result.rows.map((row) => row.id);
   }
 
   async countExport(
@@ -1105,6 +1298,9 @@ export class AccountRepository {
 
     removed.attachmentText = await ownedDelete('document_chunks', 'owner_user_id');
     removed.attachments = await ownedDelete('attachments', 'owner_user_id');
+    // The audit trail is account data too. The surviving deletion record is
+    // inserted with a NULL owner after this purge, so it is not removed here.
+    await ownedDelete('account_audit', 'owner_user_id');
     removed.memoryAudit = await ownedDelete('memory_audit', 'owner_user_id');
     removed.memories = await ownedDelete('memories', 'owner_user_id');
     removed.artifactVersions = await ownedDelete(
