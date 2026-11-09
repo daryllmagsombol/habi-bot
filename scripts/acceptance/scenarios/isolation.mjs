@@ -54,10 +54,10 @@ export const isolationScenario = {
       const result = await requestA('/api/bots');
 
       assert.equal(result.status, 200);
-      const ids = result.body.bots.map((bot) => bot.id);
+      const ids = new Set(result.body.bots.map((bot) => bot.id));
 
-      assert.ok(ids.includes(world.bots.A.id), 'A must see its own Bot');
-      assert.ok(!ids.includes(world.bots.B.id), 'A must not see B\'s Bot');
+      assert.ok(ids.has(world.bots.A.id), 'A must see its own Bot');
+      assert.ok(!ids.has(world.bots.B.id), 'A must not see B\'s Bot');
 
       return { botCount: ids.length, ownBotPresent: true, foreignBotPresent: false };
     });
@@ -154,8 +154,8 @@ export const isolationScenario = {
       for (const [method, path, body] of probes) {
         const result = await requestA(path, {
           method,
-          ...(body === undefined ? {} : { body }),
-          ...(method === 'GET' ? {} : { csrf: true }),
+          body,
+          csrf: method !== 'GET',
         });
 
         expectHttpNotFound(result, `${method} ${path}`);
@@ -168,6 +168,32 @@ export const isolationScenario = {
       }
 
       return statuses;
+    });
+
+    await runCheck(checks, "B's own session is denied A's ids", async () => {
+      const symmetric = [
+        ['GET', `/api/bots/${world.bots.A.id}`],
+        ['GET', `/api/threads/${world.conversations.A.id}/messages`],
+        ['GET', `/api/artifacts/${world.artifacts.A.artifact.id}`],
+        [
+          'POST',
+          `/api/memories/${world.memories.A.id}/approvals`,
+          { bot: true, thread: false },
+        ],
+        ['DELETE', `/api/threads/${world.conversations.A.id}`],
+      ];
+
+      for (const [method, path, body] of symmetric) {
+        const result = await requestB(path, {
+          method,
+          body,
+          csrf: method !== 'GET',
+        });
+
+        expectHttpNotFound(result, `${method} ${path}`);
+      }
+
+      return { probed: symmetric.length };
     });
 
     await runCheck(checks, 'foreign message was not persisted', async () => {
@@ -212,10 +238,10 @@ export const isolationScenario = {
 
       const list = await requestA('/api/artifacts');
       assert.equal(list.status, 200);
-      const ids = list.body.artifacts.map((item) => item.id);
+      const ids = new Set(list.body.artifacts.map((item) => item.id));
 
-      assert.ok(ids.includes(world.artifacts.A.artifact.id));
-      assert.ok(!ids.includes(world.artifacts.B.artifact.id));
+      assert.ok(ids.has(world.artifacts.A.artifact.id));
+      assert.ok(!ids.has(world.artifacts.B.artifact.id));
 
       return {
         ownReadStatus: own.status,
