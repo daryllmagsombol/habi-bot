@@ -11,7 +11,7 @@ import {
 import { chatErrorMessage } from '../../lib/api/browser';
 
 export interface AccountLiveProps {
-  /** The signed-in account's email, read server-side from the session. */
+  /** The signed-in account's email, read server-side from `/api/account`. */
   readonly email: string;
 }
 
@@ -34,7 +34,11 @@ export function AccountLive({ email }: Readonly<AccountLiveProps>) {
     setExportStatus(undefined);
 
     void downloadExport()
-      .then(({ filename }) => setExportStatus(`Export saved as ${filename}.`))
+      .then(() =>
+        setExportStatus(
+          'The export download has started. Your browser streams it straight to disk.',
+        ),
+      )
       .catch((error: unknown) => setExportError(chatErrorMessage(error)))
       .finally(() => setExportPending(false));
   }

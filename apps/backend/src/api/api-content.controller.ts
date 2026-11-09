@@ -30,6 +30,7 @@
  *   GET    /api/skills
  *   POST   /api/skills
  *   GET    /api/skills/:skillId
+ *   PATCH  /api/skills/:skillId
  *   POST   /api/skills/:skillId/attach
  *   POST   /api/skills/:skillId/detach
  *   GET    /api/search
@@ -479,6 +480,18 @@ export class ApiContentController {
     const { userId } = requireSession(request);
 
     return this.service.getSkill(userId, skillId);
+  }
+
+  @Patch('skills/:skillId')
+  @UseGuards(SessionCsrfGuard)
+  updateSkill(
+    @Param('skillId') skillId: string,
+    @Body() body: unknown,
+    @Req() request: SessionRequest,
+  ): ReturnType<ApiService['updateSkill']> {
+    const { userId } = requireSession(request);
+
+    return this.service.updateSkill(userId, skillId, body);
   }
 
   @Post('skills/:skillId/attach')

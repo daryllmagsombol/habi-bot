@@ -12,7 +12,7 @@ import {
 } from '../../components/ui';
 import { readApiConfig } from '../../lib/api/config';
 import { AccountLive } from './account-live';
-import { fetchAccountViewer } from './session';
+import { fetchAccountProfile } from './session';
 
 export const metadata: Metadata = {
   title: 'Account',
@@ -133,10 +133,10 @@ export default async function AccountPage() {
     return <UnavailableAccountPage invalid />;
   }
 
-  const viewer = await fetchAccountViewer();
+  const profile = await fetchAccountProfile();
 
-  if (!viewer.ok) {
-    return viewer.reason === 'unauthorized' ? (
+  if (!profile.ok) {
+    return profile.reason === 'unauthorized' ? (
       <SignInAccountPage />
     ) : (
       <UnavailableAccountPage invalid={false} />
@@ -151,7 +151,7 @@ export default async function AccountPage() {
       />
 
       <div className="mt-8">
-        <AccountLive email={viewer.viewer.email} />
+        <AccountLive email={profile.account.email} />
       </div>
     </AccountFrame>
   );

@@ -129,8 +129,14 @@ props), receives one `WorkspaceData` object, and passes slices to the groups.
   moving scroll or the current selection. Never invent a cursor for a surface that has none.
 - `ArtifactForm` and `SkillForm` enforce the API bounds before submitting (artifact content 100 KB
   over transport; skill name 1–80, description ≤500, body ≤64 KiB) and state the bound in the hint.
+  Both take a `mode` rather than growing a second component: `ArtifactForm` is `'create' | 'metadata'`
+  (metadata edits never show a content field and say the body is untouched), `SkillForm` is
+  `'create' | 'edit'` (edit prefills and submits only the changed fields). A mode is a typed union,
+  so an impossible combination is a type error.
 - `components/account` owns the destructive surface: `ACCOUNT_BACKUP_DISCLOSURE` is the single
-  source of the retention wording, so the 184-day claim cannot drift between copy and API.
+  source of the retention wording, so the 184-day claim cannot drift between copy and API. The
+  export is a streamed browser download behind an account-profile preflight — never a buffered
+  `Blob` — and a failed preflight renders the error state rather than navigating to raw JSON.
 
 ## 4. Composition rules
 

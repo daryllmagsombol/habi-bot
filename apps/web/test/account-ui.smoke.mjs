@@ -14,13 +14,29 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { createServer as createHttpServer } from 'node:http';
 import { createServer } from 'node:net';
-import { createRequire } from 'node:module';
+import { createRequire, registerHooks } from 'node:module';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
 const require = createRequire(import.meta.url);
 const cwd = fileURLToPath(new URL('../', import.meta.url));
+
+// The client module is TypeScript with bundler-style extensionless imports.
+// Node can strip the types, so the only missing piece is that resolution.
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    try {
+      return nextResolve(specifier, context);
+    } catch (error) {
+      if (specifier.startsWith('.') && !/\.[a-z]+$/.test(specifier)) {
+        return nextResolve(`${specifier}.ts`, context);
+      }
+
+      throw error;
+    }
+  },
+});
 
 const SESSION = 'session-test-secret';
 const CSRF = 'csrf-test-token';
@@ -177,8 +193,17 @@ function createStub() {
         return;
       }
 
-      if (request.method === 'GET' && request.url === '/auth/me') {
-        json(response, 200, { user: { userId: 'user-1', email: EMAIL } });
+      if (request.method === 'GET' && request.url === '/api/account') {
+        json(response, 200, {
+          account: {
+            userId: 'user-1',
+            email: EMAIL,
+            status: 'active',
+            createdAt: NOW,
+            updatedAt: NOW,
+            emailVerifiedAt: NOW,
+          },
+        });
         return;
       }
 
@@ -336,6 +361,18 @@ test('account preview and live surfaces stay honest and forward correctly', { ti
     assert.match(html, /aria-label="Workspace"/);
     assert.ok(!html.includes(upstreamOrigin), 'the backend origin leaked into the page HTML');
 
+    assert.equal(
+      stub.requests.find((entry) => entry.url === '/auth/me'),
+      undefined,
+      'the account page still reached the auth service instead of GET /api/account',
+    );
+    const accountRead = stub.requests.find(
+      (entry) => entry.method === 'GET' && entry.url === '/api/account',
+    );
+    assert.ok(accountRead, 'the account page did not read GET /api/account');
+    assert.equal(accountRead.headers.cookie, `habi_session=${SESSION}`);
+    assert.equal(accountRead.headers.accept, 'application/json');
+
     const exportButton = /<button[^>]*>\s*Download export/.exec(html);
     assert.ok(exportButton, 'the live page has no export button');
     assert.ok(!hasDisabledAttribute(exportButton[0]), 'the live export button is disabled');
@@ -443,6 +480,46 @@ test('account preview and live surfaces stay honest and forward correctly', { ti
     await new Promise((resolve, reject) =>
       stub.server.close((error) => (error ? reject(error) : resolve())),
     );
+  }
+});
+
+test('a failed account preflight blocks the export download', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalWindow = globalThis.window;
+  const navigations = [];
+  const calls = [];
+
+  globalThis.fetch = async (input, init) => {
+    calls.push({ path: String(input), method: init?.method });
+    return Response.json({ error: { code: 'unauthenticated' } }, { status: 401 });
+  };
+  globalThis.window = {
+    location: {
+      replace(url) {
+        navigations.push(url);
+      },
+    },
+  };
+
+  try {
+    const { downloadExport } = await import('../lib/api/account.ts');
+
+    await assert.rejects(downloadExport, (error) => {
+      assert.equal(error.name, 'ChatRequestError');
+      assert.equal(error.code, 'unauthenticated');
+      assert.equal(error.status, 401);
+      return true;
+    });
+
+    assert.deepEqual(
+      calls.map((call) => call.path),
+      ['/api/account'],
+      'only the cheap preflight should be requested',
+    );
+    assert.deepEqual(navigations, [], 'a failed preflight must never navigate to the export');
+  } finally {
+    globalThis.fetch = originalFetch;
+    globalThis.window = originalWindow;
   }
 });
 

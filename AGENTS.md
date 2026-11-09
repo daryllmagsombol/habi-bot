@@ -27,6 +27,8 @@ This is a project-specific supplement to the global agent contract. Read it befo
 - `pnpm test` — workspace/package tests. `pnpm test:verification` — focused verification-runner tests. They are distinct.
 - Direct CI-focused checks: `node --test .github/scripts/review*.test.mjs`; `node --test scripts/ci/sonarqube.test.mjs`; `node --test scripts/ci/compose.test.mjs` (skips its Compose CLI cases when Docker is absent); `actionlint .github/workflows/ci.yml .github/workflows/opencode-review.yml .github/workflows/sonarqube.yml`. Keep each command separate.
 - Doc-only changes require link/path/Markdown checks; the full foundation suite is not required.
+- `pnpm lint` is part of every verification run and enforces the mechanical subset of the Sonar
+  idiomatic-form table. A change that fails lint is not done, whatever the scan would say later.
 
 ## CI, review, and Sonar boundaries
 
@@ -46,6 +48,25 @@ This is a project-specific supplement to the global agent contract. Read it befo
 - Style through `apps/web/app/tokens.css` only. New colour, spacing, radius or motion values are added as tokens in both themes, not as literals in a component.
 - Both themes ship together: a UI change is not done until the affected route is checked at 320, 768 and 1440 in light and dark, and `pnpm --filter @habi/web test` plus `test:browser` pass.
 - Sample data is labelled as sample data, and the copy never claims a capability the backend does not enforce.
+
+## Sonar findings: read the guide, record what you learn
+
+- **Read [the Sonar engineering guidelines](docs/SONAR_GUIDELINES.md) before writing TypeScript or
+  JavaScript.** Its "Prefer the idiomatic form these rules ask for" table is the write-time rule set;
+  applying it is not optional and is not a step to defer until a scan complains.
+- Two of those idioms are **lint-enforced** in `packages/config/eslint/base.mjs` (`no-duplicate-imports`
+  and `max-nested-callbacks`), so `pnpm lint` rejects them outright. The rest cannot be decided by lint
+  without disagreeing with the real gate; the config records why each one is in or out.
+- **When a scan reports findings, fix them and then close the loop.** Fixing is not the end of the
+  task. For every finding that is generalizable — a pattern another lane will hit again — add a row to
+  the guidelines' *Findings log* with the date, the source (PR number and rule key), the guideline it
+  supports, and the evidence. A finding that is local to one function and will not recur is fixed and
+  not logged.
+- Recording a **log row** is expected and needs no approval. Changing a **guideline** — adding a rule,
+  moving a threshold, or adding an exclusion — is a policy change and requires owner validation, per
+  the guideline file's own rule lifecycle. Do not silently turn a fix into policy.
+- Never record a finding that was not reproduced from an actual configured scan. AI review output,
+  lint from another project, and copied thresholds are not findings.
 
 ## Security and change discipline
 

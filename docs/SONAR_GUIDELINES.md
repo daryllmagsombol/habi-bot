@@ -65,6 +65,47 @@ if (!Number.isInteger(limit) || limit < 1 || limit > MAX_LIMIT) {
 }
 ```
 
+### Prefer the idiomatic form these rules ask for
+
+The repository's own Sonar analyses keep landing on the same handful of idioms. Each is a small
+write-time choice; none needs a suppression, and every one was fixed the same way after the fact.
+Write them correctly the first time. The **Enforced** column says whether `pnpm lint` rejects the
+wrong form outright; where it says *scan*, lint cannot decide the case without disagreeing with the
+real gate, so the table and the scan carry it.
+
+| Instead of | Write | Rule | Enforced |
+| --- | --- | --- | --- |
+| Several `array.push(a)` calls in a row | one `array.push(a, b, c)`, or build with `map`/spread | `S7778` | scan |
+| A long method with many branches | one named helper per decision, called in order | `S3776` | scan |
+| A nested ternary chain | an early return, or a named lookup | `S3358` | scan |
+| Callbacks nested past four levels | a named module- or hook-scope function | `S2004` | **lint** |
+| `str.replace(/…/g, …)` | `str.replaceAll(…)` | `S7781` | scan |
+| `rows[rows.length - 1]` | `rows.at(-1)` | `S7755` | scan |
+| `x === null \|\| x.y` | `x?.y` | `S6582` | scan |
+| `window.location`, `window.matchMedia` | `globalThis.…` in client components | `S7764` | scan |
+| Two `import` statements from one module | one statement | `S3863` | **lint** |
+| `?:` combined with `\| undefined` | one or the other: optional, or required-with-explicit-`undefined` | `S4782` | scan |
+| A wrapper that only returns `Number(x)` | `Number(x)` at the call site | `S7770` | scan |
+| `catch (caught)` | `catch (error_)` | `S7718` | scan |
+
+`S2004` and `S3863` are enforced by `packages/config/eslint/base.mjs`, so a wrong form fails `pnpm lint`
+before any scan runs. `S3358` is **not** lint-enforced on purpose: `no-nested-ternary` cannot tell a
+value-position chain from JSX conditional rendering, so it would reject idiomatic React while the real
+gate stays silent — the table's guidance is the control there.
+
+Complexity rules (`S3776`, `S2004`) are not asking for fewer features. They are asking for the
+decision to have a name. When a function is genuinely an ordered sequence of trust checks, keep the
+order and extract each check — reordering changes which error wins, which is a behaviour change.
+
+Two notes that came up repeatedly:
+
+- Heterogeneous tuple arrays (`[method, path]` and `[method, path, body]`) make destructured values
+  look like `string | object`, which then triggers stringification and comparison rules. Prefer
+  named object fields (`{ method, path, body }`) when an array mixes shapes.
+- A regex anchored at `^` and run per line is linear. Measure before accepting a `S5852`
+  super-linear-backtracking report: the repository has both fixed a real quadratic pattern and
+  reviewed a false one, and the deciding evidence was timing at doubling input sizes.
+
 ### Keep control flow readable
 
 Prefer early returns and small functions over deeply nested conditionals. This is a maintainability guideline, not a mechanical style rule or an unavailable lint rule.
@@ -148,4 +189,5 @@ No validated findings have been recorded yet. Do not add hypothetical AI output,
 
 | Date | Source | Guideline | Evidence | Decision |
 |---|---|---|---|---|
-| — | — | — | — | — |
+| 2026-11-09 | SonarQube PR analyses, PRs #86–#106 | Idiomatic-form table above (`S7778`, `S3776`, `S3358`, `S2004`, `S7781`, `S7755`, `S6582`, `S7764`, `S3863`, `S4782`, `S7770`, `S7718`) | ~100 findings across 12 PRs; each reproduced from a configured scan with rule key, file and line, and corrected by the documented rewrite | **Validated by owner 2026-11-09** — write-time guidance, not a new gate |
+| 2026-11-09 | SonarQube PR #103 hotspots `S5852` | Measure a backtracking report before accepting it; anchor `^`-anchored per-line patterns are linear | `0.20 / 0.40 / 0.80 ms` at 200k / 400k / 800k chars — linear; contrasted with `URL_CREDENTIALS` at `6.0 s` for 100 KB before anchoring | **Validated by owner 2026-11-09** |

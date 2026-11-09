@@ -8,8 +8,15 @@
  *
  * Route table:
  *
+ *   GET    /api/account          the owner's identity profile (lightweight)
  *   GET    /api/account/export   stream the owner's complete export
  *   DELETE /api/account          delete the owner's account and owned rows
+ *
+ * The profile read returns only the identity fields the account page shows —
+ * user id, email, status, timestamps, and verification time. It is not an
+ * export: there is no owned-data content or count, no credential material, no
+ * session or CSRF field, and no SSO identity. Ownership comes from the session
+ * record; query, path, and body identity fields are never read.
  *
  * Export is a single JSON document assembled from owner-scoped, bounded pages
  * and written as it is read. It includes the profile, Bots and instructions,
@@ -89,6 +96,21 @@ function exportFilename(at: Date): string {
   return `habi-account-export-${at.toISOString().replaceAll(/[:.]/g, '-')}.json`;
 }
 
+/**
+ * The account page identity, and nothing else. Character-for-character the
+ * shape the web client renders: no recovery email, no credential or session
+ * material, no SSO identity, and no owned-data counts.
+ */
+export interface AccountProfile {
+  userId: string;
+  /** Null only for an identity created without an email (SSO-only path). */
+  email: string | null;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+  emailVerifiedAt: string | null;
+}
+
 @Controller('api/account')
 @UseGuards(SessionAuthGuard)
 @UseFilters(ApiErrorFilter)
@@ -97,6 +119,33 @@ export class ApiAccountController {
     @Inject(AccountRuntime) private readonly runtime: AccountRuntime,
     @Inject(SessionService) private readonly sessions: SessionService,
   ) {}
+
+  /**
+   * One lightweight owner-scoped profile read. It reuses the export profile
+   * query (the same active-identity predicate) but returns only the identity
+   * fields above; nothing is streamed and no export section is assembled.
+   */
+  @Get()
+  async getAccount(
+    @Req() request: SessionRequest,
+    @Res({ passthrough: true }) response: Response,
+  ): Promise<{ account: AccountProfile }> {
+    const { userId } = requireSession(request);
+    const profile = await this.runtime.getService().assertExportable(userId);
+
+    response.setHeader('cache-control', 'no-store');
+
+    return {
+      account: {
+        userId: profile.userId,
+        email: profile.email,
+        status: profile.status,
+        createdAt: profile.createdAt,
+        updatedAt: profile.updatedAt,
+        emailVerifiedAt: profile.emailVerifiedAt,
+      },
+    };
+  }
 
   /**
    * Streams one owner-scoped JSON export. Ownership is resolved before any
