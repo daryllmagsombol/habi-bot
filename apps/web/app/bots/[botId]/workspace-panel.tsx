@@ -1,5 +1,6 @@
 'use client';
 
+import type { ReactNode } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import {
   ArtifactPanel,
@@ -30,6 +31,234 @@ export interface WorkspacePanelProps {
   readonly onClose: () => void;
 }
 
+interface PanelShellProps {
+  readonly panel: PanelId;
+  readonly conversationHref: string;
+  readonly reduceMotion: boolean | null;
+  readonly onClose: () => void;
+  readonly children: ReactNode;
+}
+
+/** The moving sheet on a phone, the docked card on a wide screen. */
+function PanelShell({
+  panel,
+  conversationHref,
+  reduceMotion,
+  onClose,
+  children,
+}: Readonly<PanelShellProps>) {
+  return (
+    <motion.div
+      key={panel}
+      initial={reduceMotion === true ? false : { opacity: 0, x: PANEL_OFFSET }}
+      animate={{ opacity: 1, x: 0 }}
+      exit={reduceMotion === true ? { opacity: 0 } : { opacity: 0, x: PANEL_OFFSET / 2 }}
+      transition={{ duration: DURATION.base, ease: EASE }}
+      className="fixed inset-x-0 top-[var(--habi-bar-height)] bottom-0 z-40 lg:inset-auto lg:top-[calc(var(--habi-bar-height)_+_var(--habi-space-4))] lg:right-6 lg:bottom-auto lg:h-[calc(100svh_-_var(--habi-bar-height)_-_var(--habi-space-7))] lg:w-panel"
+    >
+      <PanelCard
+        panel={panel}
+        titleId={`${panel}-panel-title`}
+        closeHref={conversationHref}
+        onClose={onClose}
+      >
+        {children}
+      </PanelCard>
+    </motion.div>
+  );
+}
+
+interface DocumentBodyProps {
+  readonly thread: WorkspaceThread;
+  readonly shownThreadTitle: string | undefined;
+  readonly mode: WorkspaceData['mode'];
+}
+
+/** The document panel: the selected thread's attachments and their text. */
+function DocumentBody({ thread, shownThreadTitle, mode }: Readonly<DocumentBodyProps>) {
+  return (
+    <DocumentPanel
+      documents={thread.documents}
+      threadTitle={shownThreadTitle ?? thread.view.title}
+      mode={mode}
+    />
+  );
+}
+
+/** The memory status line under the gates; preview wording when not wired. */
+function memoryChangedNote(live: boolean, actions: WorkspaceActions): string | undefined {
+  if (!live) {
+    return 'Preview only — this change is not saved.';
+  }
+
+  return actions.memoryError ?? actions.memoryStatus;
+}
+
+interface MemoryComposerSectionProps {
+  readonly threadId: string;
+  readonly live: boolean;
+  readonly actions: WorkspaceActions;
+}
+
+/** The proposer, bound to the open thread only when a write can be saved. */
+function MemoryComposerSection({
+  threadId,
+  live,
+  actions,
+}: Readonly<MemoryComposerSectionProps>) {
+  if (!live) {
+    return (
+      <MemoryComposer
+        threadId={undefined}
+        onSubmit={() => {}}
+        disabledNote="Preview only — no memory is saved."
+      />
+    );
+  }
+
+  return (
+    <MemoryComposer
+      threadId={threadId}
+      onSubmit={actions.proposeMemory}
+      pending={actions.memoryPendingId === 'new'}
+      error={actions.memoryError}
+      status={actions.memoryStatus}
+    />
+  );
+}
+
+/** The skill list, absent rather than empty when the panel is a preview. */
+function skillsSectionOf(
+  live: boolean,
+  botId: string,
+  actions: WorkspaceActions,
+): ReactNode {
+  if (!live) {
+    return undefined;
+  }
+
+  return (
+    <SkillsPanel
+      skills={actions.skills}
+      botId={botId}
+      state={actions.skillsState === 'idle' ? 'loading' : actions.skillsState}
+      error={actions.skillsError}
+      onAttach={actions.attachSkillToBot}
+      onDetach={actions.detachSkillFromBot}
+      pendingId={actions.skillPendingId}
+    />
+  );
+}
+
+/** The on-demand search box, absent rather than inert when not wired. */
+function searchSectionOf(
+  live: boolean,
+  botId: string,
+  actions: WorkspaceActions,
+): ReactNode {
+  if (!live) {
+    return undefined;
+  }
+
+  return (
+    <SearchPanel
+      botId={botId}
+      results={actions.searchResults}
+      state={actions.searchState}
+      error={actions.searchError}
+      lastQuery={actions.searchQuery}
+      onSearch={actions.runSearch}
+    />
+  );
+}
+
+/** The artifact list and editor, absent rather than empty when not wired. */
+function artifactsSectionOf(live: boolean, actions: WorkspaceActions): ReactNode {
+  if (!live) {
+    return undefined;
+  }
+
+  return (
+    <ArtifactPanel
+      artifacts={actions.artifacts}
+      detail={actions.artifactDetail}
+      versions={actions.artifactVersions}
+      state={actions.artifactsState}
+      busy={actions.artifactBusy}
+      error={actions.artifactError}
+      status={actions.artifactStatus}
+      onSelect={actions.selectArtifact}
+      onSave={actions.saveArtifact}
+      onRestore={actions.restoreArtifact}
+    />
+  );
+}
+
+interface ContextBodyProps {
+  readonly thread: WorkspaceThread;
+  readonly live: boolean;
+  readonly liveRun: LiveRun;
+  readonly actions: WorkspaceActions;
+  readonly data: WorkspaceData;
+}
+
+/** The context panel: memory controls plus the on-demand tool sections. */
+function ContextBody({ thread, live, liveRun, actions, data }: Readonly<ContextBodyProps>) {
+  return (
+    <ContextPanel
+      memories={data.memories}
+      memoryState={data.memoryState}
+      run={panelRunOf(thread, live, liveRun)}
+      allowance={data.allowance}
+      mode={data.mode}
+      onMemoryToggle={live ? actions.toggleMemory : undefined}
+      memoryChangedNote={memoryChangedNote(live, actions)}
+      memoryComposer={
+        <MemoryComposerSection threadId={thread.id} live={live} actions={actions} />
+      }
+      skillsSection={skillsSectionOf(live, data.bot.id, actions)}
+      searchSection={searchSectionOf(live, data.bot.id, actions)}
+      artifactsSection={artifactsSectionOf(live, actions)}
+    />
+  );
+}
+
+interface PanelBodyProps extends ContextBodyProps {
+  readonly panel: PanelId;
+  readonly shownThreadTitle: string | undefined;
+}
+
+/** Document or context: the one choice the panel makes. */
+function PanelBody({
+  panel,
+  thread,
+  shownThreadTitle,
+  live,
+  liveRun,
+  actions,
+  data,
+}: Readonly<PanelBodyProps>) {
+  if (panel === 'document') {
+    return (
+      <DocumentBody
+        thread={thread}
+        shownThreadTitle={shownThreadTitle}
+        mode={data.mode}
+      />
+    );
+  }
+
+  return (
+    <ContextBody
+      thread={thread}
+      live={live}
+      liveRun={liveRun}
+      actions={actions}
+      data={data}
+    />
+  );
+}
+
 /**
  * The evidence card. On a phone it is a full-height sheet above the workspace;
  * on a wide screen it docks at the right edge. Keeping `AnimatePresence` mounted
@@ -54,103 +283,22 @@ export function WorkspacePanel({
   return (
     <AnimatePresence initial={false}>
       {panel === undefined || thread === undefined ? null : (
-        <motion.div
-          key={panel}
-          initial={reduceMotion === true ? false : { opacity: 0, x: PANEL_OFFSET }}
-          animate={{ opacity: 1, x: 0 }}
-          exit={reduceMotion === true ? { opacity: 0 } : { opacity: 0, x: PANEL_OFFSET / 2 }}
-          transition={{ duration: DURATION.base, ease: EASE }}
-          className="fixed inset-x-0 top-[var(--habi-bar-height)] bottom-0 z-40 lg:inset-auto lg:top-[calc(var(--habi-bar-height)_+_var(--habi-space-4))] lg:right-6 lg:bottom-auto lg:h-[calc(100svh_-_var(--habi-bar-height)_-_var(--habi-space-7))] lg:w-panel"
+        <PanelShell
+          panel={panel}
+          conversationHref={conversationHref}
+          reduceMotion={reduceMotion}
+          onClose={onClose}
         >
-          <PanelCard
+          <PanelBody
             panel={panel}
-            titleId={`${panel}-panel-title`}
-            closeHref={conversationHref}
-            onClose={onClose}
-          >
-            {panel === 'document' ? (
-              <DocumentPanel
-                documents={thread.documents}
-                threadTitle={shownThreadTitle ?? thread.view.title}
-                mode={data.mode}
-              />
-            ) : (
-              <ContextPanel
-                memories={data.memories}
-                memoryState={data.memoryState}
-                run={panelRunOf(thread, live, liveRun)}
-                allowance={data.allowance}
-                mode={data.mode}
-                onMemoryToggle={live ? actions.toggleMemory : undefined}
-                memoryChangedNote={
-                  live
-                    ? (actions.memoryError ?? actions.memoryStatus)
-                    : 'Preview only — this change is not saved.'
-                }
-                memoryComposer={
-                  live ? (
-                    <MemoryComposer
-                      threadId={thread.id}
-                      onSubmit={actions.proposeMemory}
-                      pending={actions.memoryPendingId === 'new'}
-                      error={actions.memoryError}
-                      status={actions.memoryStatus}
-                    />
-                  ) : (
-                    <MemoryComposer
-                      threadId={undefined}
-                      onSubmit={() => {}}
-                      disabledNote="Preview only — no memory is saved."
-                    />
-                  )
-                }
-                skillsSection={
-                  live ? (
-                    <SkillsPanel
-                      skills={actions.skills}
-                      botId={data.bot.id}
-                      state={
-                        actions.skillsState === 'idle' ? 'loading' : actions.skillsState
-                      }
-                      error={actions.skillsError}
-                      onAttach={actions.attachSkillToBot}
-                      onDetach={actions.detachSkillFromBot}
-                      pendingId={actions.skillPendingId}
-                    />
-                  ) : undefined
-                }
-                searchSection={
-                  live ? (
-                    <SearchPanel
-                      botId={data.bot.id}
-                      results={actions.searchResults}
-                      state={actions.searchState}
-                      error={actions.searchError}
-                      lastQuery={actions.searchQuery}
-                      onSearch={actions.runSearch}
-                    />
-                  ) : undefined
-                }
-                artifactsSection={
-                  live ? (
-                    <ArtifactPanel
-                      artifacts={actions.artifacts}
-                      detail={actions.artifactDetail}
-                      versions={actions.artifactVersions}
-                      state={actions.artifactsState}
-                      busy={actions.artifactBusy}
-                      error={actions.artifactError}
-                      status={actions.artifactStatus}
-                      onSelect={actions.selectArtifact}
-                      onSave={actions.saveArtifact}
-                      onRestore={actions.restoreArtifact}
-                    />
-                  ) : undefined
-                }
-              />
-            )}
-          </PanelCard>
-        </motion.div>
+            data={data}
+            thread={thread}
+            shownThreadTitle={shownThreadTitle}
+            live={live}
+            liveRun={liveRun}
+            actions={actions}
+          />
+        </PanelShell>
       )}
     </AnimatePresence>
   );

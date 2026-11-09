@@ -36,8 +36,7 @@ import type {
   MessagePageDto,
   RunDto,
 } from '../../../lib/api/types';
-import type { ApiResult } from '../../../lib/api/server';
-import type { AttachmentContentResult } from '../../../lib/api/server';
+import type { ApiResult, AttachmentContentResult } from '../../../lib/api/server';
 import { botHref, threadHref } from '../../../lib/links';
 import type { WorkspaceData, WorkspaceThread } from './workspace-data';
 
@@ -316,9 +315,28 @@ export interface LiveWorkspaceInput {
   readonly selectedThreadId: string | undefined;
   readonly messages: MessagePageDto | undefined;
   /** Absent when the memory page could not be read. */
-  readonly memories?: MemoryListDto | undefined;
+  readonly memories: MemoryListDto | undefined;
   /** Documents for the selected thread; empty when it has none. */
   readonly documents?: readonly DocumentView[];
+}
+
+/**
+ * The identity card's one-line summary. An unread page says so rather than
+ * reporting zero memories.
+ */
+function memorySummaryOf(
+  memories: MemoryListDto | undefined,
+  mapping: MemoryMapping,
+): string {
+  if (memories === undefined) {
+    return 'No tools · Memory unavailable';
+  }
+
+  if (mapping.items.length === 0) {
+    return 'No tools · No memories saved';
+  }
+
+  return `No tools · ${mapping.approved} of ${mapping.items.length} memories selected`;
 }
 
 export function buildLiveWorkspace(input: LiveWorkspaceInput): WorkspaceData {
@@ -337,12 +355,7 @@ export function buildLiveWorkspace(input: LiveWorkspaceInput): WorkspaceData {
     0,
   );
   const memoryMapping = memoriesToViews(memories?.memories ?? []);
-  const memorySummary =
-    memories === undefined
-      ? 'No tools · Memory unavailable'
-      : memoryMapping.items.length === 0
-        ? 'No tools · No memories saved'
-        : `No tools · ${memoryMapping.approved} of ${memoryMapping.items.length} memories selected`;
+  const memorySummary = memorySummaryOf(memories, memoryMapping);
 
   return {
     bot: {

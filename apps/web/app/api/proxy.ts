@@ -271,3 +271,35 @@ export function withSearch(request: Request, path: string): string {
 
   return search.length === 0 ? path : `${path}${search}`;
 }
+
+/** A dynamic route's awaited segment map, as Next hands it to a handler. */
+export interface ResourceContext {
+  readonly params: Promise<Record<string, string>>;
+}
+
+/**
+ * The generic single-resource route: one id, one collection.
+ *
+ * An unusable id is answered here as `404 not_found` and never becomes part of
+ * a path. Everything else is forwarded with the incoming method, so `GET`,
+ * `PATCH` and `DELETE` share one implementation. `relaySearch` carries the
+ * caller's query string for reads that page or filter.
+ */
+export function singleResourceHandler(
+  field: string,
+  collection: string,
+  relaySearch: boolean,
+): (request: Request, context: ResourceContext) => Promise<Response> {
+  return async (request, context) => {
+    const params = await context.params;
+    const segment = safeSegment(params[field]);
+
+    if (segment === undefined) {
+      return proxyError('not_found', 404);
+    }
+
+    const path = `/${collection}/${segment}`;
+
+    return forwardJson(request, relaySearch ? withSearch(request, path) : path);
+  };
+}

@@ -14,6 +14,22 @@ export interface WorkspaceSidebarProps {
   readonly actions: WorkspaceActions;
 }
 
+/** What the memory card says when nothing is recalled, per mode and state. */
+function emptyMemoryMessage(
+  live: boolean,
+  memoryState: WorkspaceData['memoryState'],
+): string {
+  if (!live) {
+    return 'No memories saved. This bot starts every thread with nothing recalled.';
+  }
+
+  if (memoryState === 'unavailable') {
+    return 'The memory records could not be loaded from this API. Nothing is shown, so nothing can be mistaken for recalled.';
+  }
+
+  return 'No memories saved for this Bot. A memory starts with both gates off.';
+}
+
 /** The list column: the Bot's threads, then what memory reached this Bot. */
 export function WorkspaceSidebar({
   data,
@@ -83,13 +99,7 @@ export function WorkspaceSidebar({
         headingId="bot-memory-title"
         items={data.memoryItems}
         approvedCount={data.approvedMemories}
-        emptyMessage={
-          live
-            ? data.memoryState === 'unavailable'
-              ? 'The memory records could not be loaded from this API. Nothing is shown, so nothing can be mistaken for recalled.'
-              : 'No memories saved for this Bot. A memory starts with both gates off.'
-            : 'No memories saved. This bot starts every thread with nothing recalled.'
-        }
+        emptyMessage={emptyMemoryMessage(live, data.memoryState)}
         note="Both the bot and the thread have to approve a memory before a run can recall it."
       />
     </div>

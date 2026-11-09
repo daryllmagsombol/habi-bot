@@ -64,7 +64,7 @@ export function BotsGalleryLive({ cards, newBot }: Readonly<BotsGalleryLiveProps
           instructions: detail.bot.instructionsMarkdown,
         });
       })
-      .catch((caught: unknown) => setError(chatErrorMessage(caught)))
+      .catch((error_: unknown) => setError(chatErrorMessage(error_)))
       .finally(() => setLoading(false));
   }
 
@@ -113,7 +113,7 @@ export function BotsGalleryLive({ cards, newBot }: Readonly<BotsGalleryLiveProps
         close();
         router.refresh();
       })
-      .catch((caught: unknown) => setError(chatErrorMessage(caught)))
+      .catch((error_: unknown) => setError(chatErrorMessage(error_)))
       .finally(() => setPending(false));
   }
 

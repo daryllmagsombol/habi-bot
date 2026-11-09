@@ -20,7 +20,7 @@ export interface WorkspaceConversationProps {
   readonly composerStatus: ComposerStatus | undefined;
   readonly reduceMotion: boolean | null;
   readonly older: OlderMessages;
-  readonly onCreateThread?: (() => void) | undefined;
+  readonly onCreateThread: (() => void) | undefined;
 }
 
 /** The reading column: one empty state, or the thread plus its live controls. */

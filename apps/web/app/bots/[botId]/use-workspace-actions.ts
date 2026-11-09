@@ -132,6 +132,25 @@ function skillView(skill: SkillDto): SkillView {
   };
 }
 
+/** Replaces one skill in the loaded list after an attach or detach. */
+function withUpdatedSkill(
+  skills: readonly SkillView[],
+  skillId: string,
+  updated: SkillDto,
+): readonly SkillView[] {
+  return skills.map((skill) => (skill.id === skillId ? skillView(updated) : skill));
+}
+
+/** Replaces one artifact's summary after a save or restore. */
+function withUpdatedArtifact(
+  artifacts: readonly ArtifactSummaryView[],
+  updated: ArtifactDto,
+): readonly ArtifactSummaryView[] {
+  return artifacts.map((item) =>
+    item.id === updated.id ? artifactSummary(updated) : item,
+  );
+}
+
 export function useWorkspaceActions(
   data: WorkspaceData,
   threadId: string | undefined,
@@ -439,11 +458,7 @@ export function useWorkspaceActions(
 
     void attachSkill(skillId, botId, token)
       .then((result) => {
-        setSkills((previous) =>
-          previous.map((skill) =>
-            skill.id === skillId ? skillView(result.skill) : skill,
-          ),
-        );
+        setSkills((previous) => withUpdatedSkill(previous, skillId, result.skill));
         setSkillsError(undefined);
       })
       .catch((error: unknown) => setSkillsError(chatErrorMessage(error)))
@@ -462,11 +477,7 @@ export function useWorkspaceActions(
 
     void detachSkill(skillId, token)
       .then((result) => {
-        setSkills((previous) =>
-          previous.map((skill) =>
-            skill.id === skillId ? skillView(result.skill) : skill,
-          ),
-        );
+        setSkills((previous) => withUpdatedSkill(previous, skillId, result.skill));
         setSkillsError(undefined);
       })
       .catch((error: unknown) => setSkillsError(chatErrorMessage(error)))
@@ -514,11 +525,7 @@ export function useWorkspaceActions(
           },
           content: next.version.content,
         });
-        setArtifacts((previous) =>
-          previous.map((item) =>
-            item.id === next.artifact.id ? artifactSummary(next.artifact) : item,
-          ),
-        );
+        setArtifacts((previous) => withUpdatedArtifact(previous, next.artifact));
         setArtifactStatus(`Saved as version ${next.version.version}.`);
         const versions = await readArtifactVersions(next.artifact.id);
         setArtifactVersions(versions.versions.map(versionView));
@@ -557,11 +564,7 @@ export function useWorkspaceActions(
           },
           content: next.version.content,
         });
-        setArtifacts((previous) =>
-          previous.map((item) =>
-            item.id === next.artifact.id ? artifactSummary(next.artifact) : item,
-          ),
-        );
+        setArtifacts((previous) => withUpdatedArtifact(previous, next.artifact));
         setArtifactStatus(`Version ${version} restored as version ${next.version.version}.`);
         const versions = await readArtifactVersions(next.artifact.id);
         setArtifactVersions(versions.versions.map(versionView));

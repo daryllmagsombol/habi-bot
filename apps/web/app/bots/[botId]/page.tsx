@@ -1,8 +1,12 @@
 import type { Metadata } from 'next';
 import { notFound } from 'next/navigation';
 import { botTone } from '../../../components/bots';
-import type { MemoryGateItem, MemoryItem, PanelRun } from '../../../components/panels';
-import type { DocumentView } from '../../../components/panels';
+import type {
+  DocumentView,
+  MemoryGateItem,
+  MemoryItem,
+  PanelRun,
+} from '../../../components/panels';
 import type { TranscriptMessage } from '../../../components/threads';
 import { BotWorkspace } from './workspace';
 import { attachmentToDocument, buildLiveWorkspace } from './api-data';

@@ -4,7 +4,7 @@ import { Button, EmptyState } from '../../../components/ui';
 
 export interface WorkspaceEmptyThreadProps {
   readonly live: boolean;
-  readonly onCreateThread?: (() => void) | undefined;
+  readonly onCreateThread: (() => void) | undefined;
 }
 
 /** A Bot with no conversation: instruction and memory still exist, a thread does not. */

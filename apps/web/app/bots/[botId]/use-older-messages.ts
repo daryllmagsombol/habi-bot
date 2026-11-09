@@ -23,6 +23,19 @@ export interface OlderMessages {
 
 const ERROR_COPY = 'Older messages could not be loaded. The loaded transcript was kept.';
 
+/**
+ * Prepends a fetched page, dropping turns the transcript already shows so a
+ * reload cannot duplicate a message.
+ */
+function prependFresh(
+  previous: readonly TranscriptMessage[],
+  older: readonly TranscriptMessage[],
+): readonly TranscriptMessage[] {
+  const seen = new Set(previous.map((message) => message.id));
+
+  return [...older.filter((message) => !seen.has(message.id)), ...previous];
+}
+
 export function useOlderMessages(
   thread: WorkspaceThread | undefined,
   live: boolean,
@@ -73,12 +86,7 @@ export function useOlderMessages(
         }
 
         const older = page.messages.map(messageToTranscript);
-        setMessages((previous) => {
-          const seen = new Set(previous.map((message) => message.id));
-          const fresh = older.filter((message) => !seen.has(message.id));
-
-          return [...fresh, ...previous];
-        });
+        setMessages((previous) => prependFresh(previous, older));
         setCursor(page.beforeCursor);
         setHasMore(page.hasMoreBefore);
       })
