@@ -21,6 +21,11 @@ export interface SkillsPanelProps {
   readonly createPending?: boolean | undefined;
   readonly createError?: string | undefined;
   readonly createStatus?: string | undefined;
+  /** Present when this account may edit a skill; each save appends a version. */
+  readonly onUpdate?: ((skillId: string, values: SkillFormValues) => void) | undefined;
+  readonly updatePendingId?: string | undefined;
+  readonly updateError?: string | undefined;
+  readonly updateStatus?: string | undefined;
   /** Passed to the create form as the attachment choice's label. */
   readonly botName?: string | undefined;
   /** Cursor paging for the owner-scoped skill list. */
@@ -50,6 +55,10 @@ export function SkillsPanel({
   createPending = false,
   createError,
   createStatus,
+  onUpdate,
+  updatePendingId,
+  updateError,
+  updateStatus,
   botName,
   hasMore = false,
   loadingMore = false,
@@ -57,15 +66,17 @@ export function SkillsPanel({
   onLoadMore,
 }: Readonly<SkillsPanelProps>) {
   const [creating, setCreating] = useState(false);
+  const [editingId, setEditingId] = useState<string | undefined>(undefined);
 
   const capabilityNote = (
     <div className="mb-3 space-y-1.5">
       <p className="text-xs leading-relaxed text-subtle">
-        Skills are Markdown guidance stored as untrusted data. Creating or attaching a skill grants
-        no tools; the tool allow-list is empty.
+        Skills are Markdown guidance stored as untrusted data. Creating, editing or attaching a
+        skill grants no tools; the tool allow-list is empty.
       </p>
       <p className="text-2xs leading-relaxed text-muted">
-        Editing an existing skill is not exposed by this API. Attach or detach is metadata only.
+        Editing appends a new version and preserves every earlier version. Archived or deleted
+        skills are read-only; attach or detach remains metadata only.
       </p>
     </div>
   );
@@ -144,6 +155,9 @@ export function SkillsPanel({
         {skills.map((skill) => {
           const attached = skill.botId === botId;
           const pending = pendingId === skill.id;
+          const readOnly = skill.status === 'archived' || skill.status === 'deleted';
+          const editing = editingId === skill.id;
+          const canEdit = onUpdate !== undefined && !readOnly;
 
           return (
             <li key={skill.id} className="border-b border-line-soft py-2.5 first:pt-0 last:border-b-0">
@@ -184,7 +198,42 @@ export function SkillsPanel({
                 ) : (
                   <span className="text-2xs text-subtle">Attached to another Bot.</span>
                 )}
+                {canEdit ? (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    aria-expanded={editing}
+                    onClick={() =>
+                      setEditingId((current) => (current === skill.id ? undefined : skill.id))
+                    }
+                  >
+                    {editing ? 'Close editor' : 'Edit'}
+                  </Button>
+                ) : onUpdate === undefined ? null : (
+                  <span className="text-2xs text-subtle">
+                    {skill.status === 'deleted' ? 'Deleted' : 'Archived'} skills are read-only.
+                  </span>
+                )}
               </div>
+
+              {editing && onUpdate !== undefined ? (
+                <div className="mt-2 rounded-sm border border-line-soft p-3">
+                  <SkillForm
+                    key={`${skill.id}:${skill.version}`}
+                    mode="edit"
+                    initial={{
+                      name: skill.name,
+                      description: skill.description,
+                      bodyMarkdown: skill.bodyMarkdown,
+                    }}
+                    onSubmit={(values) => onUpdate(skill.id, values)}
+                    pending={updatePendingId === skill.id}
+                    error={updateError}
+                    status={updateStatus}
+                    onCancel={() => setEditingId(undefined)}
+                  />
+                </div>
+              ) : null}
 
               <details className="mt-1">
                 <summary className="inline-flex min-h-11 cursor-pointer items-center text-2xs text-subtle">

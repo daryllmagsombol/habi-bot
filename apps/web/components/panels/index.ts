@@ -2,7 +2,14 @@ export { ArtifactPanel } from './artifact-panel';
 export type { ArtifactPanelProps } from './artifact-panel';
 
 export { ArtifactForm } from './artifact-form';
-export type { ArtifactFormProps, ArtifactFormValues } from './artifact-form';
+export type {
+  ArtifactEditableStatus,
+  ArtifactFormInitialValues,
+  ArtifactFormMode,
+  ArtifactFormProps,
+  ArtifactFormValues,
+  ArtifactMetadataFormValues,
+} from './artifact-form';
 
 export { ContextPanel } from './context-panel';
 export type { ContextPanelProps } from './context-panel';
@@ -35,7 +42,12 @@ export { SkillsPanel } from './skills-panel';
 export type { SkillsPanelProps } from './skills-panel';
 
 export { SkillForm } from './skill-form';
-export type { SkillFormProps, SkillFormValues } from './skill-form';
+export type {
+  SkillFormInitialValues,
+  SkillFormMode,
+  SkillFormProps,
+  SkillFormValues,
+} from './skill-form';
 
 export type {
   AllowanceView,

@@ -288,6 +288,20 @@ export interface SearchPageDto {
   readonly nextCursor: string | null;
 }
 
+/** `GET /api/account`. Lightweight identity only; never the export document. */
+export interface AccountProfileDto {
+  readonly userId: string;
+  readonly email: string;
+  readonly status: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly emailVerifiedAt: string | null;
+}
+
+export interface AccountEnvelopeDto {
+  readonly account: AccountProfileDto;
+}
+
 export interface ApiErrorBody {
   readonly error: { readonly code: string };
 }

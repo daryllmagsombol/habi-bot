@@ -17,6 +17,7 @@ import { useRouter } from 'next/navigation';
 import type {
   ArtifactDetailView,
   ArtifactFormValues,
+  ArtifactMetadataFormValues,
   ArtifactSummaryView,
   ArtifactVersionView,
   MemoryGate,
@@ -48,6 +49,7 @@ import {
   createSkill as postSkill,
   readArtifactVersionPage,
   readMemoryPage,
+  updateSkill,
 } from '../../../lib/api/content';
 import type {
   ArtifactDto,
@@ -116,6 +118,11 @@ export interface WorkspaceActions {
   readonly skillCreatePending: boolean;
   readonly skillCreateError: string | undefined;
   readonly skillCreateStatus: string | undefined;
+  /** Edits an active or draft skill; only changed fields reach the PATCH body. */
+  readonly updateSkillForAccount: (skillId: string, values: SkillFormValues) => void;
+  readonly skillUpdatePendingId: string | undefined;
+  readonly skillUpdateError: string | undefined;
+  readonly skillUpdateStatus: string | undefined;
   readonly skillsPaging: PagingState;
 
   readonly artifacts: readonly ArtifactSummaryView[];
@@ -132,6 +139,14 @@ export interface WorkspaceActions {
   readonly artifactCreatePending: boolean;
   readonly artifactCreateError: string | undefined;
   readonly artifactCreateStatus: string | undefined;
+  /** Edits metadata only; the API preserves the content and appends a version. */
+  readonly updateArtifactMetadata: (
+    artifactId: string,
+    values: ArtifactMetadataFormValues,
+  ) => void;
+  readonly artifactMetadataPending: boolean;
+  readonly artifactMetadataError: string | undefined;
+  readonly artifactMetadataStatus: string | undefined;
   readonly artifactsPaging: PagingState;
   readonly artifactVersionsPaging: PagingState;
 
@@ -314,6 +329,9 @@ export function useWorkspaceActions(
   const [skillCreatePending, setSkillCreatePending] = useState(false);
   const [skillCreateError, setSkillCreateError] = useState<string | undefined>(undefined);
   const [skillCreateStatus, setSkillCreateStatus] = useState<string | undefined>(undefined);
+  const [skillUpdatePendingId, setSkillUpdatePendingId] = useState<string | undefined>(undefined);
+  const [skillUpdateError, setSkillUpdateError] = useState<string | undefined>(undefined);
+  const [skillUpdateStatus, setSkillUpdateStatus] = useState<string | undefined>(undefined);
 
   const [artifacts, setArtifacts] = useState<readonly ArtifactSummaryView[]>([]);
   const [artifactsState, setArtifactsState] = useState<LoadState>('idle');
@@ -333,6 +351,11 @@ export function useWorkspaceActions(
   const [artifactCreatePending, setArtifactCreatePending] = useState(false);
   const [artifactCreateError, setArtifactCreateError] = useState<string | undefined>(undefined);
   const [artifactCreateStatus, setArtifactCreateStatus] = useState<string | undefined>(undefined);
+  const [artifactMetadataPending, setArtifactMetadataPending] = useState(false);
+  const [artifactMetadataError, setArtifactMetadataError] = useState<string | undefined>(undefined);
+  const [artifactMetadataStatus, setArtifactMetadataStatus] = useState<string | undefined>(
+    undefined,
+  );
 
   const [searchState, setSearchState] = useState<LoadState>('idle');
   const [searchResults, setSearchResults] = useState<readonly SearchResultView[]>([]);
@@ -380,6 +403,8 @@ export function useWorkspaceActions(
 
     setArtifactBusy('select');
     setArtifactError(undefined);
+    setArtifactMetadataError(undefined);
+    setArtifactMetadataStatus(undefined);
 
     try {
       const [detail, versions] = await Promise.all([
@@ -732,6 +757,89 @@ export function useWorkspaceActions(
       .finally(() => setSkillCreatePending(false));
   }
 
+  function updateSkillForAccount(skillId: string, values: SkillFormValues) {
+    if (!live) {
+      return;
+    }
+
+    const current = skills.find((skill) => skill.id === skillId);
+
+    if (current === undefined) {
+      setSkillUpdateError('That skill is no longer in the loaded list. Reload before editing it.');
+      return;
+    }
+
+    if (current.status === 'archived' || current.status === 'deleted') {
+      setSkillUpdateError('Archived and deleted skills are read-only.');
+      return;
+    }
+
+    const nameLength = values.name.length;
+
+    if (nameLength < 1 || nameLength > SKILL_NAME_MAX_LENGTH) {
+      setSkillUpdateError(`A skill name must be 1–${SKILL_NAME_MAX_LENGTH} characters.`);
+      return;
+    }
+
+    if (values.description.length > SKILL_DESCRIPTION_MAX_LENGTH) {
+      setSkillUpdateError(
+        `A skill description must be at most ${SKILL_DESCRIPTION_MAX_LENGTH} characters.`,
+      );
+      return;
+    }
+
+    if (utf8Bytes(values.bodyMarkdown) > SKILL_BODY_MAX_BYTES) {
+      setSkillUpdateError('The skill body is over the 64 KiB the API accepts, so it was not sent.');
+      return;
+    }
+
+    // Only fields that differ are sent; the API keeps every omitted value, so a
+    // concurrent change to an untouched field is not silently overwritten.
+    const changed: {
+      name?: string;
+      description?: string;
+      bodyMarkdown?: string;
+    } = {};
+
+    if (values.name !== current.name) {
+      changed.name = values.name;
+    }
+
+    if (values.description !== current.description) {
+      changed.description = values.description;
+    }
+
+    if (values.bodyMarkdown !== current.bodyMarkdown) {
+      changed.bodyMarkdown = values.bodyMarkdown;
+    }
+
+    if (Object.keys(changed).length === 0) {
+      setSkillUpdateStatus('Nothing changed, so no new version was created.');
+      return;
+    }
+
+    const token = readCsrfToken();
+
+    if (token === undefined) {
+      setSkillUpdateError('This session did not publish a CSRF token, so the skill was not saved.');
+      return;
+    }
+
+    setSkillUpdatePendingId(skillId);
+    setSkillUpdateError(undefined);
+    setSkillUpdateStatus(undefined);
+
+    void updateSkill(skillId, changed, token)
+      .then((result) => {
+        setSkills((previous) => withUpdatedSkill(previous, skillId, result.skill));
+        setSkillUpdateStatus(
+          `Saved “${result.skill.name}” as version ${result.skill.version}. Earlier versions are preserved.`,
+        );
+      })
+      .catch((error: unknown) => setSkillUpdateError(chatErrorMessage(error)))
+      .finally(() => setSkillUpdatePendingId(undefined));
+  }
+
   function loadMoreSkills() {
     if (skillCursor === null || skillsLoadingMore) {
       return;
@@ -829,6 +937,68 @@ export function useWorkspaceActions(
       })
       .catch((error: unknown) => setArtifactCreateError(chatErrorMessage(error)))
       .finally(() => setArtifactCreatePending(false));
+  }
+
+  function updateArtifactMetadata(
+    artifactId: string,
+    values: ArtifactMetadataFormValues,
+  ) {
+    if (!live) {
+      return;
+    }
+
+    const current = artifactDetail;
+
+    if (current === undefined || current.artifact.id !== artifactId) {
+      setArtifactMetadataError('Select the artifact again before editing its metadata.');
+      return;
+    }
+
+    const token = readCsrfToken();
+
+    if (token === undefined) {
+      setArtifactMetadataError(
+        'This session did not publish a CSRF token, so the metadata was not saved.',
+      );
+      return;
+    }
+
+    setArtifactMetadataPending(true);
+    setArtifactMetadataError(undefined);
+    setArtifactMetadataStatus(undefined);
+
+    // No `content` key: the API keeps the stored body and appends a version that
+    // records the metadata change.
+    void updateArtifact(
+      artifactId,
+      { title: values.title, kind: values.kind, status: values.status },
+      token,
+    )
+      .then(async (result) => {
+        const next = result.artifact;
+        setArtifactDetail({
+          artifact: artifactSummary(next.artifact),
+          version: {
+            version: next.version.version,
+            byteSize: next.version.byteSize,
+            createdAt: next.version.createdAt,
+          },
+          content: next.version.content,
+        });
+        setArtifacts((previous) => withUpdatedArtifact(previous, next.artifact));
+        setArtifactMetadataStatus(
+          `Metadata saved as version ${next.version.version}. The stored content is unchanged; earlier versions are preserved.`,
+        );
+
+        const versions = await readArtifactVersionPage(next.artifact.id, {
+          limit: PAGE_SIZE,
+        });
+        setArtifactVersions(versions.versions.map(versionView));
+        setVersionCursor(versions.nextCursor);
+        setVersionsPagingError(undefined);
+      })
+      .catch((error: unknown) => setArtifactMetadataError(chatErrorMessage(error)))
+      .finally(() => setArtifactMetadataPending(false));
   }
 
   function loadMoreArtifacts() {
@@ -1066,6 +1236,10 @@ export function useWorkspaceActions(
     skillCreatePending,
     skillCreateError,
     skillCreateStatus,
+    updateSkillForAccount,
+    skillUpdatePendingId,
+    skillUpdateError,
+    skillUpdateStatus,
     skillsPaging: {
       hasMore: skillCursor !== null,
       loading: skillsLoadingMore,
@@ -1086,6 +1260,10 @@ export function useWorkspaceActions(
     artifactCreatePending,
     artifactCreateError,
     artifactCreateStatus,
+    updateArtifactMetadata,
+    artifactMetadataPending,
+    artifactMetadataError,
+    artifactMetadataStatus,
     artifactsPaging: {
       hasMore: artifactCursor !== null,
       loading: artifactsLoadingMore,

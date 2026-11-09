@@ -15,13 +15,29 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { createServer as createHttpServer } from 'node:http';
 import { createServer } from 'node:net';
-import { createRequire } from 'node:module';
+import { createRequire, registerHooks } from 'node:module';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
 const require = createRequire(import.meta.url);
 const cwd = fileURLToPath(new URL('../', import.meta.url));
+
+// The client module is TypeScript with bundler-style extensionless imports.
+// Node can strip the types, so the only missing piece is that resolution.
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    try {
+      return nextResolve(specifier, context);
+    } catch (error) {
+      if (specifier.startsWith('.') && !/\.[a-z]+$/.test(specifier)) {
+        return nextResolve(`${specifier}.ts`, context);
+      }
+
+      throw error;
+    }
+  },
+});
 
 const BOT_ID = '11111111-1111-4111-8111-111111111111';
 const THREAD_ID = '33333333-3333-4333-8333-333333333333';
@@ -675,6 +691,51 @@ function createStub() {
         return;
       }
 
+      if (request.method === 'PATCH' && path === `/api/skills/${SKILL_ID}`) {
+        if (request.headers['x-csrf-token'] !== CSRF) {
+          json(response, 403, { error: { code: 'csrf_invalid' } });
+          return;
+        }
+
+        const payload = JSON.parse(body);
+
+        // These names stand in for the API's closed error set so the BFF's
+        // relay (status and code) is what the test measures.
+        if (payload.name === 'Taken') {
+          json(response, 409, { error: { code: 'skill_name_conflict' } });
+          return;
+        }
+
+        if (payload.name === 'Gone') {
+          json(response, 404, { error: { code: 'not_found' } });
+          return;
+        }
+
+        if (payload.name === 'Archived') {
+          json(response, 409, { error: { code: 'skill_unavailable' } });
+          return;
+        }
+
+        json(response, 200, {
+          skill: { ...SKILL, ...payload, version: SKILL.version + 1, updatedAt: NOW },
+        });
+        return;
+      }
+
+      if (request.method === 'GET' && path === '/api/account') {
+        json(response, 200, {
+          account: {
+            userId: 'user-1',
+            email: 'owner@example.test',
+            status: 'active',
+            createdAt: NOW,
+            updatedAt: NOW,
+            emailVerifiedAt: NOW,
+          },
+        });
+        return;
+      }
+
       if (request.method === 'GET' && path === '/api/search') {
         json(response, 200, {
           results: [
@@ -1116,6 +1177,80 @@ test('the built chat surface forwards to the API and never renders sample data o
     const detached = await write('POST', `/api/skills/${SKILL_ID}/detach`);
     assert.equal(detached.response.status, 200);
 
+    // A partial edit forwards exactly the fields the writer changed; the API
+    // keeps every omitted value and appends a new version.
+    const editedSkill = await write('PATCH', `/api/skills/${SKILL_ID}`, {
+      description: 'Edited description only.',
+    });
+    assert.equal(editedSkill.response.status, 200);
+    assert.equal(editedSkill.body.skill.version, SKILL.version + 1);
+    const skillPatchForward = stub.requests.find(
+      (entry) => entry.method === 'PATCH' && entry.url === `/api/skills/${SKILL_ID}`,
+    );
+    assert.ok(skillPatchForward, 'the proxy did not forward the skill edit');
+    assert.equal(skillPatchForward.headers['x-csrf-token'], CSRF);
+    assert.equal(skillPatchForward.headers.origin, upstreamOrigin);
+    assert.deepEqual(JSON.parse(skillPatchForward.body), {
+      description: 'Edited description only.',
+    });
+
+    const noCsrfSkillPatch = await fetch(`${app.origin}/api/skills/${SKILL_ID}`, {
+      method: 'PATCH',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'No token' }),
+      signal: AbortSignal.timeout(5000),
+    });
+    assert.equal(noCsrfSkillPatch.status, 403);
+    assert.deepEqual(await noCsrfSkillPatch.json(), { error: { code: 'csrf_invalid' } });
+
+    const conflictingSkill = await write('PATCH', `/api/skills/${SKILL_ID}`, {
+      name: 'Taken',
+    });
+    assert.equal(conflictingSkill.response.status, 409);
+    assert.deepEqual(conflictingSkill.body, { error: { code: 'skill_name_conflict' } });
+
+    const archivedSkill = await write('PATCH', `/api/skills/${SKILL_ID}`, {
+      name: 'Archived',
+    });
+    assert.equal(archivedSkill.response.status, 409);
+    assert.deepEqual(archivedSkill.body, { error: { code: 'skill_unavailable' } });
+
+    const missingSkill = await write('PATCH', `/api/skills/${SKILL_ID}`, {
+      name: 'Gone',
+    });
+    assert.equal(missingSkill.response.status, 404);
+    assert.deepEqual(missingSkill.body, { error: { code: 'not_found' } });
+
+    const account = await fetch(`${app.origin}/api/account`, {
+      headers: { cookie },
+      signal: AbortSignal.timeout(5000),
+    });
+    assert.equal(account.status, 200);
+    const accountBody = await account.json();
+    assert.deepEqual(Object.keys(accountBody.account).sort(), [
+      'createdAt',
+      'email',
+      'emailVerifiedAt',
+      'status',
+      'updatedAt',
+      'userId',
+    ]);
+    assert.equal(accountBody.account.email, 'owner@example.test');
+    const accountForward = stub.requests.find(
+      (entry) => entry.method === 'GET' && entry.url === '/api/account',
+    );
+    assert.ok(accountForward, 'the proxy did not forward the account read');
+    assert.equal(accountForward.headers.cookie, `habi_session=${SESSION}`);
+    assert.equal(accountForward.headers.origin, upstreamOrigin);
+
+    const unauthenticatedAccount = await fetch(`${app.origin}/api/account`, {
+      signal: AbortSignal.timeout(5000),
+    });
+    assert.equal(unauthenticatedAccount.status, 401);
+    assert.deepEqual(await unauthenticatedAccount.json(), {
+      error: { code: 'unauthenticated' },
+    });
+
     const search = await fetch(`${app.origin}/api/search?q=live&botId=${BOT_ID}`, {
       headers: { cookie },
       signal: AbortSignal.timeout(5000),
@@ -1245,6 +1380,61 @@ test('the built chat surface forwards to the API and never renders sample data o
   } finally {
     await app.stop();
     await new Promise((resolve) => stub.server.close(resolve));
+  }
+});
+
+test('the export action preflights /api/account and navigates instead of buffering', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalWindow = globalThis.window;
+  const calls = [];
+  const navigations = [];
+
+  globalThis.fetch = async (input, init) => {
+    calls.push({ path: String(input), method: init?.method });
+    return Response.json(
+      {
+        account: {
+          userId: 'user-1',
+          email: 'owner@example.test',
+          status: 'active',
+          createdAt: NOW,
+          updatedAt: NOW,
+          emailVerifiedAt: NOW,
+        },
+      },
+      { status: 200 },
+    );
+  };
+  globalThis.window = {
+    location: {
+      replace(url) {
+        navigations.push(url);
+      },
+    },
+  };
+
+  try {
+    const { downloadExport } = await import('../lib/api/account.ts');
+    const result = await downloadExport();
+
+    assert.equal(result.started, true);
+    assert.deepEqual(
+      calls.map((call) => call.path),
+      ['/api/account'],
+      'the export must preflight the lightweight account read once',
+    );
+    assert.ok(
+      calls.every((call) => call.path !== '/api/account/export'),
+      'the export body must not be fetched and buffered in the browser',
+    );
+    assert.deepEqual(
+      navigations,
+      ['/api/account/export'],
+      'a successful preflight must navigate to the streaming BFF route',
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    globalThis.window = originalWindow;
   }
 });
 
