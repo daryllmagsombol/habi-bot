@@ -1,20 +1,27 @@
 #!/usr/bin/env bash
 #
-# pg-restore-rehearsal.sh — prove that a backup restores, without touching the
-# live database.
+# pg-restore-rehearsal.sh — prove that an encrypted backup restores, without
+# touching the live database.
 #
-# The script verifies the archive checksum (unless explicitly skipped), creates
-# a disposable database whose name matches habi_rehearsal_*, restores the
-# archive into it, checks expected tables and row counts, prints PASS/FAIL, and
-# always drops the disposable database and its temp files — including on
-# failure or interrupt.
+# The archive is age ciphertext. The script verifies the ciphertext checksum
+# (unless explicitly skipped), decrypts it with an owner-supplied private key,
+# creates a disposable database whose name matches habi_rehearsal_*, restores
+# the decrypted archive into it, checks expected tables and row counts, prints
+# PASS/FAIL, and always drops the disposable database and its temp files —
+# including on failure or interrupt. The decrypted plaintext and any stdin
+# identity are staged in a private temp directory and removed with it.
+#
+# The private key is supplied at invocation (--identity FILE or --identity -);
+# it is never read from the archive directory, committed to the repository, or
+# placed in an environment variable.
 #
 # It refuses to restore over any database name that is not provably disposable.
 # It does not "clean up" by dropping whatever database happens to be named on
 # the command line; the name must match the disposable pattern and must not be
 # the source database, postgres, template0, or template1.
 #
-# Compatibility: bash 3.2+ (macOS) and bash 5 (Linux), PostgreSQL 14+ client.
+# Compatibility: bash 3.2+ (macOS) and bash 5 (Linux), PostgreSQL 14+ client,
+# age 1.x.
 #
 # See docs/runbooks/backups.md for the operational procedure.
 set -euo pipefail
@@ -32,6 +39,9 @@ ARCHIVE=''
 CHECKSUM_FILE=''
 EXPECT_FILE=''
 TARGET_DB=''
+IDENTITY=''
+IDENTITY_SOURCE=''
+PLAINTEXT=''
 SKIP_CHECKSUM=0
 NO_OWNER=0
 
@@ -44,7 +54,10 @@ Usage: pg-restore-rehearsal.sh --archive FILE [options]
 Restore a custom-format backup into a disposable database and assert contents.
 
 Required:
-  --archive FILE        pg_dump custom-format archive to rehearse
+  --archive FILE        encrypted age archive to rehearse (usually *.dump.age)
+  --identity FILE       age private key file; or '-' to read it from stdin.
+                        Required: archives are encrypted and the key is
+                        owner-held, never stored beside them.
   --expect TABLE=ROWS   expected table and exact row count (repeatable)
   --expect-file FILE    file of "TABLE=ROWS" lines; '#' comments and blank
                         lines are ignored
@@ -63,6 +76,13 @@ Options:
   --no-checksum         skip checksum verification (loudly warns; not recommended)
   --help                print this help
 
+Decryption:
+  The archive is age ciphertext. Supply the owner-held private key at
+  invocation. The key is never read from the archive directory, a committed
+  file, or an environment variable. With --identity -, pipe the key on stdin;
+  it is staged in a mode-0600 temp file inside the rehearsal's private working
+  directory and removed with it.
+
 Authentication:
   Export PGPASSWORD, or point PGPASSFILE at a mode-0600 password file, or rely
   on ~/.pgpass. There is no --password flag on purpose.
@@ -74,8 +94,8 @@ Assertions:
 
 Exit codes:
   0  restore succeeded and every assertion passed; disposable DB removed
-  1  restore or an assertion failed; disposable DB removed
-  2  usage error or unsafe target database name; nothing created
+  1  decryption, checksum, restore, or an assertion failed; disposable DB removed
+  2  usage error, missing identity, or unsafe target database name; nothing created
 EOF
 }
 
@@ -113,6 +133,11 @@ while [[ $# -gt 0 ]]; do
     --checksum)
       need_value "$@"
       CHECKSUM_FILE=$2
+      shift 2
+      ;;
+    --identity | --identity-file)
+      need_value "$@"
+      IDENTITY=$2
       shift 2
       ;;
     --expect)
@@ -172,9 +197,15 @@ EXIT_CODE=2
 [[ -n $ARCHIVE ]] || die "missing required --archive FILE"
 [[ -f $ARCHIVE && -r $ARCHIVE ]] || die "archive is not a readable file: $ARCHIVE"
 
-for tool in pg_restore psql; do
+for tool in pg_restore psql age; do
   command -v "$tool" >/dev/null 2>&1 || die "required tool not found on PATH: $tool"
 done
+
+[[ -n $IDENTITY ]] ||
+  die "no decryption identity. Pass --identity FILE with the owner-held age private key, or --identity - to pipe it on stdin. The key is never stored beside the archive."
+if [[ $IDENTITY != '-' ]]; then
+  [[ -f $IDENTITY && -r $IDENTITY ]] || die "identity file is not readable: $IDENTITY"
+fi
 
 sha256_file() {
   if command -v sha256sum >/dev/null 2>&1; then
@@ -184,6 +215,13 @@ sha256_file() {
   else
     die "no SHA-256 tool found: install sha256sum (coreutils) or shasum (Perl)"
   fi
+}
+
+file_mode() {
+  case $(uname -s) in
+    Darwin) stat -f '%Lp' "$1" 2>/dev/null || true ;;
+    *) stat -c '%a' "$1" 2>/dev/null || true ;;
+  esac
 }
 
 is_disposable_db_name() {
@@ -351,6 +389,27 @@ trap 'exit 130' INT TERM
 
 EXIT_CODE=1
 
+WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/habi-restore.XXXXXX")
+
+if [[ $IDENTITY == '-' ]]; then
+  if [[ -t 0 ]]; then
+    die "--identity - reads the age private key from stdin; pipe it (for example, from a password manager) instead of typing it on a terminal"
+  fi
+  IDENTITY_TMP="$WORK_DIR/identity.txt"
+  cat >"$IDENTITY_TMP" || die "could not read the identity from stdin"
+  [[ -s $IDENTITY_TMP ]] || die "no identity data was read from stdin"
+  chmod 600 "$IDENTITY_TMP"
+  IDENTITY_FILE=$IDENTITY_TMP
+  IDENTITY_SOURCE='stdin'
+else
+  IDENTITY_FILE=$IDENTITY
+  IDENTITY_SOURCE="file: $IDENTITY"
+  mode=$(file_mode "$IDENTITY" || true)
+  if [[ -n $mode && $mode != '600' ]]; then
+    warn "identity file $IDENTITY has mode $mode; restrict it to its owner (chmod 600)"
+  fi
+fi
+
 [[ -s $ARCHIVE ]] || die "archive is empty: $ARCHIVE"
 
 if [[ $SKIP_CHECKSUM -eq 1 ]]; then
@@ -377,8 +436,19 @@ else
   info "checksum: verified sha256 $actual_hash"
 fi
 
-if ! TOC=$(pg_restore --list "$ARCHIVE" 2>&1); then
-  die "archive is not a readable pg_restore archive (custom-format dumps only): $(printf '%s' "$TOC" | tr '\n' ' ' | cut -c1-300)"
+if [[ $(head -n 1 "$ARCHIVE") != 'age-encryption.org/v1' ]]; then
+  die "archive is not an age-encrypted backup (expected a *.dump.age file): $ARCHIVE"
+fi
+
+PLAINTEXT="$WORK_DIR/archive.dump"
+info "decryption: age using $IDENTITY_SOURCE"
+if ! age --decrypt --identity "$IDENTITY_FILE" --output "$PLAINTEXT" "$ARCHIVE"; then
+  die "decryption failed: wrong identity or corrupt ciphertext (no database was created)"
+fi
+[[ -s $PLAINTEXT ]] || die "decryption produced an empty archive"
+
+if ! TOC=$(pg_restore --list "$PLAINTEXT" 2>&1); then
+  die "decrypted archive is not a readable pg_restore archive (custom-format dumps only): $(printf '%s' "$TOC" | tr '\n' ' ' | cut -c1-300)"
 fi
 
 TOC_ENTRIES=$(printf '%s\n' "$TOC" | grep -c '^[0-9]' || true)
@@ -390,9 +460,8 @@ fi
 
 info "server: $PGHOST:$PGPORT as $PGUSER (source db name for the safety check: $PGDATABASE)"
 info "auth: $AUTH_MODE"
-info "archive: $ARCHIVE ($TOC_ENTRIES TOC entries)"
+info "archive: $ARCHIVE (age ciphertext, $TOC_ENTRIES TOC entries)"
 
-WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/habi-restore.XXXXXX")
 RESTORE_LOG="$WORK_DIR/pg_restore.log"
 
 if ! psql_admin --command "CREATE DATABASE \"$TARGET_DB\"" >/dev/null; then
@@ -417,7 +486,7 @@ if pg_restore \
   --single-transaction \
   --exit-on-error \
   "${OWNER_FLAG[@]+"${OWNER_FLAG[@]}"}" \
-  "$ARCHIVE" >"$RESTORE_LOG" 2>&1; then
+  "$PLAINTEXT" >"$RESTORE_LOG" 2>&1; then
   RESTORE_SECONDS=$SECONDS
   info "restore: ok (${RESTORE_SECONDS}s)"
 else
@@ -427,6 +496,10 @@ else
   printf 'rehearsal: FAIL (restore failed)\n' >&2
   die "pg_restore did not complete; the disposable database will be dropped"
 fi
+
+# The decrypted plaintext is no longer needed once pg_restore has read it.
+rm -f "$PLAINTEXT"
+PLAINTEXT=''
 
 ASSERTION_SECONDS=0
 SECONDS=0
