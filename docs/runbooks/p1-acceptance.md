@@ -167,30 +167,34 @@ browser; browser/mobile rendering remains a web-lane check.
 
 ## Residual risks and known gaps to carry into a real deployment
 
-1. **Chat and auth session stores are per-module and in-memory.** In this commit
-   `/auth/login` and `/api` do not share a `SessionService`, so a login cookie is
-   rejected by the chat API. The harness reports this as a failure; fixing the
-   wiring is required before P1 can be a usable signed-in chat product.
-2. **Sessions are non-durable.** A process restart drops every session. Backup
-   restore therefore verifies ownership at the data/service layer, not a
-   replayed browser session.
-3. **Dispatched Runs cannot be cancelled from the chat API.** The surface returns
-   `409 cancel_unavailable`; worker-side adapter cancel exists but is not wired
-   into that route. The harness records this as blocked.
-4. **Pre-dispatch cancel does not append `run.cancelled`.** The Run row is
-   terminal, but an already-open event stream is not notified.
-5. **A hard worker kill leaves provider output after the last persisted event
-   unrecoverable.** The Run becomes `execution_uncertain` and is not re-dispatched
-   to avoid duplicate paid work; this is a deliberate safety tradeoff, not a
-   silent success.
-6. **Artifact, attachment, memory, skill, and search routes are not exposed over
-   HTTP.** Their isolation is proven at the service layer.
-7. **No stack has been started from `compose.staging.yaml` or
-   `compose.production.yaml`.** Those files now pass `DATABASE_URL`, the P1
-   flags, the provider pair and the web's API origins, and their readiness
-   probes assert the real surface rather than `/health`, but a deployment host,
-   registry and immutable image tag are still owner-held. The local harness
+1. **Sessions are non-durable.** They are in-memory and per-process, so a
+   restart drops every session. Backup restore therefore verifies ownership at
+   the data/service layer, not a replayed browser session. (#98 made one
+   session authority per process; durability is a separate, still-open gap.)
+2. **A hard worker kill leaves provider output after the last persisted event
+   unrecoverable.** The Run becomes `execution_uncertain` and is not
+   re-dispatched, to avoid duplicate paid work. A deliberate safety tradeoff,
+   not a silent success.
+3. **No stack has been started from `compose.staging.yaml` or
+   `compose.production.yaml`.** Those files pass `DATABASE_URL`, the P1 flags,
+   the provider pair and the web's API origins, and their readiness probes
+   assert the real surface rather than `/health`, but a deployment host, a
+   registry and an immutable image tag are still owner-held. The local harness
    cannot substitute for a deployed run.
+
+Closed since this runbook was written, recorded so the history is traceable:
+
+- **Login sessions reach the P1 chat surface** — one `SessionCoreModule` owns
+  the service, its clock and both guards (#98). The `auth` scenario is 7/7.
+- **Dispatched runs can be cancelled** — `POST /api/runs/:id/cancel` records a
+  durable intent and the owning worker claims it atomically, calls
+  `adapter.cancel` at most once, and terminalizes honestly (#99). The
+  `run-lifecycle` scenario is 7/7.
+- **Every terminalization appends exactly one terminal event**, including
+  pre-dispatch cancel, through the shared `runs/finalization.ts` path (#99).
+- **Artifacts, attachments, memories, skills and search are exposed over
+  HTTP** with two-account isolation proven per route (#101). The `isolation`
+  scenario is 12/12.
 
 ## P1 exit
 
