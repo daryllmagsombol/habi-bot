@@ -2,13 +2,20 @@
 
 import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { Avatar, ChevronRightIcon, DocumentIcon } from '../ui';
+import { Avatar, Button, ChevronRightIcon, DocumentIcon } from '../ui';
 import { Composer } from './composer';
 import type { ComposerStatus } from './composer';
 import { MessageBubble } from './message-bubble';
 import { RunStrip } from './run-strip';
 import { ThreadCard } from './thread-card';
 import type { RunView, ThreadView, TranscriptMessage } from './types';
+
+export interface TranscriptPagination {
+  readonly hasMore: boolean;
+  readonly loading: boolean;
+  readonly onLoadOlder: () => void;
+  readonly error?: string | undefined;
+}
 
 export interface ThreadConversationProps {
   readonly bot: { readonly name: string; readonly initials: string };
@@ -36,6 +43,8 @@ export interface ThreadConversationProps {
   readonly maxLength?: number;
   /** Textarea id; must be unique if two conversations share a page. */
   readonly composerId?: string;
+  /** Older-message paging; absent when the transcript is complete. */
+  readonly pagination?: TranscriptPagination | undefined;
 }
 
 /**
@@ -45,6 +54,10 @@ export interface ThreadConversationProps {
  * arrive through props; sending appends a turn to this tab and says so. A real
  * send would replace this append with the server's message, keeping the same
  * bubbles, run strip and composer.
+ *
+ * Loading older messages is a parent call; this component captures the document
+ * height before it and restores the reading position after the new top rows
+ * arrive, so a long transcript does not jump and a live stream keeps its place.
  */
 export function ThreadConversation({
   bot,
@@ -61,11 +74,16 @@ export function ThreadConversation({
   attachment,
   maxLength = 4_000,
   composerId = 'composer',
+  pagination,
 }: Readonly<ThreadConversationProps>) {
   const [localDraft, setLocalDraft] = useState('');
   const [notice, setNotice] = useState('');
   const [added, setAdded] = useState<readonly TranscriptMessage[]>([]);
   const listRef = useRef<HTMLOListElement>(null);
+  const olderAnchorRef = useRef<{ readonly height: number; readonly top: number } | undefined>(
+    undefined,
+  );
+  const messageCountRef = useRef(thread.messages.length);
   const draft = controlledDraft ?? localDraft;
 
   const setDraft = (value: string) => {
@@ -87,6 +105,32 @@ export function ThreadConversation({
 
     listRef.current?.lastElementChild?.scrollIntoView({ block: 'nearest' });
   }, [added.length]);
+
+  useEffect(() => {
+    const previous = messageCountRef.current;
+    messageCountRef.current = thread.messages.length;
+
+    const anchor = olderAnchorRef.current;
+
+    if (anchor === undefined || thread.messages.length <= previous) {
+      return;
+    }
+
+    olderAnchorRef.current = undefined;
+    const delta = document.documentElement.scrollHeight - anchor.height;
+
+    if (delta > 0) {
+      window.scrollTo({ top: anchor.top + delta });
+    }
+  }, [thread.messages.length]);
+
+  function loadOlder() {
+    olderAnchorRef.current = {
+      height: document.documentElement.scrollHeight,
+      top: window.scrollY,
+    };
+    pagination?.onLoadOlder();
+  }
 
   function send() {
     const text = draft.trim();
@@ -125,43 +169,67 @@ export function ThreadConversation({
       headingId={headingId}
       metaItems={thread.metaItems}
       transcript={
-        <ol ref={listRef} className="flex flex-col gap-4">
-          {thread.messages.map((message) => (
-            <MessageBubble
-              key={message.id}
-              variant={message.variant}
-              name={message.variant === 'user' ? owner.name : bot.name}
-              at={message.at}
-              avatar={message.variant === 'user' ? userAvatar : botAvatar}
-              paragraphs={message.paragraphs}
-              state={message.state}
-              citation={
-                message.citation === undefined ? undefined : (
-                  <a
-                    href={message.citation.href}
-                    className="mt-1.5 inline-flex min-h-11 items-center gap-1.5 rounded-sm text-2xs font-medium text-accent-ink underline decoration-accent-line decoration-1 underline-offset-4 hover:no-underline"
-                  >
-                    <DocumentIcon size={12} />
-                    {message.citation.label}
-                    <ChevronRightIcon size={10} />
-                  </a>
-                )
-              }
-            />
-          ))}
+        <div className="flex flex-col gap-4">
+          {pagination === undefined ? null : (
+            <div className="flex flex-wrap items-center gap-2 border-b border-line-soft pb-3">
+              {pagination.hasMore ? (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  loading={pagination.loading}
+                  onClick={loadOlder}
+                >
+                  Load older messages
+                </Button>
+              ) : (
+                <p className="text-2xs text-subtle">The start of this thread.</p>
+              )}
+              {pagination.error === undefined ? null : (
+                <p role="alert" className="text-2xs text-danger">
+                  {pagination.error}
+                </p>
+              )}
+            </div>
+          )}
 
-          {added.map((message) => (
-            <MessageBubble
-              key={message.id}
-              variant={message.variant}
-              name={owner.name}
-              at={message.at}
-              avatar={userAvatar}
-              paragraphs={message.paragraphs}
-              footnote={<p className="mt-1 text-2xs text-subtle">{localFootnote}</p>}
-            />
-          ))}
-        </ol>
+          <ol ref={listRef} className="flex flex-col gap-4">
+            {thread.messages.map((message) => (
+              <MessageBubble
+                key={message.id}
+                variant={message.variant}
+                name={message.variant === 'user' ? owner.name : bot.name}
+                at={message.at}
+                avatar={message.variant === 'user' ? userAvatar : botAvatar}
+                paragraphs={message.paragraphs}
+                state={message.state}
+                citation={
+                  message.citation === undefined ? undefined : (
+                    <a
+                      href={message.citation.href}
+                      className="mt-1.5 inline-flex min-h-11 items-center gap-1.5 rounded-sm text-2xs font-medium text-accent-ink underline decoration-accent-line decoration-1 underline-offset-4 hover:no-underline"
+                    >
+                      <DocumentIcon size={12} />
+                      {message.citation.label}
+                      <ChevronRightIcon size={10} />
+                    </a>
+                  )
+                }
+              />
+            ))}
+
+            {added.map((message) => (
+              <MessageBubble
+                key={message.id}
+                variant={message.variant}
+                name={owner.name}
+                at={message.at}
+                avatar={userAvatar}
+                paragraphs={message.paragraphs}
+                footnote={<p className="mt-1 text-2xs text-subtle">{localFootnote}</p>}
+              />
+            ))}
+          </ol>
+        </div>
       }
       runStrip={
         run === undefined ? undefined : <RunStrip run={run} />

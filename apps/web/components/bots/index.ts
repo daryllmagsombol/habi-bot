@@ -1,6 +1,12 @@
 export { BotCard } from './bot-card';
 export type { BotCardProps } from './bot-card';
 
+export { BotForm } from './bot-form';
+export type { BotFormProps, BotFormValues } from './bot-form';
+
+export { BotFormCard } from './bot-form-card';
+export type { BotFormCardProps } from './bot-form-card';
+
 export { BotGallery } from './bot-gallery';
 export type { BotGalleryItem, BotGalleryProps } from './bot-gallery';
 

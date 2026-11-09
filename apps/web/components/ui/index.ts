@@ -79,6 +79,9 @@ export type { InlineProps } from './inline';
 export { TextField } from './text-field';
 export type { TextFieldProps } from './text-field';
 
+export { TextArea } from './text-area';
+export type { TextAreaProps } from './text-area';
+
 export { Toolbar } from './toolbar';
 export type { ToolbarProps, ToolbarTone } from './toolbar';
 

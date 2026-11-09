@@ -1,13 +1,14 @@
 import type { Metadata } from 'next';
 import { AppBar } from '../../components/app-bar';
 import { BotGallery, botTone, type BotGalleryItem } from '../../components/bots';
-import { Button, DocumentIcon, EmptyState, SkipLink } from '../../components/ui';
+import { DocumentIcon, SkipLink } from '../../components/ui';
 import { botHref } from '../../lib/links';
 import { readApiConfig } from '../../lib/api/config';
 import { countLabel, initialsOf } from '../../lib/api/format';
 import { callerCookieHeader, fetchBots } from '../../lib/api/server';
 import type { BotSummaryDto } from '../../lib/api/types';
 import { DataStatePage } from '../data-state';
+import { BotsGalleryLive } from './gallery-live';
 import {
   liveThreadCount,
   previewAllowance,
@@ -81,7 +82,7 @@ function liveCards(bots: readonly BotSummaryDto[]): readonly BotGalleryItem[] {
     purpose: bot.purpose,
     href: botHref(bot.id),
     metaItems: [
-      { key: 'memory', label: 'Memory not exposed' },
+      { key: 'status', label: bot.status },
       { key: 'threads', label: threadLabel(bot) },
     ],
   }));
@@ -163,34 +164,24 @@ export default async function BotsPage() {
           <h1 className="text-page tracking-display text-ink">Your bots</h1>
           <p className="mt-2.5 max-w-[52ch] text-sm leading-normal text-subtle sm:text-sm">
             {bots.length === 0
-              ? 'This account has no Bot records yet.'
+              ? 'This account has no Bot records yet. Create the first one below.'
               : `${countLabel(bots.length, 'Bot', 'Bots')} owned by your account, each with its own instructions.`}{' '}
-            Memory records and daily usage are not exposed by this API yet.
+            Memory and daily usage are shown on a Bot&apos;s own page when the API returns them.
           </p>
         </header>
 
-        {bots.length === 0 ? (
-          <EmptyState
-            headingLevel={2}
-            title="No Bots yet"
-            description="The API returned an owned Bot list with no records. Creating a Bot is not exposed by this API yet, so this is the whole gallery."
-            action={<Button disabled>New bot</Button>}
-          />
-        ) : (
-          <BotGallery
-            bots={liveCards(bots)}
-            newBot={{
-              title: 'New bot',
-              description: 'Give it instructions, pick what it may remember, and keep tools off.',
-              note: 'Creating a Bot is not exposed by this API yet.',
-            }}
-          />
-        )}
+        <BotsGalleryLive
+          cards={liveCards(bots)}
+          newBot={{
+            title: 'New bot',
+            description: 'Give it instructions, pick what it may remember, and keep tools off.',
+            note: bots.length === 0 ? 'Create the first Bot for this account.' : 'Creating writes to your account.',
+          }}
+        />
 
         <p className="mt-10 max-w-[62ch] text-xs leading-relaxed text-subtle">
-          These records come from the Habi API and belong to your session. Memory, run history,
-          token counts, and the daily allowance are not exposed by it yet, so no figure here is
-          invented.
+          These records come from the Habi API and belong to your session. Memory, artifact, skill
+          and search surfaces read the same owner-scoped API, and no figure here is invented.
         </p>
       </main>
     </div>

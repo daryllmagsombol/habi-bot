@@ -5,6 +5,8 @@ import { useCallback, useEffect, useRef } from 'react';
 import { SkipLink } from '../../../components/ui';
 import type { PanelId } from '../../../lib/links';
 import { useLiveRun } from './use-live-run';
+import { useOlderMessages } from './use-older-messages';
+import { useWorkspaceActions } from './use-workspace-actions';
 import { useWorkspaceSelection } from './use-workspace-selection';
 import { WorkspaceConversation } from './workspace-conversation';
 import { composerStatusOf, shownThreadOf } from './workspace-derived';
@@ -51,6 +53,8 @@ export function BotWorkspace({
   const resetLiveRun = useCallback(() => resetLiveRunRef.current(), []);
   const selection = useWorkspaceSelection(data, initialThreadId, initialPanel, resetLiveRun);
   const liveRun = useLiveRun(selection.thread?.id, live);
+  const actions = useWorkspaceActions(data, selection.thread?.id, selection.panel === 'context');
+  const older = useOlderMessages(selection.thread, live);
 
   useEffect(() => {
     resetLiveRunRef.current = liveRun.reset;
@@ -80,13 +84,14 @@ export function BotWorkspace({
 
         <main id="main-content" tabIndex={-1} className="min-h-0 flex-1 focus:outline-none">
           <div className={contentClassName}>
-            <WorkspaceIdentity data={data} />
+            <WorkspaceIdentity data={data} actions={actions} />
 
             <div className="grid items-start gap-3 lg:grid-cols-[17rem_minmax(0,1fr)] lg:gap-4">
               <WorkspaceSidebar
                 data={data}
                 activeId={selection.thread?.id}
                 onSelectThread={selection.selectThread}
+                actions={actions}
               />
               <WorkspaceConversation
                 data={data}
@@ -96,6 +101,8 @@ export function BotWorkspace({
                 liveRun={liveRun}
                 composerStatus={composerStatus}
                 reduceMotion={reduceMotion}
+                older={older}
+                onCreateThread={() => actions.createThreadForBot(undefined)}
               />
             </div>
 
@@ -116,6 +123,7 @@ export function BotWorkspace({
           liveRun={liveRun}
           conversationHref={selection.conversationHref}
           reduceMotion={reduceMotion}
+          actions={actions}
           onClose={selection.closePanel}
         />
       </div>

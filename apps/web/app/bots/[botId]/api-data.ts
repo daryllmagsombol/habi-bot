@@ -7,10 +7,17 @@
  * value absent and the screen says so; it never substitutes sample data.
  */
 import { botTone } from '../../../components/bots';
-import type { PanelRun } from '../../../components/panels';
+import type {
+  DocumentBlock,
+  DocumentView,
+  MemoryGateItem,
+  MemoryItem,
+  PanelRun,
+} from '../../../components/panels';
 import type { RunEventView, RunState, RunView, TranscriptMessage } from '../../../components/threads';
 import {
   countLabel,
+  formatBytes,
   formatClock,
   formatWhen,
   initialsOf,
@@ -18,14 +25,19 @@ import {
   shortWhen,
 } from '../../../lib/api/format';
 import type {
+  AttachmentMetadataDto,
   BotDetailDto,
   BotListDto,
   BotThreadPageDto,
   ConversationDto,
+  MemoryDto,
+  MemoryListDto,
   MessageDto,
   MessagePageDto,
   RunDto,
 } from '../../../lib/api/types';
+import type { ApiResult } from '../../../lib/api/server';
+import type { AttachmentContentResult } from '../../../lib/api/server';
 import { botHref, threadHref } from '../../../lib/links';
 import type { WorkspaceData, WorkspaceThread } from './workspace-data';
 
@@ -109,11 +121,151 @@ export function runViewToPanel(run: RunView): PanelRun {
   };
 }
 
+function blocksFromText(text: string): readonly DocumentBlock[] {
+  const blocks: DocumentBlock[] = [];
+  let paragraph: string[] = [];
+  let list: string[] = [];
+
+  function flushParagraph() {
+    if (paragraph.length === 0) {
+      return;
+    }
+
+    blocks.push({ kind: 'paragraph', text: paragraph.join(' ') });
+    paragraph = [];
+  }
+
+  function flushList() {
+    if (list.length === 0) {
+      return;
+    }
+
+    blocks.push({ kind: 'list', items: list });
+    list = [];
+  }
+
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+
+    if (line.length === 0) {
+      flushParagraph();
+      flushList();
+      continue;
+    }
+
+    const heading = /^#{1,6}\s+(.*)$/.exec(line);
+
+    if (heading !== null) {
+      flushParagraph();
+      flushList();
+      blocks.push({ kind: 'heading', text: heading[1] ?? '' });
+      continue;
+    }
+
+    const bullet = /^(?:[-*+]|\d+[.)])\s+(.*)$/.exec(line);
+
+    if (bullet !== null) {
+      flushParagraph();
+      list.push(bullet[1] ?? '');
+      continue;
+    }
+
+    flushList();
+    paragraph.push(line);
+  }
+
+  flushParagraph();
+  flushList();
+
+  return blocks;
+}
+
+/**
+ * Attachment metadata and, when the content route succeeds, its text. The text
+ * is parsed into plain blocks; it is never interpreted as HTML.
+ */
+export function attachmentToDocument(
+  attachment: AttachmentMetadataDto,
+  content: ApiResult<AttachmentContentResult>,
+): DocumentView {
+  const base = {
+    id: attachment.id,
+    name: attachment.originalFilename,
+    bytes: formatBytes(attachment.byteSize),
+    attachedAt: formatWhen(attachment.storedAt ?? attachment.createdAt),
+    contentType: attachment.contentType,
+    citedParagraph: 0,
+  } as const;
+
+  if (content.ok) {
+    return {
+      ...base,
+      contentState: 'ready',
+      blocks: blocksFromText(content.data.text),
+    };
+  }
+
+  if (content.reason === 'unsupported' || content.code === 'unsupported_media_type') {
+    return {
+      ...base,
+      contentState: 'unsupported',
+      contentMessage:
+        'Only text/plain and text/markdown attachments can be read here. The stored bytes were not replaced with sample text.',
+      blocks: [],
+    };
+  }
+
+  if (content.reason === 'unavailable') {
+    return {
+      ...base,
+      contentState: 'unavailable',
+      contentMessage:
+        'The attachment metadata is available, but this server has no attachment storage root configured, so the text cannot be read.',
+      blocks: [],
+    };
+  }
+
+  return {
+    ...base,
+    contentState: 'error',
+    contentMessage: 'The content request failed. Nothing was invented in its place.',
+    blocks: [],
+  };
+}
+
+export interface MemoryMapping {
+  readonly gates: readonly MemoryGateItem[];
+  readonly items: readonly MemoryItem[];
+  readonly approved: number;
+}
+
+export function memoriesToViews(memories: readonly MemoryDto[]): MemoryMapping {
+  const gates = memories.map((memory) => ({
+    id: memory.id,
+    text: memory.content,
+    botApproved: memory.botApproved,
+    threadApproved: memory.conversationApproved,
+  }));
+
+  const items = gates.map((memory) => ({
+    id: memory.id,
+    text: memory.text,
+    recalled: memory.botApproved && memory.threadApproved,
+  }));
+
+  return {
+    gates,
+    items,
+    approved: items.filter((memory) => memory.recalled).length,
+  };
+}
+
 function toThread(
   botId: string,
   thread: ConversationDto,
   selectedThreadId: string | undefined,
   messages: MessagePageDto | undefined,
+  documents: readonly DocumentView[],
 ): WorkspaceThread {
   const selected = thread.id === selectedThreadId;
   const turns =
@@ -139,7 +291,13 @@ function toThread(
       ],
       messages: turns,
     },
-    document: undefined,
+    documents: selected ? documents : [],
+    ...(selected && messages !== undefined
+      ? {
+          beforeCursor: messages.beforeCursor,
+          hasMoreBefore: messages.hasMoreBefore,
+        }
+      : {}),
     // The API does not link an existing message to the Run that produced it, so
     // history starts with no run rather than an invented one.
     run: undefined,
@@ -157,15 +315,34 @@ export interface LiveWorkspaceInput {
   readonly threads: BotThreadPageDto;
   readonly selectedThreadId: string | undefined;
   readonly messages: MessagePageDto | undefined;
+  /** Absent when the memory page could not be read. */
+  readonly memories?: MemoryListDto | undefined;
+  /** Documents for the selected thread; empty when it has none. */
+  readonly documents?: readonly DocumentView[];
 }
 
 export function buildLiveWorkspace(input: LiveWorkspaceInput): WorkspaceData {
-  const { detail, bots, threads, selectedThreadId, messages } = input;
+  const {
+    detail,
+    bots,
+    threads,
+    selectedThreadId,
+    messages,
+    memories,
+    documents = [],
+  } = input;
   const botId = detail.bot.id;
   const threadCount = bots.bots.reduce(
     (total, bot) => total + bot.conversationCount,
     0,
   );
+  const memoryMapping = memoriesToViews(memories?.memories ?? []);
+  const memorySummary =
+    memories === undefined
+      ? 'No tools · Memory unavailable'
+      : memoryMapping.items.length === 0
+        ? 'No tools · No memories saved'
+        : `No tools · ${memoryMapping.approved} of ${memoryMapping.items.length} memories selected`;
 
   return {
     bot: {
@@ -173,15 +350,18 @@ export function buildLiveWorkspace(input: LiveWorkspaceInput): WorkspaceData {
       name: detail.bot.name,
       initials: initialsOf(detail.bot.name),
       tone: botTone(botId),
-      summary: 'No tools · Memory not exposed by this API',
+      summary: memorySummary,
+      description: detail.bot.description,
+      instructionsMarkdown: detail.bot.instructionsMarkdown,
       baseHref: botHref(botId),
     },
     threads: threads.threads.map((thread) =>
-      toThread(botId, thread, selectedThreadId, messages),
+      toThread(botId, thread, selectedThreadId, messages, documents),
     ),
-    memories: [],
-    memoryItems: [],
-    approvedMemories: 0,
+    memories: memoryMapping.gates,
+    memoryItems: memoryMapping.items,
+    memoryState: memories === undefined ? 'unavailable' : 'ready',
+    approvedMemories: memoryMapping.approved,
     counts: { bots: bots.bots.length, threads: threadCount },
     owner: LIVE_OWNER,
     mode: 'live',

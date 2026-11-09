@@ -1,11 +1,20 @@
 'use client';
 
 import { AnimatePresence, motion } from 'motion/react';
-import { ContextPanel, DocumentPanel, PanelCard } from '../../../components/panels';
+import {
+  ArtifactPanel,
+  ContextPanel,
+  DocumentPanel,
+  MemoryComposer,
+  PanelCard,
+  SearchPanel,
+  SkillsPanel,
+} from '../../../components/panels';
 import type { PanelId } from '../../../lib/links';
 import { DURATION, EASE, PANEL_OFFSET } from '../../../lib/motion';
 import { panelRunOf } from './workspace-derived';
 import type { LiveRun } from './use-live-run';
+import type { WorkspaceActions } from './use-workspace-actions';
 import type { WorkspaceData, WorkspaceThread } from './workspace-data';
 
 export interface WorkspacePanelProps {
@@ -17,6 +26,7 @@ export interface WorkspacePanelProps {
   readonly liveRun: LiveRun;
   readonly conversationHref: string;
   readonly reduceMotion: boolean | null;
+  readonly actions: WorkspaceActions;
   readonly onClose: () => void;
 }
 
@@ -24,6 +34,10 @@ export interface WorkspacePanelProps {
  * The evidence card. On a phone it is a full-height sheet above the workspace;
  * on a wide screen it docks at the right edge. Keeping `AnimatePresence` mounted
  * lets the sheet play its exit animation when the panel closes.
+ *
+ * The Context panel composes the memory controls and the on-demand artifact,
+ * skill and search sections. All of them receive data and callbacks; none of
+ * them fetches.
  */
 export function WorkspacePanel({
   panel,
@@ -34,6 +48,7 @@ export function WorkspacePanel({
   liveRun,
   conversationHref,
   reduceMotion,
+  actions,
   onClose,
 }: Readonly<WorkspacePanelProps>) {
   return (
@@ -55,17 +70,83 @@ export function WorkspacePanel({
           >
             {panel === 'document' ? (
               <DocumentPanel
-                document={thread.document}
+                documents={thread.documents}
                 threadTitle={shownThreadTitle ?? thread.view.title}
                 mode={data.mode}
               />
             ) : (
               <ContextPanel
                 memories={data.memories}
+                memoryState={data.memoryState}
                 run={panelRunOf(thread, live, liveRun)}
                 allowance={data.allowance}
                 mode={data.mode}
-                {...previewMemoryNote(live)}
+                onMemoryToggle={live ? actions.toggleMemory : undefined}
+                memoryChangedNote={
+                  live
+                    ? (actions.memoryError ?? actions.memoryStatus)
+                    : 'Preview only — this change is not saved.'
+                }
+                memoryComposer={
+                  live ? (
+                    <MemoryComposer
+                      threadId={thread.id}
+                      onSubmit={actions.proposeMemory}
+                      pending={actions.memoryPendingId === 'new'}
+                      error={actions.memoryError}
+                      status={actions.memoryStatus}
+                    />
+                  ) : (
+                    <MemoryComposer
+                      threadId={undefined}
+                      onSubmit={() => {}}
+                      disabledNote="Preview only — no memory is saved."
+                    />
+                  )
+                }
+                skillsSection={
+                  live ? (
+                    <SkillsPanel
+                      skills={actions.skills}
+                      botId={data.bot.id}
+                      state={
+                        actions.skillsState === 'idle' ? 'loading' : actions.skillsState
+                      }
+                      error={actions.skillsError}
+                      onAttach={actions.attachSkillToBot}
+                      onDetach={actions.detachSkillFromBot}
+                      pendingId={actions.skillPendingId}
+                    />
+                  ) : undefined
+                }
+                searchSection={
+                  live ? (
+                    <SearchPanel
+                      botId={data.bot.id}
+                      results={actions.searchResults}
+                      state={actions.searchState}
+                      error={actions.searchError}
+                      lastQuery={actions.searchQuery}
+                      onSearch={actions.runSearch}
+                    />
+                  ) : undefined
+                }
+                artifactsSection={
+                  live ? (
+                    <ArtifactPanel
+                      artifacts={actions.artifacts}
+                      detail={actions.artifactDetail}
+                      versions={actions.artifactVersions}
+                      state={actions.artifactsState}
+                      busy={actions.artifactBusy}
+                      error={actions.artifactError}
+                      status={actions.artifactStatus}
+                      onSelect={actions.selectArtifact}
+                      onSave={actions.saveArtifact}
+                      onRestore={actions.restoreArtifact}
+                    />
+                  ) : undefined
+                }
               />
             )}
           </PanelCard>
@@ -73,13 +154,4 @@ export function WorkspacePanel({
       )}
     </AnimatePresence>
   );
-}
-
-/** The preview-only note, absent in live mode without passing explicit undefined. */
-function previewMemoryNote(live: boolean): { readonly memoryChangedNote?: string } {
-  if (live) {
-    return {};
-  }
-
-  return { memoryChangedNote: 'Preview only — this change is not saved.' };
 }

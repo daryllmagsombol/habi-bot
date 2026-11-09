@@ -44,11 +44,62 @@ export type DocumentBlock =
   | { readonly kind: 'paragraph'; readonly text: string; readonly cited?: boolean }
   | { readonly kind: 'list'; readonly items: readonly string[] };
 
+export type DocumentContentState = 'ready' | 'unavailable' | 'unsupported' | 'error';
+
 export interface DocumentView {
   readonly id: string;
   readonly name: string;
   readonly bytes: string;
   readonly attachedAt: string;
+  /** Content type reported by the metadata record. */
+  readonly contentType?: string;
+  /** `ready` renders blocks; every other state explains why the body is absent. */
+  readonly contentState?: DocumentContentState;
+  readonly contentMessage?: string;
   readonly citedParagraph: number;
   readonly blocks: readonly DocumentBlock[];
 }
+
+export interface SkillView {
+  readonly id: string;
+  readonly name: string;
+  readonly description: string;
+  readonly status: 'draft' | 'active' | 'archived' | 'deleted';
+  readonly version: number;
+  /** Null means owner-level; otherwise the Bot this skill is attached to. */
+  readonly botId: string | null;
+}
+
+export type ArtifactKind = 'markdown' | 'text' | 'json';
+export type ArtifactStatus = 'draft' | 'final' | 'deleted';
+
+export interface ArtifactSummaryView {
+  readonly id: string;
+  readonly title: string;
+  readonly kind: ArtifactKind;
+  readonly status: ArtifactStatus;
+  readonly currentVersion: number;
+  readonly updatedAt: string;
+}
+
+export interface ArtifactVersionView {
+  readonly version: number;
+  readonly byteSize: number;
+  readonly createdAt: string;
+}
+
+export interface ArtifactDetailView {
+  readonly artifact: ArtifactSummaryView;
+  readonly version: ArtifactVersionView;
+  readonly content: string;
+}
+
+export type SearchResultView = {
+  readonly messageId: string;
+  readonly conversationId: string;
+  readonly conversationTitle: string;
+  readonly role: 'user' | 'assistant';
+  /** HTML-escaped, `<mark>`-delimited excerpt; rendered as text segments. */
+  readonly snippet: string;
+  readonly at: string;
+};

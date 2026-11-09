@@ -18,8 +18,16 @@
 import { readApiConfig } from '../../lib/api/config';
 
 const SESSION_COOKIE = /^(?:__Host-)?habi_session=/;
-const MAX_BODY_BYTES = 16 * 1024;
+/**
+ * The artifact transport enforces its own 100 KB content bound downstream. The
+ * BFF only needs a ceiling large enough to carry that JSON envelope, so a large
+ * write is forwarded and the API's `413`/`invalid_input` answer is relayed
+ * instead of being pre-empted here.
+ */
+const MAX_BODY_BYTES = 256 * 1024;
 const JSON_TIMEOUT_MS = 15_000;
+
+const WRITE_METHODS = new Set(['POST', 'PATCH', 'DELETE']);
 
 export function proxyError(code: string, status: number): Response {
   return Response.json(
@@ -119,11 +127,12 @@ export async function forwardJson(request: Request, path: string): Promise<Respo
     return proxyError('api_unavailable', 503);
   }
 
-  const method = request.method === 'POST' ? 'POST' : 'GET';
+  const method = request.method.toUpperCase();
+  const write = WRITE_METHODS.has(method);
   const headers = upstreamHeaders(request, config.origin, 'application/json');
   let body: string | undefined;
 
-  if (method === 'POST') {
+  if (write) {
     const contentType = request.headers.get('content-type');
 
     if (contentType !== null) {
@@ -133,7 +142,7 @@ export async function forwardJson(request: Request, path: string): Promise<Respo
     body = await request.text();
 
     if (Buffer.byteLength(body, 'utf8') > MAX_BODY_BYTES) {
-      return proxyError('invalid_request', 413);
+      return proxyError('invalid_input', 413);
     }
   }
 
@@ -141,7 +150,7 @@ export async function forwardJson(request: Request, path: string): Promise<Respo
 
   try {
     upstream = await fetch(`${config.origin}/api${path}`, {
-      method,
+      method: write ? method : 'GET',
       headers,
       ...(body === undefined ? {} : { body }),
       cache: 'no-store',
@@ -152,6 +161,54 @@ export async function forwardJson(request: Request, path: string): Promise<Respo
   }
 
   return relayJson(upstream);
+}
+
+/**
+ * Forwards the attachment content read. The API answers raw `text/plain` or
+ * `text/markdown`; every failure keeps the JSON envelope, including the
+ * `503 api_unavailable` a server without `HABI_ATTACHMENT_STORAGE_ROOT` returns.
+ * The content type is relayed so the client never has to guess it.
+ */
+export async function forwardText(request: Request, path: string): Promise<Response> {
+  const config = readApiConfig();
+
+  if (config.kind !== 'configured') {
+    return proxyError('api_unavailable', 503);
+  }
+
+  const headers = upstreamHeaders(
+    request,
+    config.origin,
+    'text/plain, text/markdown;q=0.9, application/json;q=0.8',
+  );
+
+  let upstream: Response;
+
+  try {
+    upstream = await fetch(`${config.origin}/api${path}`, {
+      method: 'GET',
+      headers,
+      cache: 'no-store',
+      signal: AbortSignal.timeout(JSON_TIMEOUT_MS),
+    });
+  } catch {
+    return proxyError('api_unavailable', 502);
+  }
+
+  const contentType = upstream.headers.get('content-type') ?? '';
+
+  if (!upstream.ok || !contentType.startsWith('text/')) {
+    return relayJson(upstream);
+  }
+
+  return new Response(await upstream.text(), {
+    status: upstream.status,
+    headers: {
+      'cache-control': 'no-store',
+      'content-type': contentType,
+      'x-content-type-options': 'nosniff',
+    },
+  });
 }
 
 /**

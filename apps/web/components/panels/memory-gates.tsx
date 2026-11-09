@@ -13,7 +13,14 @@ interface GateState {
 export interface MemoryGatesProps {
   readonly memories: readonly MemoryGateItem[];
   /** Called after a switch moves; the parent owns persistence. */
-  readonly onToggle?: ((id: string, gate: MemoryGate, next: boolean) => void) | undefined;
+  readonly onToggle?:
+    | ((
+        id: string,
+        gate: MemoryGate,
+        next: boolean,
+        nextGates: { readonly bot: boolean; readonly thread: boolean },
+      ) => void)
+    | undefined;
   readonly ruleNote?: string | undefined;
   readonly changedNote?: string | undefined;
 }
@@ -44,12 +51,19 @@ export function MemoryGates({
   );
   const [changed, setChanged] = useState(false);
 
+  // A server refresh after an approval remounts this list through the key the
+  // Context panel derives from the memory records, so the switches mirror the
+  // new truth instead of keeping an optimistic position that may have failed.
+
   function toggle(id: string, field: MemoryGate) {
+    const current = gates.find((gate) => gate.id === id) ?? { bot: false, thread: false };
+    const next = !current[field];
+    const nextGates = { ...current, [field]: next };
+
     setGates((previous) =>
-      previous.map((gate) => (gate.id === id ? { ...gate, [field]: !gate[field] } : gate)),
+      previous.map((gate) => (gate.id === id ? { ...gate, [field]: next } : gate)),
     );
-    const current = gates.find((gate) => gate.id === id);
-    onToggle?.(id, field, !(current?.[field] ?? false));
+    onToggle?.(id, field, next, { bot: nextGates.bot, thread: nextGates.thread });
     setChanged(true);
   }
 
