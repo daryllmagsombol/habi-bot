@@ -13,10 +13,16 @@
 import { headers } from 'next/headers';
 import { readApiConfig } from './config';
 import type {
+  ArtifactDetailEnvelopeDto,
+  ArtifactListDto,
+  ArtifactVersionListDto,
+  AttachmentListDto,
   BotDetailDto,
   BotListDto,
   BotThreadPageDto,
+  MemoryListDto,
   MessagePageDto,
+  SkillListDto,
 } from './types';
 
 export type ApiFailureReason =
@@ -26,6 +32,7 @@ export type ApiFailureReason =
   | 'forbidden'
   | 'not_found'
   | 'unavailable'
+  | 'unsupported'
   | 'error';
 
 export interface ApiFailure {
@@ -78,11 +85,32 @@ function reasonForStatus(status: number): ApiFailureReason {
     return 'not_found';
   }
 
+  if (status === 415) {
+    return 'unsupported';
+  }
+
   if (status >= 500) {
     return 'unavailable';
   }
 
   return 'error';
+}
+
+function withQuery(
+  path: string,
+  params: Readonly<Record<string, string | number | undefined>>,
+): string {
+  const search = new URLSearchParams();
+
+  for (const [key, value] of Object.entries(params as Record<string, unknown>)) {
+    if (typeof value === 'string' || typeof value === 'number') {
+      search.set(key, String(value));
+    }
+  }
+
+  const query = search.toString();
+
+  return query.length === 0 ? path : `${path}?${query}`;
 }
 
 /**
@@ -161,9 +189,146 @@ export function fetchThreads(
 export function fetchMessages(
   threadId: string,
   cookie: string | undefined,
+  options: {
+    readonly limit?: number;
+    readonly before?: string;
+    readonly after?: string;
+  } = {},
 ): Promise<ApiResult<MessagePageDto>> {
   return apiGet<MessagePageDto>(
-    `/threads/${encodeURIComponent(threadId)}/messages`,
+    withQuery(`/threads/${encodeURIComponent(threadId)}/messages`, {
+      limit: options.limit,
+      before: options.before,
+      after: options.after,
+    }),
+    cookie,
+  );
+}
+
+export function fetchAttachments(
+  threadId: string,
+  cookie: string | undefined,
+): Promise<ApiResult<AttachmentListDto>> {
+  return apiGet<AttachmentListDto>(
+    `/threads/${encodeURIComponent(threadId)}/attachments`,
+    cookie,
+  );
+}
+
+export interface AttachmentContentResult {
+  readonly text: string;
+  readonly contentType: string;
+}
+
+/**
+ * Raw attachment text. `503 api_unavailable` means the server has no
+ * `HABI_ATTACHMENT_STORAGE_ROOT`; `415` means the bytes are not a text type.
+ * Neither is ever replaced with sample content.
+ */
+export async function fetchAttachmentContent(
+  attachmentId: string,
+  cookie: string | undefined,
+): Promise<ApiResult<AttachmentContentResult>> {
+  const config = readApiConfig();
+
+  if (config.kind === 'unset') {
+    return failure('unconfigured', 0);
+  }
+
+  if (config.kind === 'invalid') {
+    return failure('invalid_config', 0);
+  }
+
+  const requestHeaders: Record<string, string> = {
+    accept: 'text/plain, text/markdown;q=0.9, application/json;q=0.8',
+  };
+
+  if (cookie !== undefined) {
+    requestHeaders.cookie = cookie;
+  }
+
+  let response: Response;
+
+  try {
+    response = await fetch(
+      `${config.origin}/api/attachments/${encodeURIComponent(attachmentId)}/content`,
+      {
+        method: 'GET',
+        headers: requestHeaders,
+        cache: 'no-store',
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      },
+    );
+  } catch {
+    return failure('unavailable', 0);
+  }
+
+  if (!response.ok) {
+    const body: unknown = await response.json().catch(() => undefined);
+
+    return failure(reasonForStatus(response.status), response.status, readErrorCode(body));
+  }
+
+  return {
+    ok: true,
+    data: {
+      text: await response.text(),
+      contentType: response.headers.get('content-type') ?? 'text/plain',
+    },
+  };
+}
+
+export function fetchMemories(
+  botId: string,
+  cookie: string | undefined,
+  options: { readonly limit?: number; readonly cursor?: string } = {},
+): Promise<ApiResult<MemoryListDto>> {
+  return apiGet<MemoryListDto>(
+    withQuery(`/bots/${encodeURIComponent(botId)}/memories`, options),
+    cookie,
+  );
+}
+
+export function fetchSkills(
+  cookie: string | undefined,
+  options: {
+    readonly botId?: string;
+    readonly status?: string;
+    readonly limit?: number;
+    readonly cursor?: string;
+  } = {},
+): Promise<ApiResult<SkillListDto>> {
+  return apiGet<SkillListDto>(withQuery('/skills', options), cookie);
+}
+
+export function fetchArtifacts(
+  cookie: string | undefined,
+  options: {
+    readonly conversationId?: string;
+    readonly limit?: number;
+    readonly cursor?: string;
+  } = {},
+): Promise<ApiResult<ArtifactListDto>> {
+  return apiGet<ArtifactListDto>(withQuery('/artifacts', options), cookie);
+}
+
+export function fetchArtifact(
+  artifactId: string,
+  cookie: string | undefined,
+  version?: number,
+): Promise<ApiResult<ArtifactDetailEnvelopeDto>> {
+  return apiGet<ArtifactDetailEnvelopeDto>(
+    withQuery(`/artifacts/${encodeURIComponent(artifactId)}`, { version }),
+    cookie,
+  );
+}
+
+export function fetchArtifactVersions(
+  artifactId: string,
+  cookie: string | undefined,
+): Promise<ApiResult<ArtifactVersionListDto>> {
+  return apiGet<ArtifactVersionListDto>(
+    `/artifacts/${encodeURIComponent(artifactId)}/versions`,
     cookie,
   );
 }

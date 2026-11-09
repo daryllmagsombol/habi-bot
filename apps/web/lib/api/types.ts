@@ -145,6 +145,149 @@ export interface GapDto {
   readonly toSeq: number;
 }
 
+/** `GET /api/threads/:threadId/attachments`. Never paginated. */
+export interface AttachmentMetadataDto {
+  readonly id: string;
+  readonly conversationId: string;
+  readonly messageId: string | null;
+  readonly originalFilename: string;
+  readonly contentType: string;
+  readonly byteSize: number;
+  readonly sha256: string;
+  readonly status: 'pending' | 'stored' | 'rejected' | 'deleted';
+  readonly createdAt: string;
+  readonly storedAt: string | null;
+  readonly deletedAt: string | null;
+}
+
+export interface AttachmentListDto {
+  readonly attachments: readonly AttachmentMetadataDto[];
+  /** Always `null`: attachment metadata is returned in one page. */
+  readonly nextCursor: null;
+}
+
+/** `GET /api/bots/:botId/memories`. */
+export interface MemoryDto {
+  readonly id: string;
+  readonly botId: string;
+  readonly conversationId: string | null;
+  readonly content: string;
+  readonly sourceMessageId: string | null;
+  readonly status: 'proposed' | 'accepted' | 'deleted';
+  readonly botApproved: boolean;
+  readonly conversationApproved: boolean;
+  readonly provenanceState: 'live' | 'tombstoned';
+  readonly provenanceTombstonedAt: string | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly deletedAt: string | null;
+}
+
+export interface MemoryListDto {
+  readonly memories: readonly MemoryDto[];
+  readonly nextCursor: string | null;
+}
+
+/** `GET /api/skills`. */
+export interface SkillDto {
+  readonly id: string;
+  readonly botId: string | null;
+  readonly name: string;
+  readonly description: string;
+  readonly bodyMarkdown: string;
+  readonly version: number;
+  readonly status: 'draft' | 'active' | 'archived' | 'deleted';
+  readonly archivedAt: string | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly deletedAt: string | null;
+}
+
+export interface SkillListDto {
+  readonly skills: readonly SkillDto[];
+  readonly nextCursor: string | null;
+}
+
+export type ArtifactKind = 'markdown' | 'text' | 'json';
+export type ArtifactStatus = 'draft' | 'final' | 'deleted';
+
+/** Flat metadata list item. `GET /api/artifacts` never includes a body. */
+export interface ArtifactDto {
+  readonly id: string;
+  readonly conversationId: string | null;
+  readonly runId: string | null;
+  readonly kind: ArtifactKind;
+  readonly title: string;
+  readonly currentVersion: number;
+  readonly status: ArtifactStatus;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly deletedAt: string | null;
+}
+
+export interface ArtifactListDto {
+  readonly artifacts: readonly ArtifactDto[];
+  readonly nextCursor: string | null;
+}
+
+export interface ArtifactVersionDto {
+  readonly artifactId: string;
+  readonly version: number;
+  readonly content: string;
+  readonly contentSha256: string;
+  readonly byteSize: number;
+  readonly createdBy: string;
+  readonly createdAt: string;
+}
+
+/** Version metadata without the body. `GET /api/artifacts/:id/versions`. */
+export interface ArtifactVersionMetadataDto {
+  readonly artifactId: string;
+  readonly version: number;
+  readonly contentSha256: string;
+  readonly byteSize: number;
+  readonly createdBy: string;
+  readonly createdAt: string;
+}
+
+export interface ArtifactVersionListDto {
+  readonly versions: readonly ArtifactVersionMetadataDto[];
+  readonly nextCursor: string | null;
+}
+
+/** Single-artifact responses are nested: metadata plus the hash-verified body. */
+export interface ArtifactDetailDto {
+  readonly artifact: ArtifactDto;
+  readonly version: ArtifactVersionDto;
+}
+
+export interface ArtifactDetailEnvelopeDto {
+  readonly artifact: ArtifactDetailDto;
+}
+
+export interface ArtifactVersionPageEnvelopeDto {
+  readonly versions: readonly ArtifactVersionMetadataDto[];
+  readonly nextCursor: string | null;
+}
+
+/** `GET /api/search`. Snippet is HTML-escaped and `<mark>`-delimited. */
+export interface SearchHitDto {
+  readonly messageId: string;
+  readonly conversationId: string;
+  readonly conversationTitle: string;
+  readonly botId: string;
+  readonly role: MessageRole;
+  readonly seq: number;
+  readonly createdAt: string;
+  readonly score: number;
+  readonly snippet: string;
+}
+
+export interface SearchPageDto {
+  readonly results: readonly SearchHitDto[];
+  readonly nextCursor: string | null;
+}
+
 export interface ApiErrorBody {
   readonly error: { readonly code: string };
 }

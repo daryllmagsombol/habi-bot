@@ -1,4 +1,4 @@
-import { Card, PlusIcon } from '../ui';
+import { Button, Card, PlusIcon } from '../ui';
 
 export interface NewBotCardProps {
   readonly title: string;
@@ -6,16 +6,26 @@ export interface NewBotCardProps {
   readonly note: string;
   /** Id for the card's heading, so the card can be labelled by it. */
   readonly headingId: string;
+  /** Opens the create form. Absent while no API is configured. */
+  readonly onCreate?: (() => void) | undefined;
+  readonly disabledLabel?: string;
 }
 
 /**
  * The dashed "new Bot" card in the gallery.
  *
- * It is a statement, not a disabled button: creating a Bot needs the Bots API,
- * and the note says so. When the API lands, this card gains an action instead
- * of silently becoming clickable.
+ * It is a statement plus one action. With an API configured the action opens
+ * the create form; in preview the same action is disabled and the note says the
+ * preview cannot create a Bot. It never silently becomes clickable.
  */
-export function NewBotCard({ title, description, note, headingId }: Readonly<NewBotCardProps>) {
+export function NewBotCard({
+  title,
+  description,
+  note,
+  headingId,
+  onCreate,
+  disabledLabel = 'New bot',
+}: Readonly<NewBotCardProps>) {
   return (
     <Card
       variant="dashed"
@@ -36,6 +46,16 @@ export function NewBotCard({ title, description, note, headingId }: Readonly<New
       </h2>
       <p className="text-xs leading-snug text-subtle">{description}</p>
       <p className="text-2xs leading-normal text-subtle">{note}</p>
+      <Button
+        variant="secondary"
+        size="sm"
+        disabled={onCreate === undefined}
+        onClick={onCreate}
+        className="mt-1"
+        title={onCreate === undefined ? note : undefined}
+      >
+        {onCreate === undefined ? disabledLabel : 'Create bot'}
+      </Button>
     </Card>
   );
 }

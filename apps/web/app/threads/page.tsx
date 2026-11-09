@@ -1,7 +1,7 @@
 import type { Metadata } from 'next';
 import { AppBar } from '../../components/app-bar';
 import { ThreadRow } from '../../components/threads';
-import { Badge, Button, EmptyState, MetaRow, SkipLink } from '../../components/ui';
+import { Badge, ButtonLink, EmptyState, MetaRow, SkipLink } from '../../components/ui';
 import {
   formatCount,
   previewAllowance,
@@ -208,8 +208,8 @@ export default async function ThreadsPage() {
           <EmptyState
             headingLevel={2}
             title="No threads yet"
-            description="The API returned owned Bots with no conversations. Creating a thread is not exposed by this API yet, so this is the whole list."
-            action={<Button disabled>New thread</Button>}
+            description="The API returned owned Bots with no conversations. Open a Bot to create the first thread."
+            action={<ButtonLink href="/bots">Open a Bot</ButtonLink>}
           />
         ) : (
           <nav aria-label="All threads">

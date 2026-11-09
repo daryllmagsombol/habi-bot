@@ -95,10 +95,10 @@ not.
 
 | Group | Contains | Reused by |
 | --- | --- | --- |
-| `components/ui` | `Avatar`, `Badge`, `Pill`, `Button`, `ButtonLink`, `IconButton`, `IconButtonLink`, `Card`, `ListRow`, `MetaRow`, `SectionHeader`, `Segmented`, `Sheet`, `Toolbar`, `Container`, `Stack`, `Inline`, `TextField`, `FormMessage`, `EmptyState`, `Skeleton`, `SkeletonText`, `PageHeader`, `SkipLink`, `icons` | every screen |
-| `components/bots` | `BotCard`, `NewBotCard`, `BotGallery`, `BotIdentity`, `botTone` (helper) | gallery, Bot page |
-| `components/threads` | `ThreadListCard`, `ThreadRow`, `ThreadCard`, `ThreadConversation`, `MessageBubble`, `RunStrip`, `Composer` | Bot page, `/threads` |
-| `components/panels` | `PanelCard`, `PanelSwitch`, `DocumentPanel`, `ContextPanel`, `MemoryCard`, `MemoryGates` | Bot page, panel routes |
+| `components/ui` | `Avatar`, `Badge`, `Pill`, `Button`, `ButtonLink`, `IconButton`, `IconButtonLink`, `Card`, `ListRow`, `MetaRow`, `SectionHeader`, `Segmented`, `Sheet`, `Toolbar`, `Container`, `Stack`, `Inline`, `TextField`, `TextArea`, `FormMessage`, `EmptyState`, `Skeleton`, `SkeletonText`, `PageHeader`, `SkipLink`, `icons` | every screen |
+| `components/bots` | `BotCard`, `NewBotCard`, `BotGallery`, `BotIdentity`, `BotForm`, `BotFormCard`, `botTone` (helper) | gallery, Bot page |
+| `components/threads` | `ThreadListCard`, `ThreadRow`, `ThreadCard`, `ThreadConversation`, `MessageBubble`, `RunStrip`, `Composer`, `ThreadForm`, `ThreadActions` | Bot page, `/threads` |
+| `components/panels` | `PanelCard`, `PanelSwitch`, `DocumentPanel`, `ContextPanel`, `MemoryCard`, `MemoryGates`, `MemoryComposer`, `ArtifactPanel`, `SkillsPanel`, `SearchPanel` | Bot page, panel routes |
 | `components/chrome` (root files today) | `app-bar`, `wordmark`, `site-shell`, `weave-figure` | every route |
 | `components/theme` | `theme-toggle`, `theme` (store) | app bar, site shell |
 | `lib` | `preview-data`, `motion`, `links` | routes only |
@@ -118,6 +118,11 @@ props), receives one `WorkspaceData` object, and passes slices to the groups.
 - `Badge` is a state label (status, run state); `Pill` is chrome (counts, allowance). Do not swap them.
 - `ListRow` is generic row mechanics; `ThreadRow` is the thread-specific row built on it.
 - `Avatar` carries the Bot identity tone (`iris`/`sage`/`apricot`/`plum`) and neutral/user tones.
+- Forms are components, not markup: `BotForm`/`BotFormCard` and `ThreadForm` reuse `TextField`,
+  `TextArea` and `Button`; `ThreadActions` and `MemoryComposer` are the same shape.
+- `ArtifactPanel`, `SkillsPanel` and `SearchPanel` are the content surfaces the live API provides.
+  They render one page of results and never invent a record the API did not return; a missing
+  attachment content route renders "Not stored on this server" rather than sample text.
 
 ## 4. Composition rules
 

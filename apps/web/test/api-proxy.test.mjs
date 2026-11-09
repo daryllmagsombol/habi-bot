@@ -26,6 +26,11 @@ const cwd = fileURLToPath(new URL('../', import.meta.url));
 const BOT_ID = '11111111-1111-4111-8111-111111111111';
 const THREAD_ID = '33333333-3333-4333-8333-333333333333';
 const RUN_ID = '44444444-4444-4444-8444-444444444444';
+const ATTACHMENT_ID = '22222222-2222-4222-8222-222222222222';
+const MISSING_BYTES_ID = '55555555-5555-4555-8555-555555555555';
+const ARTIFACT_ID = '66666666-6666-4666-8666-666666666666';
+const MEMORY_ID = '77777777-7777-4777-8777-777777777777';
+const SKILL_ID = '88888888-8888-4888-8888-888888888888';
 const CSRF = 'csrf-test-token';
 const SESSION = 'session-test-secret';
 const NOW = '2026-11-04T06:00:00.000Z';
@@ -40,6 +45,99 @@ const BOT = {
   archivedAt: null,
   createdAt: NOW,
   updatedAt: NOW,
+};
+
+const THREAD = {
+  id: THREAD_ID,
+  botId: BOT_ID,
+  title: 'Live thread about ordering',
+  status: 'active',
+  lastMessageSeq: 2,
+  createdAt: NOW,
+  updatedAt: NOW,
+};
+
+const ATTACHMENT = {
+  id: ATTACHMENT_ID,
+  conversationId: THREAD_ID,
+  messageId: null,
+  originalFilename: 'live-notes.md',
+  contentType: 'text/markdown',
+  byteSize: 64,
+  sha256: 'a'.repeat(64),
+  status: 'stored',
+  createdAt: NOW,
+  storedAt: NOW,
+  deletedAt: null,
+};
+
+const MISSING_ATTACHMENT = {
+  id: MISSING_BYTES_ID,
+  conversationId: THREAD_ID,
+  messageId: null,
+  originalFilename: 'not-stored.txt',
+  contentType: 'text/plain',
+  byteSize: 12,
+  sha256: 'b'.repeat(64),
+  status: 'stored',
+  createdAt: NOW,
+  storedAt: NOW,
+  deletedAt: null,
+};
+
+const MEMORY = {
+  id: MEMORY_ID,
+  botId: BOT_ID,
+  conversationId: THREAD_ID,
+  content: 'Prefers short sections over bullet dumps.',
+  sourceMessageId: null,
+  status: 'accepted',
+  botApproved: true,
+  conversationApproved: false,
+  provenanceState: 'live',
+  provenanceTombstonedAt: null,
+  createdAt: NOW,
+  updatedAt: NOW,
+  deletedAt: null,
+};
+
+const ARTIFACT = {
+  id: ARTIFACT_ID,
+  conversationId: THREAD_ID,
+  runId: null,
+  kind: 'markdown',
+  title: 'Ordering note',
+  currentVersion: 1,
+  status: 'draft',
+  createdAt: NOW,
+  updatedAt: NOW,
+  deletedAt: null,
+};
+
+const ARTIFACT_VERSION = {
+  artifactId: ARTIFACT_ID,
+  version: 1,
+  content: '# Ordering note\n\nThe cursor is the sequence, not the clock.',
+  contentSha256: 'c'.repeat(64),
+  byteSize: 58,
+  createdBy: 'user-1',
+  createdAt: NOW,
+};
+
+const ARTIFACT_DETAIL = { artifact: ARTIFACT, version: ARTIFACT_VERSION };
+
+const SKILL = {
+  id: SKILL_ID,
+  botId: null,
+  name: 'Plain verbs',
+  description: 'Prefer plain verbs over nominalisations.',
+  bodyMarkdown: 'Use plain verbs.',
+  version: 1,
+  status: 'active',
+  archivedAt: null,
+  createdAt: NOW,
+  updatedAt: NOW,
+  deletedAt: null,
 };
 
 const RUN = {
@@ -373,6 +471,219 @@ function createStub() {
         return;
       }
 
+      if (request.method === 'POST' && path === '/api/bots') {
+        if (request.headers['x-csrf-token'] !== CSRF) {
+          json(response, 403, { error: { code: 'csrf_invalid' } });
+          return;
+        }
+
+        json(response, 201, { bot: BOT });
+        return;
+      }
+
+      if (
+        (request.method === 'PATCH' || request.method === 'DELETE') &&
+        path === `/api/bots/${BOT_ID}`
+      ) {
+        if (request.headers['x-csrf-token'] !== CSRF) {
+          json(response, 403, { error: { code: 'csrf_invalid' } });
+          return;
+        }
+
+        json(response, 200, { bot: BOT });
+        return;
+      }
+
+      if (request.method === 'POST' && path === `/api/bots/${BOT_ID}/threads`) {
+        if (request.headers['x-csrf-token'] !== CSRF) {
+          json(response, 403, { error: { code: 'csrf_invalid' } });
+          return;
+        }
+
+        json(response, 201, { thread: THREAD });
+        return;
+      }
+
+      if (
+        (request.method === 'PATCH' || request.method === 'DELETE') &&
+        path === `/api/threads/${THREAD_ID}`
+      ) {
+        if (request.headers['x-csrf-token'] !== CSRF) {
+          json(response, 403, { error: { code: 'csrf_invalid' } });
+          return;
+        }
+
+        json(response, 200, { thread: THREAD });
+        return;
+      }
+
+      if (request.method === 'GET' && path === `/api/threads/${THREAD_ID}/attachments`) {
+        json(response, 200, {
+          attachments: [ATTACHMENT, MISSING_ATTACHMENT],
+          nextCursor: null,
+        });
+        return;
+      }
+
+      if (request.method === 'GET' && path === `/api/attachments/${ATTACHMENT_ID}`) {
+        json(response, 200, { attachment: ATTACHMENT });
+        return;
+      }
+
+      if (request.method === 'GET' && path === `/api/attachments/${ATTACHMENT_ID}/content`) {
+        const text = '# Live notes\n\nThe stored paragraph mentions ordering.\n\nSecond paragraph.';
+        response.writeHead(200, {
+          'content-type': 'text/markdown; charset=utf-8',
+          'content-length': Buffer.byteLength(text),
+          'cache-control': 'no-store',
+        });
+        response.end(text);
+        return;
+      }
+
+      if (request.method === 'GET' && path === `/api/attachments/${MISSING_BYTES_ID}/content`) {
+        json(response, 503, { error: { code: 'api_unavailable' } });
+        return;
+      }
+
+      if (request.method === 'GET' && path === `/api/bots/${BOT_ID}/memories`) {
+        json(response, 200, { memories: [MEMORY], nextCursor: null });
+        return;
+      }
+
+      if (request.method === 'POST' && path === `/api/bots/${BOT_ID}/memories`) {
+        if (request.headers['x-csrf-token'] !== CSRF) {
+          json(response, 403, { error: { code: 'csrf_invalid' } });
+          return;
+        }
+
+        json(response, 201, { memory: MEMORY });
+        return;
+      }
+
+      if (request.method === 'POST' && path === `/api/memories/${MEMORY_ID}/approvals`) {
+        if (request.headers['x-csrf-token'] !== CSRF) {
+          json(response, 403, { error: { code: 'csrf_invalid' } });
+          return;
+        }
+
+        json(response, 200, {
+          memory: { ...MEMORY, botApproved: true, conversationApproved: true },
+        });
+        return;
+      }
+
+      if (request.method === 'GET' && path === '/api/artifacts') {
+        json(response, 200, { artifacts: [ARTIFACT], nextCursor: null });
+        return;
+      }
+
+      if (request.method === 'POST' && path === '/api/artifacts') {
+        if (request.headers['x-csrf-token'] !== CSRF) {
+          json(response, 403, { error: { code: 'csrf_invalid' } });
+          return;
+        }
+
+        json(response, 201, { artifact: ARTIFACT_DETAIL });
+        return;
+      }
+
+      if (request.method === 'GET' && path === `/api/artifacts/${ARTIFACT_ID}`) {
+        json(response, 200, { artifact: ARTIFACT_DETAIL });
+        return;
+      }
+
+      if (request.method === 'PATCH' && path === `/api/artifacts/${ARTIFACT_ID}`) {
+        if (request.headers['x-csrf-token'] !== CSRF) {
+          json(response, 403, { error: { code: 'csrf_invalid' } });
+          return;
+        }
+
+        json(response, 200, { artifact: ARTIFACT_DETAIL });
+        return;
+      }
+
+      if (request.method === 'GET' && path === `/api/artifacts/${ARTIFACT_ID}/versions`) {
+        json(response, 200, {
+          versions: [
+            {
+              artifactId: ARTIFACT_ID,
+              version: 1,
+              contentSha256: ARTIFACT_VERSION.contentSha256,
+              byteSize: ARTIFACT_VERSION.byteSize,
+              createdBy: ARTIFACT_VERSION.createdBy,
+              createdAt: NOW,
+            },
+          ],
+          nextCursor: null,
+        });
+        return;
+      }
+
+      if (request.method === 'POST' && path === `/api/artifacts/${ARTIFACT_ID}/restore`) {
+        if (request.headers['x-csrf-token'] !== CSRF) {
+          json(response, 403, { error: { code: 'csrf_invalid' } });
+          return;
+        }
+
+        json(response, 200, { artifact: ARTIFACT_DETAIL });
+        return;
+      }
+
+      if (request.method === 'GET' && path === '/api/skills') {
+        json(response, 200, { skills: [SKILL], nextCursor: null });
+        return;
+      }
+
+      if (request.method === 'POST' && path === '/api/skills') {
+        if (request.headers['x-csrf-token'] !== CSRF) {
+          json(response, 403, { error: { code: 'csrf_invalid' } });
+          return;
+        }
+
+        json(response, 201, { skill: SKILL });
+        return;
+      }
+
+      if (request.method === 'GET' && path === `/api/skills/${SKILL_ID}`) {
+        json(response, 200, { skill: SKILL });
+        return;
+      }
+
+      if (
+        request.method === 'POST' &&
+        (path === `/api/skills/${SKILL_ID}/attach` ||
+          path === `/api/skills/${SKILL_ID}/detach`)
+      ) {
+        if (request.headers['x-csrf-token'] !== CSRF) {
+          json(response, 403, { error: { code: 'csrf_invalid' } });
+          return;
+        }
+
+        json(response, 200, { skill: SKILL });
+        return;
+      }
+
+      if (request.method === 'GET' && path === '/api/search') {
+        json(response, 200, {
+          results: [
+            {
+              messageId: 'message-1',
+              conversationId: THREAD_ID,
+              conversationTitle: THREAD.title,
+              botId: BOT_ID,
+              role: 'user',
+              seq: 1,
+              createdAt: NOW,
+              score: 0.5,
+              snippet: 'First <mark>live</mark> question',
+            },
+          ],
+          nextCursor: null,
+        });
+        return;
+      }
+
       json(response, 404, { error: { code: 'not_found' } });
     });
   });
@@ -447,6 +758,20 @@ test('the built chat surface forwards to the API and never renders sample data o
     assert.equal(badCsrf.status, 403);
     assert.deepEqual(await badCsrf.json(), { error: { code: 'csrf_invalid' } });
 
+    const olderPage = await fetch(
+      `${app.origin}/api/threads/${THREAD_ID}/messages?before=cursor-1&limit=30`,
+      { headers: { cookie }, signal: AbortSignal.timeout(5000) },
+    );
+    assert.equal(olderPage.status, 200);
+    assert.ok(
+      stub.requests.find(
+        (entry) =>
+          entry.method === 'GET' &&
+          entry.url === `/api/threads/${THREAD_ID}/messages?before=cursor-1&limit=30`,
+      ),
+      'the proxy did not forward the older-message cursor',
+    );
+
     const stream = await fetch(`${app.origin}/api/runs/${RUN_ID}/events`, {
       headers: { cookie, 'last-event-id': `e1.${RUN_ID}.3` },
       signal: AbortSignal.timeout(5000),
@@ -473,6 +798,212 @@ test('the built chat surface forwards to the API and never renders sample data o
     });
     assert.equal(cancel.status, 200);
     assert.equal((await cancel.json()).run.status, 'cancelled');
+
+    async function write(method, path, body) {
+      const response = await fetch(`${app.origin}${path}`, {
+        method,
+        headers: {
+          cookie,
+          'content-type': 'application/json',
+          'x-csrf-token': CSRF,
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        signal: AbortSignal.timeout(5000),
+      });
+
+      return { response, body: await response.json() };
+    }
+
+    const createdBot = await write('POST', '/api/bots', {
+      name: 'New live bot',
+      description: 'A purpose',
+      instructionsMarkdown: 'Be brief.',
+    });
+    assert.equal(createdBot.response.status, 201);
+    assert.equal(createdBot.body.bot.id, BOT_ID);
+    const botCreateForward = stub.requests.find(
+      (entry) => entry.method === 'POST' && entry.url === '/api/bots',
+    );
+    assert.ok(botCreateForward, 'the proxy did not forward Bot creation');
+    assert.deepEqual(JSON.parse(botCreateForward.body), {
+      name: 'New live bot',
+      description: 'A purpose',
+      instructionsMarkdown: 'Be brief.',
+    });
+
+    const patchedBot = await write('PATCH', `/api/bots/${BOT_ID}`, { name: 'Renamed' });
+    assert.equal(patchedBot.response.status, 200);
+    const botPatchForward = stub.requests.find(
+      (entry) => entry.method === 'PATCH' && entry.url === `/api/bots/${BOT_ID}`,
+    );
+    assert.ok(botPatchForward, 'the proxy did not forward the Bot patch');
+    assert.equal(botPatchForward.headers.origin, upstreamOrigin);
+
+    const archivedBot = await write('DELETE', `/api/bots/${BOT_ID}`);
+    assert.equal(archivedBot.response.status, 200);
+    assert.ok(
+      stub.requests.find(
+        (entry) => entry.method === 'DELETE' && entry.url === `/api/bots/${BOT_ID}`,
+      ),
+      'the proxy did not forward the Bot archive',
+    );
+
+    const createdThread = await write('POST', `/api/bots/${BOT_ID}/threads`, { title: 'New' });
+    assert.equal(createdThread.response.status, 201);
+    assert.equal(createdThread.body.thread.id, THREAD_ID);
+
+    const renamedThread = await write('PATCH', `/api/threads/${THREAD_ID}`, { title: 'Renamed' });
+    assert.equal(renamedThread.response.status, 200);
+    assert.ok(
+      stub.requests.find(
+        (entry) => entry.method === 'PATCH' && entry.url === `/api/threads/${THREAD_ID}`,
+      ),
+      'the proxy did not forward the thread rename',
+    );
+
+    const deletedThread = await write('DELETE', `/api/threads/${THREAD_ID}`);
+    assert.equal(deletedThread.response.status, 200);
+    assert.ok(
+      stub.requests.find(
+        (entry) => entry.method === 'DELETE' && entry.url === `/api/threads/${THREAD_ID}`,
+      ),
+      'the proxy did not forward the thread delete',
+    );
+
+    const attachments = await fetch(
+      `${app.origin}/api/threads/${THREAD_ID}/attachments`,
+      { headers: { cookie }, signal: AbortSignal.timeout(5000) },
+    );
+    assert.equal(attachments.status, 200);
+    const attachmentBody = await attachments.json();
+    assert.equal(attachmentBody.attachments[0].originalFilename, 'live-notes.md');
+    assert.equal(attachmentBody.nextCursor, null);
+
+    const metadata = await fetch(`${app.origin}/api/attachments/${ATTACHMENT_ID}`, {
+      headers: { cookie },
+      signal: AbortSignal.timeout(5000),
+    });
+    assert.equal(metadata.status, 200);
+    assert.equal((await metadata.json()).attachment.id, ATTACHMENT_ID);
+
+    const content = await fetch(
+      `${app.origin}/api/attachments/${ATTACHMENT_ID}/content`,
+      { headers: { cookie }, signal: AbortSignal.timeout(5000) },
+    );
+    assert.equal(content.status, 200);
+    assert.match(content.headers.get('content-type') ?? '', /text\/markdown/);
+    assert.match(await content.text(), /stored paragraph mentions ordering/);
+
+    const missingContent = await fetch(
+      `${app.origin}/api/attachments/${MISSING_BYTES_ID}/content`,
+      { headers: { cookie }, signal: AbortSignal.timeout(5000) },
+    );
+    assert.equal(missingContent.status, 503);
+    assert.deepEqual(await missingContent.json(), { error: { code: 'api_unavailable' } });
+
+    const artifacts = await fetch(
+      `${app.origin}/api/artifacts?conversationId=${THREAD_ID}`,
+      { headers: { cookie }, signal: AbortSignal.timeout(5000) },
+    );
+    assert.equal(artifacts.status, 200);
+    assert.equal((await artifacts.json()).artifacts[0].title, 'Ordering note');
+
+    const artifact = await fetch(`${app.origin}/api/artifacts/${ARTIFACT_ID}?version=1`, {
+      headers: { cookie },
+      signal: AbortSignal.timeout(5000),
+    });
+    assert.equal(artifact.status, 200);
+    const artifactBody = await artifact.json();
+    assert.equal(artifactBody.artifact.version.version, 1);
+    assert.match(artifactBody.artifact.version.content, /sequence, not the clock/);
+
+    const savedArtifact = await write('PATCH', `/api/artifacts/${ARTIFACT_ID}`, {
+      content: 'A new body.',
+    });
+    assert.equal(savedArtifact.response.status, 200);
+    assert.equal(savedArtifact.body.artifact.artifact.id, ARTIFACT_ID);
+
+    const versions = await fetch(
+      `${app.origin}/api/artifacts/${ARTIFACT_ID}/versions`,
+      { headers: { cookie }, signal: AbortSignal.timeout(5000) },
+    );
+    assert.equal(versions.status, 200);
+    assert.equal((await versions.json()).versions[0].version, 1);
+
+    const restored = await write('POST', `/api/artifacts/${ARTIFACT_ID}/restore`, { version: 1 });
+    assert.equal(restored.response.status, 200);
+    assert.equal(restored.body.artifact.version.version, 1);
+
+    const memories = await fetch(`${app.origin}/api/bots/${BOT_ID}/memories`, {
+      headers: { cookie },
+      signal: AbortSignal.timeout(5000),
+    });
+    assert.equal(memories.status, 200);
+    assert.equal((await memories.json()).memories[0].content, MEMORY.content);
+
+    const proposed = await write('POST', `/api/bots/${BOT_ID}/memories`, {
+      text: 'A new memory',
+      threadId: THREAD_ID,
+    });
+    assert.equal(proposed.response.status, 201);
+    const memoryForward = stub.requests.find(
+      (entry) => entry.method === 'POST' && entry.url === `/api/bots/${BOT_ID}/memories`,
+    );
+    assert.ok(memoryForward, 'the proxy did not forward the memory proposal');
+    assert.deepEqual(JSON.parse(memoryForward.body), {
+      text: 'A new memory',
+      threadId: THREAD_ID,
+    });
+
+    const approved = await write('POST', `/api/memories/${MEMORY_ID}/approvals`, {
+      bot: true,
+      thread: true,
+      threadId: THREAD_ID,
+    });
+    assert.equal(approved.response.status, 200);
+    assert.equal(approved.body.memory.conversationApproved, true);
+
+    const skills = await fetch(`${app.origin}/api/skills`, {
+      headers: { cookie },
+      signal: AbortSignal.timeout(5000),
+    });
+    assert.equal(skills.status, 200);
+    assert.equal((await skills.json()).skills[0].name, 'Plain verbs');
+
+    const skill = await fetch(`${app.origin}/api/skills/${SKILL_ID}`, {
+      headers: { cookie },
+      signal: AbortSignal.timeout(5000),
+    });
+    assert.equal(skill.status, 200);
+
+    const attached = await write('POST', `/api/skills/${SKILL_ID}/attach`, { botId: BOT_ID });
+    assert.equal(attached.response.status, 200);
+    assert.equal(attached.body.skill.id, SKILL_ID);
+
+    const detached = await write('POST', `/api/skills/${SKILL_ID}/detach`);
+    assert.equal(detached.response.status, 200);
+
+    const search = await fetch(`${app.origin}/api/search?q=live&botId=${BOT_ID}`, {
+      headers: { cookie },
+      signal: AbortSignal.timeout(5000),
+    });
+    assert.equal(search.status, 200);
+    assert.equal((await search.json()).results[0].messageId, 'message-1');
+
+    const unauthenticatedArtifacts = await fetch(`${app.origin}/api/artifacts`, {
+      signal: AbortSignal.timeout(5000),
+    });
+    assert.equal(unauthenticatedArtifacts.status, 401);
+    assert.deepEqual(await unauthenticatedArtifacts.json(), {
+      error: { code: 'unauthenticated' },
+    });
+
+    const failedSkills = await fetch(`${app.origin}/api/skills`, {
+      headers: { cookie: 'habi_session=boom' },
+      signal: AbortSignal.timeout(5000),
+    });
+    assert.equal(failedSkills.status, 500);
+    assert.deepEqual(await failedSkills.json(), { error: { code: 'internal' } });
 
     const unauthenticated = await fetch(`${app.origin}/api/bots`, {
       signal: AbortSignal.timeout(5000),
@@ -522,9 +1053,23 @@ test('the built chat surface forwards to the API and never renders sample data o
     assert.ok(workspaceText.includes('Live thread about ordering'));
     assert.ok(workspaceText.includes('First live question'));
     assert.ok(workspaceText.includes('First live reply.'));
-    assert.ok(workspaceText.includes('Memory records are not exposed by this API yet'));
+    assert.ok(workspaceText.includes('Prefers short sections over bullet dumps.'));
+    assert.ok(workspaceText.includes('Held'));
+    assert.ok(!workspaceText.includes('Memory records are not exposed'));
     assert.ok(!workspaceText.includes('Run 4821'));
     assert.ok(!workspaceText.includes('stream-notes.md'));
+
+    const documentPanel = await page(
+      `/bots/${BOT_ID}?thread=${THREAD_ID}&panel=document`,
+      { cookie },
+    );
+    assert.equal(documentPanel.response.status, 200);
+    const documentText = visibleText(documentPanel.html);
+    assert.ok(documentText.includes('live-notes.md'));
+    assert.ok(documentText.includes('The stored paragraph mentions ordering.'));
+    assert.ok(documentText.includes('Not stored on this server'));
+    assert.ok(documentText.includes('not-stored.txt'));
+    assert.ok(!documentText.includes('local sample data'));
 
     const unknown = await page('/bots/99999999-9999-4999-8999-999999999999', { cookie });
     assert.equal(unknown.response.status, 404);
@@ -535,6 +1080,7 @@ test('the built chat surface forwards to the API and never renders sample data o
       failed.html,
       threads.html,
       workspace.html,
+      documentPanel.html,
       unknown.html,
     ].join('\n');
 
@@ -545,6 +1091,7 @@ test('the built chat surface forwards to the API and never renders sample data o
       `habi_session=${SESSION}`,
       'Local sample data',
       'stream-notes.md',
+      'api.openai.com',
     ]) {
       assert.ok(!combined.includes(forbidden), `live HTML leaked or invented: ${forbidden}`);
     }
@@ -621,6 +1168,12 @@ test('with no HABI_API_URL the sample preview renders and the proxy refuses', { 
     });
     assert.equal(proxy.status, 503);
     assert.deepEqual(await proxy.json(), { error: { code: 'api_unavailable' } });
+
+    const artifactProxy = await fetch(`${origin}/api/artifacts`, {
+      signal: AbortSignal.timeout(5000),
+    });
+    assert.equal(artifactProxy.status, 503);
+    assert.deepEqual(await artifactProxy.json(), { error: { code: 'api_unavailable' } });
   } finally {
     if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
     let timer;

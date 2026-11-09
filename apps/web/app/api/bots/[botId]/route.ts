@@ -1,19 +1,12 @@
-import { forwardJson, proxyError, safeSegment, withSearch } from '../../proxy';
+import { singleResourceHandler } from '../../proxy';
 
 export const dynamic = 'force-dynamic';
 
-interface RouteContext {
-  params: Promise<{ botId: string }>;
-}
-
 /** `GET /api/bots/:botId` → `GET {HABI_API_URL}/api/bots/:botId`. */
-export async function GET(request: Request, context: RouteContext): Promise<Response> {
-  const { botId } = await context.params;
-  const segment = safeSegment(botId);
+export const GET = singleResourceHandler('botId', 'bots', true);
 
-  if (segment === undefined) {
-    return proxyError('not_found', 404);
-  }
+/** `PATCH /api/bots/:botId` — name, description and instructions only. */
+export const PATCH = singleResourceHandler('botId', 'bots', false);
 
-  return forwardJson(request, withSearch(request, `/bots/${segment}`));
-}
+/** `DELETE /api/bots/:botId` — archives the Bot; repeating it is idempotent. */
+export const DELETE = singleResourceHandler('botId', 'bots', false);

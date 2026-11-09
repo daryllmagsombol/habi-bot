@@ -22,7 +22,11 @@ export interface BotGalleryItem extends BotCardProps {
 
 export interface BotGalleryProps {
   readonly bots: readonly BotGalleryItem[];
-  readonly newBot: Omit<NewBotCardProps, 'headingId'>;
+  readonly newBot: Omit<NewBotCardProps, 'headingId' | 'onCreate'>;
+  /** Opens the create form; absent in preview. */
+  readonly onCreate?: (() => void) | undefined;
+  /** Opens the edit form for one Bot; absent in preview. */
+  readonly onEdit?: ((id: string) => void) | undefined;
 }
 
 /**
@@ -31,7 +35,7 @@ export interface BotGalleryProps {
  * Cards arrive with one short staggered fade. Reduced motion drops the
  * entrance entirely; nothing waits for it.
  */
-export function BotGallery({ bots, newBot }: Readonly<BotGalleryProps>) {
+export function BotGallery({ bots, newBot, onCreate, onEdit }: Readonly<BotGalleryProps>) {
   const reduceMotion = useReducedMotion();
 
   return (
@@ -44,12 +48,15 @@ export function BotGallery({ bots, newBot }: Readonly<BotGalleryProps>) {
       >
         {bots.map(({ id, ...card }) => (
           <motion.li key={id} variants={CARD} className="min-w-0">
-            <BotCard {...card} />
+            <BotCard
+              {...card}
+              onEdit={onEdit === undefined ? undefined : () => onEdit(id)}
+            />
           </motion.li>
         ))}
 
         <motion.li variants={CARD} className="min-w-0">
-          <NewBotCard {...newBot} headingId="new-bot-title" />
+          <NewBotCard {...newBot} headingId="new-bot-title" onCreate={onCreate} />
         </motion.li>
       </motion.ul>
     </MotionConfig>

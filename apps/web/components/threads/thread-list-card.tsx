@@ -11,6 +11,10 @@ export interface ThreadListCardProps {
   readonly onSelect?: ((id: string) => void) | undefined;
   readonly headingId: string;
   readonly emptyMessage: ReactNode;
+  /** Section-header affordance, typically the new-thread control. */
+  readonly actions?: ReactNode;
+  /** Controls under the list, typically rename/create forms. */
+  readonly footer?: ReactNode;
   readonly className?: string;
 }
 
@@ -27,11 +31,13 @@ export function ThreadListCard({
   onSelect,
   headingId,
   emptyMessage,
+  actions,
+  footer,
   className,
 }: Readonly<ThreadListCardProps>) {
   return (
     <Card as="section" radius="lg" padding="sm" aria-labelledby={headingId} className={className}>
-      <SectionHeader as="h2" id={headingId} label={label} count={items.length} />
+      <SectionHeader as="h2" id={headingId} label={label} count={items.length} action={actions} />
 
       {items.length === 0 ? (
         <p className="mt-2 text-xs leading-normal text-subtle">{emptyMessage}</p>
@@ -48,6 +54,8 @@ export function ThreadListCard({
           ))}
         </ul>
       )}
+
+      {footer === undefined ? null : <div className="mt-3">{footer}</div>}
     </Card>
   );
 }

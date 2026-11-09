@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 import { Badge, SectionHeader } from '../ui';
 import { MemoryGates } from './memory-gates';
-import type { AllowanceView, MemoryGateItem, PanelRun } from './types';
+import type { AllowanceView, MemoryGate, MemoryGateItem, PanelRun } from './types';
 
 const COUNT = new Intl.NumberFormat('en-US');
 
@@ -13,7 +13,23 @@ export interface ContextPanelProps {
   /** `live` drops preview-only wording without claiming unwired capability. */
   readonly mode?: 'preview' | 'live';
   /** Preview wording for the "changed" memory status; defaults live in MemoryGates. */
-  readonly memoryChangedNote?: string;
+  readonly memoryChangedNote?: string | undefined;
+  /** `unavailable` renders an explicit state instead of an empty memory list. */
+  readonly memoryState?: 'ready' | 'unavailable' | undefined;
+  /** Writes one gate through the API; the parent owns the request. */
+  readonly onMemoryToggle?:
+    | ((
+        id: string,
+        gate: MemoryGate,
+        next: boolean,
+        nextGates: { readonly bot: boolean; readonly thread: boolean },
+      ) => void)
+    | undefined;
+  /** The memory composer, bound by the coordinator to the open thread. */
+  readonly memoryComposer?: ReactNode;
+  readonly skillsSection?: ReactNode;
+  readonly searchSection?: ReactNode;
+  readonly artifactsSection?: ReactNode;
   readonly className?: string;
 }
 
@@ -126,6 +142,12 @@ export function ContextPanel({
   allowance,
   mode = 'preview',
   memoryChangedNote,
+  memoryState = 'ready',
+  onMemoryToggle,
+  memoryComposer,
+  skillsSection,
+  searchSection,
+  artifactsSection,
   className,
 }: Readonly<ContextPanelProps>) {
   const live = mode === 'live';
@@ -136,13 +158,26 @@ export function ContextPanel({
         title="Memory"
         description="A memory reaches a run only when this bot and this conversation both approve it."
       >
-        {live ? (
+        {live && memoryState === 'unavailable' ? (
           <p className="text-xs leading-normal text-muted">
-            Memory records are not exposed by this API yet. None of them are shown here, and
-            nothing below claims a memory was recalled.
+            The memory records could not be loaded from this API. None are shown, and nothing below
+            claims a memory was recalled.
           </p>
         ) : (
-          <MemoryGates memories={memories} changedNote={memoryChangedNote} />
+          <>
+            <MemoryGates
+              key={memories
+                .map(
+                  (memory) =>
+                    `${memory.id}:${memory.botApproved ? 1 : 0}${memory.threadApproved ? 1 : 0}`,
+                )
+                .join('|')}
+              memories={memories}
+              onToggle={onMemoryToggle}
+              changedNote={memoryChangedNote}
+            />
+            {memoryComposer}
+          </>
         )}
       </Section>
 
@@ -198,6 +233,30 @@ export function ContextPanel({
             : 'A bot in this preview cannot call a tool, a shell, or a browser — and this page does not demonstrate the server-side isolation the product requires.'}
         </p>
       </Section>
+
+      {artifactsSection === undefined ? null : (
+        <Section
+          title="Artifacts"
+          description="Generated text owned by this account, scoped to this conversation. Saving appends a version; restore appends a copy of an older one."
+        >
+          {artifactsSection}
+        </Section>
+      )}
+
+      {skillsSection === undefined ? null : (
+        <Section
+          title="Skills"
+          description="Markdown guidance owned by this account. Attaching one to this Bot is metadata; it grants no capability."
+        >
+          {skillsSection}
+        </Section>
+      )}
+
+      {searchSection === undefined ? null : (
+        <Section title="Search" description="Owner-scoped search over your own messages.">
+          {searchSection}
+        </Section>
+      )}
     </div>
   );
 }

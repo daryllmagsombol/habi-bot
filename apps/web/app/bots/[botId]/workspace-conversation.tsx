@@ -8,6 +8,7 @@ import { DURATION, EASE } from '../../../lib/motion';
 import { WorkspaceEmptyThread } from './workspace-empty-thread';
 import { WorkspaceLiveControls } from './workspace-live-controls';
 import type { LiveRun } from './use-live-run';
+import type { OlderMessages } from './use-older-messages';
 import type { WorkspaceData, WorkspaceThread } from './workspace-data';
 
 export interface WorkspaceConversationProps {
@@ -18,6 +19,8 @@ export interface WorkspaceConversationProps {
   readonly liveRun: LiveRun;
   readonly composerStatus: ComposerStatus | undefined;
   readonly reduceMotion: boolean | null;
+  readonly older: OlderMessages;
+  readonly onCreateThread: (() => void) | undefined;
 }
 
 /** The reading column: one empty state, or the thread plus its live controls. */
@@ -29,10 +32,21 @@ export function WorkspaceConversation({
   liveRun,
   composerStatus,
   reduceMotion,
+  older,
+  onCreateThread,
 }: Readonly<WorkspaceConversationProps>) {
   if (thread === undefined || shownThread === undefined) {
-    return <WorkspaceEmptyThread live={live} />;
+    return <WorkspaceEmptyThread live={live} onCreateThread={onCreateThread} />;
   }
+
+  const loaded = new Set(shownThread.messages.map((message) => message.id));
+  const withHistory: ThreadView = {
+    ...shownThread,
+    messages: [
+      ...older.messages.filter((message) => !loaded.has(message.id)),
+      ...shownThread.messages,
+    ],
+  };
 
   return (
     <motion.div
@@ -45,7 +59,7 @@ export function WorkspaceConversation({
       <ThreadConversation
         bot={{ name: data.bot.name, initials: data.bot.initials }}
         owner={data.owner}
-        thread={shownThread}
+        thread={withHistory}
         headingId="thread-title"
         hint={<span className="hidden sm:inline">Enter sends · Shift + Enter adds a line</span>}
         sendNotice={
@@ -58,6 +72,16 @@ export function WorkspaceConversation({
         draft={live ? liveRun.draft : undefined}
         onDraftChange={live ? liveRun.setDraft : undefined}
         composerStatus={composerStatus}
+        pagination={
+          live
+            ? {
+                hasMore: older.hasMore,
+                loading: older.loading,
+                onLoadOlder: older.loadOlder,
+                error: older.error,
+              }
+            : undefined
+        }
         attachment={
           <IconButton
             label={

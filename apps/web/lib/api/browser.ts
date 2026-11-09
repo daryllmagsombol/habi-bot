@@ -13,11 +13,20 @@
  * error instead of sending a request that cannot pass `SessionCsrfGuard`.
  */
 import type {
+  ArtifactDetailEnvelopeDto,
+  ArtifactListDto,
+  ArtifactVersionListDto,
+  BotDetailDto,
+  ConversationDto,
   GapDto,
+  MemoryDto,
   MessagePageDto,
   PostMessageDto,
   RunDto,
   RunEventDto,
+  SearchPageDto,
+  SkillDto,
+  SkillListDto,
 } from './types';
 
 const CSRF_COOKIE = 'habi_csrf';
@@ -37,14 +46,21 @@ export class ChatRequestError extends Error {
 const ERROR_COPY: Readonly<Record<string, string>> = {
   unauthenticated: 'Your session has ended. Sign in again to continue.',
   csrf_invalid: 'The session did not accept the CSRF token. Reload the page and try again.',
-  not_found: 'That thread or run is no longer available.',
-  invalid_input: 'The message could not be sent as written.',
+  not_found: 'That record is no longer available.',
+  invalid_input: 'The request could not be sent as written.',
   invalid_cursor: 'The saved position is no longer valid.',
-  bot_unavailable: 'This Bot is archived, so a message cannot be sent.',
-  conversation_archived: 'This thread is archived, so a message cannot be sent.',
+  bot_unavailable: 'This Bot is archived, so it cannot be changed or used.',
+  conversation_archived: 'This thread is archived, so it cannot be changed.',
   allowance_exhausted: 'The daily allowance is exhausted. Nothing was sent.',
   usage_unknown: 'Daily usage could not be recorded, so nothing was sent.',
   api_unavailable: 'The chat API is not reachable right now.',
+  unsupported_media_type: 'That attachment is not stored as text on this server.',
+  skill_unavailable: 'That skill is not available for this Bot.',
+  skill_name_conflict: 'A skill with that name already exists.',
+  skill_version_conflict: 'The skill changed while this page was open. Reload and try again.',
+  artifact_integrity: 'The artifact content did not match its recorded hash, so it was not shown.',
+  attachment_integrity: 'The attachment content did not match its recorded hash, so it was not shown.',
+  attachment_rejected: 'That attachment was rejected and cannot be read.',
   cancel_unavailable:
     'This run may already have executed, so it cannot be cancelled safely. It was not relabelled.',
   request_failed: 'The request failed. Nothing was changed.',
@@ -178,11 +194,284 @@ export function cancelRun(
   );
 }
 
-export function readMessages(threadId: string): Promise<MessagePageDto> {
+export interface MessageQuery {
+  readonly limit?: number;
+  /** Older-than cursor: the page that ends at this message. */
+  readonly before?: string;
+  readonly after?: string;
+}
+
+export function readMessages(
+  threadId: string,
+  query: MessageQuery = {},
+): Promise<MessagePageDto> {
+  const params = new URLSearchParams();
+
+  if (query.limit !== undefined) {
+    params.set('limit', String(query.limit));
+  }
+
+  if (query.before !== undefined) {
+    params.set('before', query.before);
+  }
+
+  if (query.after !== undefined) {
+    params.set('after', query.after);
+  }
+
+  const search = params.toString();
+
   return requestJson<MessagePageDto>(
-    `/api/threads/${encodeURIComponent(threadId)}/messages`,
+    `/api/threads/${encodeURIComponent(threadId)}/messages${search.length === 0 ? '' : `?${search}`}`,
     { method: 'GET', headers: { accept: 'application/json' } },
   );
+}
+
+function encoded(value: string): string {
+  return encodeURIComponent(value);
+}
+
+function queryPath(path: string, params: object): string {
+  const search = new URLSearchParams();
+
+  for (const [key, value] of Object.entries(params)) {
+    if (typeof value === 'string' || typeof value === 'number') {
+      search.set(key, String(value));
+    }
+  }
+
+  const query = search.toString();
+
+  return query.length === 0 ? path : `${path}?${query}`;
+}
+
+export interface BotProfileInput {
+  readonly name: string;
+  readonly description?: string | null;
+  readonly instructionsMarkdown?: string | null;
+}
+
+export function readBot(botId: string): Promise<BotDetailDto> {
+  return requestJson<BotDetailDto>(`/api/bots/${encoded(botId)}`, {
+    method: 'GET',
+    headers: { accept: 'application/json' },
+  });
+}
+
+export function createBot(
+  input: BotProfileInput,
+  csrfToken: string | undefined,
+): Promise<{ bot: BotDetailDto['bot'] }> {
+  return requestJson<{ bot: BotDetailDto['bot'] }>('/api/bots', {
+    method: 'POST',
+    headers: writeHeaders(csrfToken),
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateBot(
+  botId: string,
+  input: BotProfileInput,
+  csrfToken: string | undefined,
+): Promise<{ bot: BotDetailDto['bot'] }> {
+  return requestJson<{ bot: BotDetailDto['bot'] }>(`/api/bots/${encoded(botId)}`, {
+    method: 'PATCH',
+    headers: writeHeaders(csrfToken),
+    body: JSON.stringify(input),
+  });
+}
+
+export function archiveBot(
+  botId: string,
+  csrfToken: string | undefined,
+): Promise<{ bot: BotDetailDto['bot'] }> {
+  return requestJson<{ bot: BotDetailDto['bot'] }>(`/api/bots/${encoded(botId)}`, {
+    method: 'DELETE',
+    headers: writeHeaders(csrfToken),
+  });
+}
+
+export function createThread(
+  botId: string,
+  title: string | undefined,
+  csrfToken: string | undefined,
+): Promise<{ thread: ConversationDto }> {
+  return requestJson<{ thread: ConversationDto }>(
+    `/api/bots/${encoded(botId)}/threads`,
+    {
+      method: 'POST',
+      headers: writeHeaders(csrfToken),
+      body: JSON.stringify(title === undefined ? {} : { title }),
+    },
+  );
+}
+
+export function renameThread(
+  threadId: string,
+  title: string,
+  csrfToken: string | undefined,
+): Promise<{ thread: ConversationDto }> {
+  return requestJson<{ thread: ConversationDto }>(`/api/threads/${encoded(threadId)}`, {
+    method: 'PATCH',
+    headers: writeHeaders(csrfToken),
+    body: JSON.stringify({ title }),
+  });
+}
+
+export function deleteThread(
+  threadId: string,
+  csrfToken: string | undefined,
+): Promise<{ thread: ConversationDto }> {
+  return requestJson<{ thread: ConversationDto }>(`/api/threads/${encoded(threadId)}`, {
+    method: 'DELETE',
+    headers: writeHeaders(csrfToken),
+  });
+}
+
+export function createMemory(
+  botId: string,
+  input: { readonly text: string; readonly threadId: string },
+  csrfToken: string | undefined,
+): Promise<{ memory: MemoryDto }> {
+  return requestJson<{ memory: MemoryDto }>(`/api/bots/${encoded(botId)}/memories`, {
+    method: 'POST',
+    headers: writeHeaders(csrfToken),
+    body: JSON.stringify(input),
+  });
+}
+
+export function setMemoryApprovals(
+  memoryId: string,
+  input: {
+    readonly bot: boolean;
+    readonly thread: boolean;
+    readonly threadId?: string;
+  },
+  csrfToken: string | undefined,
+): Promise<{ memory: MemoryDto }> {
+  return requestJson<{ memory: MemoryDto }>(
+    `/api/memories/${encoded(memoryId)}/approvals`,
+    {
+      method: 'POST',
+      headers: writeHeaders(csrfToken),
+      body: JSON.stringify(input),
+    },
+  );
+}
+
+export interface ArtifactQuery {
+  readonly conversationId?: string;
+  readonly limit?: number;
+  readonly cursor?: string;
+}
+
+export function readArtifacts(query: ArtifactQuery = {}): Promise<ArtifactListDto> {
+  return requestJson<ArtifactListDto>(queryPath('/api/artifacts', query), {
+    method: 'GET',
+    headers: { accept: 'application/json' },
+  });
+}
+
+export function readArtifact(
+  artifactId: string,
+  version?: number,
+): Promise<ArtifactDetailEnvelopeDto> {
+  return requestJson<ArtifactDetailEnvelopeDto>(
+    queryPath(`/api/artifacts/${encoded(artifactId)}`, { version }),
+    { method: 'GET', headers: { accept: 'application/json' } },
+  );
+}
+
+export function updateArtifact(
+  artifactId: string,
+  input: {
+    readonly content?: string;
+    readonly title?: string;
+    readonly kind?: string;
+    readonly status?: string;
+  },
+  csrfToken: string | undefined,
+): Promise<ArtifactDetailEnvelopeDto> {
+  return requestJson<ArtifactDetailEnvelopeDto>(
+    `/api/artifacts/${encoded(artifactId)}`,
+    {
+      method: 'PATCH',
+      headers: writeHeaders(csrfToken),
+      body: JSON.stringify(input),
+    },
+  );
+}
+
+export function readArtifactVersions(
+  artifactId: string,
+): Promise<ArtifactVersionListDto> {
+  return requestJson<ArtifactVersionListDto>(
+    `/api/artifacts/${encoded(artifactId)}/versions`,
+    { method: 'GET', headers: { accept: 'application/json' } },
+  );
+}
+
+export function restoreArtifactVersion(
+  artifactId: string,
+  version: number,
+  csrfToken: string | undefined,
+): Promise<ArtifactDetailEnvelopeDto> {
+  return requestJson<ArtifactDetailEnvelopeDto>(
+    `/api/artifacts/${encoded(artifactId)}/restore`,
+    {
+      method: 'POST',
+      headers: writeHeaders(csrfToken),
+      body: JSON.stringify({ version }),
+    },
+  );
+}
+
+export interface SkillQuery {
+  readonly botId?: string;
+  readonly status?: string;
+  readonly limit?: number;
+  readonly cursor?: string;
+}
+
+export function readSkills(query: SkillQuery = {}): Promise<SkillListDto> {
+  return requestJson<SkillListDto>(queryPath('/api/skills', query), {
+    method: 'GET',
+    headers: { accept: 'application/json' },
+  });
+}
+
+export function attachSkill(
+  skillId: string,
+  botId: string,
+  csrfToken: string | undefined,
+): Promise<{ skill: SkillDto }> {
+  return requestJson<{ skill: SkillDto }>(`/api/skills/${encoded(skillId)}/attach`, {
+    method: 'POST',
+    headers: writeHeaders(csrfToken),
+    body: JSON.stringify({ botId }),
+  });
+}
+
+export function detachSkill(
+  skillId: string,
+  csrfToken: string | undefined,
+): Promise<{ skill: SkillDto }> {
+  return requestJson<{ skill: SkillDto }>(`/api/skills/${encoded(skillId)}/detach`, {
+    method: 'POST',
+    headers: writeHeaders(csrfToken),
+  });
+}
+
+export function searchMessages(query: {
+  readonly q: string;
+  readonly botId?: string;
+  readonly limit?: number;
+  readonly cursor?: string;
+}): Promise<SearchPageDto> {
+  return requestJson<SearchPageDto>(queryPath('/api/search', query), {
+    method: 'GET',
+    headers: { accept: 'application/json' },
+  });
 }
 
 export interface RunStreamHandlers {

@@ -1,15 +1,29 @@
 import type { Metadata } from 'next';
 import { notFound } from 'next/navigation';
 import { botTone } from '../../../components/bots';
-import type { MemoryGateItem, MemoryItem, PanelRun } from '../../../components/panels';
+import type {
+  DocumentView,
+  MemoryGateItem,
+  MemoryItem,
+  PanelRun,
+} from '../../../components/panels';
 import type { TranscriptMessage } from '../../../components/threads';
 import { BotWorkspace } from './workspace';
-import { buildLiveWorkspace } from './api-data';
+import { attachmentToDocument, buildLiveWorkspace } from './api-data';
 import type { WorkspaceData, WorkspaceThread } from './workspace-data';
 import { botHref, readPanel, readParam, threadHref } from '../../../lib/links';
 import type { PanelId } from '../../../lib/links';
 import { readApiConfig } from '../../../lib/api/config';
-import { callerCookieHeader, fetchBot, fetchBots, fetchMessages, fetchThreads } from '../../../lib/api/server';
+import {
+  callerCookieHeader,
+  fetchAttachments,
+  fetchAttachmentContent,
+  fetchBot,
+  fetchBots,
+  fetchMemories,
+  fetchMessages,
+  fetchThreads,
+} from '../../../lib/api/server';
 import type { ApiFailure } from '../../../lib/api/server';
 import type { MessagePageDto } from '../../../lib/api/types';
 import { DataStatePage } from '../../data-state';
@@ -75,6 +89,21 @@ function toThread(botId: string, thread: PreviewThread): WorkspaceThread {
   const attachment = findAttachment(thread);
   const documentHref = threadHref(botId, thread.id, 'document');
   const run = thread.messages.findLast((message) => message.run !== undefined)?.run;
+  const documents: readonly DocumentView[] =
+    attachment === undefined
+      ? []
+      : [
+          {
+            id: attachment.id,
+            name: attachment.name,
+            bytes: attachment.bytes,
+            attachedAt: attachment.attachedAt,
+            contentType: 'text/markdown',
+            contentState: 'ready',
+            citedParagraph: attachment.citedParagraph,
+            blocks: attachment.blocks,
+          },
+        ];
 
   return {
     id: thread.id,
@@ -95,7 +124,7 @@ function toThread(botId: string, thread: PreviewThread): WorkspaceThread {
         toTranscript(message, attachment === undefined ? undefined : documentHref),
       ),
     },
-    document: attachment,
+    documents,
     run: run === undefined ? undefined : toRun(run),
     hrefs: {
       conversation: threadHref(botId, thread.id),
@@ -137,11 +166,14 @@ function previewData(bot: PreviewBot): WorkspaceData {
       initials: bot.initials,
       tone: botTone(bot.id),
       summary,
+      description: bot.purpose,
+      instructionsMarkdown: bot.instruction,
       baseHref: botHref(bot.id),
     },
     threads: bot.threads.map((item) => toThread(bot.id, item)),
     memories: toMemoryGates(bot),
     memoryItems: items,
+    memoryState: 'ready',
     approvedMemories: approved,
     counts: COUNTS,
     allowance: previewAllowance,
@@ -309,19 +341,49 @@ async function loadSelectedMessages(
 }
 
 /**
+ * The selected thread's attachments and their verified text. A missing storage
+ * root (503) or a non-text attachment still yields metadata, so the panel can
+ * say what happened rather than showing sample text.
+ */
+async function loadDocuments(
+  threadId: string | undefined,
+  cookie: string | undefined,
+): Promise<readonly DocumentView[]> {
+  if (threadId === undefined) {
+    return [];
+  }
+
+  const list = await fetchAttachments(threadId, cookie);
+
+  if (!list.ok) {
+    return [];
+  }
+
+  return Promise.all(
+    list.data.attachments.map(async (attachment) => {
+      const content = await fetchAttachmentContent(attachment.id, cookie);
+
+      return attachmentToDocument(attachment, content);
+    }),
+  );
+}
+
+/**
  * The owner-scoped live workspace: Bot detail, the gallery counts, the thread
- * list, and the selected thread's messages. The first failing request is the
- * page's failure; none of them falls back to sample data.
+ * list, the selected thread's messages and attachments, and the Bot's memory
+ * records. The first failing core request is the page's failure; optional
+ * context that cannot be read stays absent rather than becoming sample data.
  */
 async function loadLiveWorkspace(
   botId: string,
   requestedThreadId: string | undefined,
   cookie: string | undefined,
 ): Promise<LiveWorkspaceResult> {
-  const [detailResult, botsResult, threadsResult] = await Promise.all([
+  const [detailResult, botsResult, threadsResult, memoriesResult] = await Promise.all([
     fetchBot(botId, cookie),
     fetchBots(cookie),
     fetchThreads(botId, cookie),
+    fetchMemories(botId, cookie),
   ]);
 
   if (!detailResult.ok) {
@@ -347,7 +409,10 @@ async function loadLiveWorkspace(
     notFound();
   }
 
-  const messageResult = await loadSelectedMessages(botId, threadId, cookie);
+  const [messageResult, documents] = await Promise.all([
+    loadSelectedMessages(botId, threadId, cookie),
+    loadDocuments(threadId, cookie),
+  ]);
 
   if (!messageResult.ok) {
     return messageResult;
@@ -359,6 +424,8 @@ async function loadLiveWorkspace(
     threads: threadsResult.data,
     selectedThreadId: threadId,
     messages: messageResult.data,
+    memories: memoriesResult.ok ? memoriesResult.data : undefined,
+    documents,
   });
 
   return { ok: true, data, threadId };
