@@ -172,25 +172,25 @@ export const isolationScenario = {
 
     await runCheck(checks, "B's own session is denied A's ids", async () => {
       const symmetric = [
-        ['GET', `/api/bots/${world.bots.A.id}`],
-        ['GET', `/api/threads/${world.conversations.A.id}/messages`],
-        ['GET', `/api/artifacts/${world.artifacts.A.artifact.id}`],
-        [
-          'POST',
-          `/api/memories/${world.memories.A.id}/approvals`,
-          { bot: true, thread: false },
-        ],
-        ['DELETE', `/api/threads/${world.conversations.A.id}`],
+        { method: 'GET', path: `/api/bots/${world.bots.A.id}` },
+        { method: 'GET', path: `/api/threads/${world.conversations.A.id}/messages` },
+        { method: 'GET', path: `/api/artifacts/${world.artifacts.A.artifact.id}` },
+        {
+          method: 'POST',
+          path: `/api/memories/${world.memories.A.id}/approvals`,
+          body: { bot: true, thread: false },
+        },
+        { method: 'DELETE', path: `/api/threads/${world.conversations.A.id}` },
       ];
 
-      for (const [method, path, body] of symmetric) {
-        const result = await requestB(path, {
-          method,
-          body,
-          csrf: method !== 'GET',
+      for (const probe of symmetric) {
+        const result = await requestB(probe.path, {
+          method: probe.method,
+          body: probe.body,
+          csrf: probe.method !== 'GET',
         });
 
-        expectHttpNotFound(result, `${method} ${path}`);
+        expectHttpNotFound(result, `${probe.method} ${probe.path}`);
       }
 
       return { probed: symmetric.length };
