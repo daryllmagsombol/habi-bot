@@ -22,11 +22,15 @@ export interface AppBarAllowance {
 
 export interface AppBarProps {
   /** Route the bar treats as the current section. */
-  readonly section?: 'bots' | 'threads';
+  readonly section?: 'bots' | 'threads' | 'account';
   /** Right-side controls that belong to the page, e.g. the panel switch. */
   readonly actions?: ReactNode;
-  /** Section totals come from the route, not from the chrome. */
-  readonly counts: AppBarCounts;
+  /**
+   * Section totals come from the route, not from the chrome. Omitted on
+   * `/account`, which has no collection total; the pills are then left out
+   * rather than showing a zero the route did not measure.
+   */
+  readonly counts?: AppBarCounts;
   /** Absent when the API cannot report daily usage; the bar says so. */
   readonly allowance?: AppBarAllowance | undefined;
   /** `preview` labels sample data; `live` labels records from the API. */
@@ -45,6 +49,7 @@ function navItemClass(current: boolean): string {
 const SECTIONS = [
   { key: 'bots', label: 'Bots', href: '/bots' },
   { key: 'threads', label: 'Threads', href: '/threads' },
+  { key: 'account', label: 'Account', href: '/account' },
 ] as const;
 
 /**
@@ -70,9 +75,10 @@ export function AppBar({
     allowance === undefined ? 0 : Math.min(100, (allowance.used / allowance.limit) * 100);
   const live = mode === 'live';
 
-  const sectionCounts: Record<(typeof SECTIONS)[number]['key'], number> = {
-    bots: counts.bots,
-    threads: counts.threads,
+  const sectionCounts: Record<(typeof SECTIONS)[number]['key'], number | undefined> = {
+    bots: counts?.bots,
+    threads: counts?.threads,
+    account: undefined,
   };
 
   return (
@@ -88,19 +94,25 @@ export function AppBar({
         <Wordmark />
 
         <nav aria-label="Workspace" className="ml-1 hidden items-center gap-0.5 md:flex">
-          {SECTIONS.map((item) => (
-            <Link
-              key={item.key}
-              href={item.href}
-              aria-current={section === item.key ? 'page' : undefined}
-              className={navItemClass(section === item.key)}
-            >
-              {item.label}
-              <Pill tone="surface" size="xs" className="u-figures min-w-5 justify-center">
-                {sectionCounts[item.key]}
-              </Pill>
-            </Link>
-          ))}
+          {SECTIONS.map((item) => {
+            const count = sectionCounts[item.key];
+
+            return (
+              <Link
+                key={item.key}
+                href={item.href}
+                aria-current={section === item.key ? 'page' : undefined}
+                className={navItemClass(section === item.key)}
+              >
+                {item.label}
+                {count === undefined ? null : (
+                  <Pill tone="surface" size="xs" className="u-figures min-w-5 justify-center">
+                    {count}
+                  </Pill>
+                )}
+              </Link>
+            );
+          })}
         </nav>
 
         <div className="ml-auto flex shrink-0 items-center gap-1.5 sm:gap-2">
@@ -178,18 +190,24 @@ export function AppBar({
         className="border-t border-line bg-canvas px-4 pb-4 sm:px-6 md:hidden"
       >
         <nav aria-label="Workspace menu" className="py-1">
-          {SECTIONS.map((item) => (
-            <Link
-              key={item.key}
-              href={item.href}
-              aria-current={section === item.key ? 'page' : undefined}
-              onClick={() => setMenuOpen(false)}
-              className="flex min-h-11 items-center justify-between gap-3 border-b border-line-soft px-1 text-sm text-ink last:border-b-0"
-            >
-              {item.label}
-              <span className="u-figures text-2xs text-subtle">{sectionCounts[item.key]}</span>
-            </Link>
-          ))}
+          {SECTIONS.map((item) => {
+            const count = sectionCounts[item.key];
+
+            return (
+              <Link
+                key={item.key}
+                href={item.href}
+                aria-current={section === item.key ? 'page' : undefined}
+                onClick={() => setMenuOpen(false)}
+                className="flex min-h-11 items-center justify-between gap-3 border-b border-line-soft px-1 text-sm text-ink last:border-b-0"
+              >
+                {item.label}
+                {count === undefined ? null : (
+                  <span className="u-figures text-2xs text-subtle">{count}</span>
+                )}
+              </Link>
+            );
+          })}
         </nav>
 
         {allowance === undefined ? (
