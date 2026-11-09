@@ -12,14 +12,17 @@
  * panel is open. A failed optional read stays absent and says so; it never
  * falls back to sample data.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import type {
   ArtifactDetailView,
+  ArtifactFormValues,
   ArtifactSummaryView,
   ArtifactVersionView,
   MemoryGate,
+  MemoryGateItem,
   SearchResultView,
+  SkillFormValues,
   SkillView,
 } from '../../../components/panels';
 import type { BotFormValues } from '../../../components/bots';
@@ -30,7 +33,6 @@ import {
   createThread,
   detachSkill,
   readArtifact,
-  readArtifactVersions,
   readArtifacts,
   readCsrfToken,
   readSkills,
@@ -41,18 +43,42 @@ import {
   updateArtifact,
   updateBot,
 } from '../../../lib/api/browser';
+import {
+  createArtifact as postArtifact,
+  createSkill as postSkill,
+  readArtifactVersionPage,
+  readMemoryPage,
+} from '../../../lib/api/content';
 import type {
   ArtifactDto,
   ArtifactVersionMetadataDto,
   MemoryDto,
+  SearchHitDto,
   SkillDto,
 } from '../../../lib/api/types';
 import { formatWhen } from '../../../lib/api/format';
 import { ARTIFACT_CONTENT_MAX_BYTES, utf8Bytes } from '../../../lib/api/limits';
+import {
+  SKILL_BODY_MAX_BYTES,
+  SKILL_DESCRIPTION_MAX_LENGTH,
+  SKILL_NAME_MAX_LENGTH,
+} from '../../../components/panels';
 import { threadHref } from '../../../lib/links';
 import type { WorkspaceData } from './workspace-data';
 
 type LoadState = 'idle' | 'loading' | 'ready' | 'error';
+
+/** Rows per cursor page for artifacts, versions, skills, memories and search. */
+const PAGE_SIZE = 20;
+
+/** One cursor page's load-more state, passed straight to `PaginationFooter`. */
+export interface PagingState {
+  readonly hasMore: boolean;
+  readonly loading: boolean;
+  readonly error: string | undefined;
+  readonly loadMore: () => void;
+}
+
 
 export interface WorkspaceActions {
   readonly botPending: boolean;
@@ -77,12 +103,20 @@ export interface WorkspaceActions {
   ) => void;
   readonly proposeMemory: (text: string, threadId: string) => void;
 
+  readonly memories: readonly MemoryGateItem[];
+  readonly memoryPaging: PagingState;
+
   readonly skills: readonly SkillView[];
   readonly skillsState: LoadState;
   readonly skillsError: string | undefined;
   readonly skillPendingId: string | undefined;
   readonly attachSkillToBot: (skillId: string) => void;
   readonly detachSkillFromBot: (skillId: string) => void;
+  readonly createSkillForAccount: (values: SkillFormValues) => void;
+  readonly skillCreatePending: boolean;
+  readonly skillCreateError: string | undefined;
+  readonly skillCreateStatus: string | undefined;
+  readonly skillsPaging: PagingState;
 
   readonly artifacts: readonly ArtifactSummaryView[];
   readonly artifactsState: LoadState;
@@ -94,11 +128,18 @@ export interface WorkspaceActions {
   readonly selectArtifact: (artifactId: string) => void;
   readonly saveArtifact: (content: string) => void;
   readonly restoreArtifact: (version: number) => void;
+  readonly createArtifactForThread: (values: ArtifactFormValues) => void;
+  readonly artifactCreatePending: boolean;
+  readonly artifactCreateError: string | undefined;
+  readonly artifactCreateStatus: string | undefined;
+  readonly artifactsPaging: PagingState;
+  readonly artifactVersionsPaging: PagingState;
 
   readonly searchState: LoadState;
   readonly searchResults: readonly SearchResultView[];
   readonly searchError: string | undefined;
   readonly searchQuery: string | undefined;
+  readonly searchPaging: PagingState;
   readonly runSearch: (query: string) => void;
 }
 
@@ -121,11 +162,23 @@ function versionView(version: ArtifactVersionMetadataDto): ArtifactVersionView {
   };
 }
 
+function searchHitView(hit: SearchHitDto): SearchResultView {
+  return {
+    messageId: hit.messageId,
+    conversationId: hit.conversationId,
+    conversationTitle: hit.conversationTitle,
+    role: hit.role,
+    snippet: hit.snippet,
+    at: formatWhen(hit.createdAt),
+  };
+}
+
 function skillView(skill: SkillDto): SkillView {
   return {
     id: skill.id,
     name: skill.name,
     description: skill.description,
+    bodyMarkdown: skill.bodyMarkdown,
     status: skill.status,
     version: skill.version,
     botId: skill.botId,
@@ -139,6 +192,79 @@ function withUpdatedSkill(
   updated: SkillDto,
 ): readonly SkillView[] {
   return skills.map((skill) => (skill.id === skillId ? skillView(updated) : skill));
+}
+
+/** Puts the newest row first without duplicating a record already in the page. */
+function prependSkill(
+  skills: readonly SkillView[],
+  skill: SkillDto,
+): readonly SkillView[] {
+  return [skillView(skill), ...skills.filter((item) => item.id !== skill.id)];
+}
+
+/** Appends a cursor page, dropping rows already loaded. */
+function appendSkills(
+  skills: readonly SkillView[],
+  page: readonly SkillDto[],
+): readonly SkillView[] {
+  const seen = new Set(skills.map((skill) => skill.id));
+
+  return [...skills, ...page.filter((skill) => !seen.has(skill.id)).map(skillView)];
+}
+
+/** Appends a cursor page of search hits, dropping rows already loaded. */
+function appendSearchResults(
+  results: readonly SearchResultView[],
+  page: readonly SearchHitDto[],
+): readonly SearchResultView[] {
+  const seen = new Set(results.map((result) => result.messageId));
+
+  return [...results, ...page.filter((hit) => !seen.has(hit.messageId)).map(searchHitView)];
+}
+
+/** Appends a cursor page of memory gates, dropping rows already loaded. */
+function appendMemories(
+  memories: readonly MemoryGateItem[],
+  page: readonly MemoryDto[],
+): readonly MemoryGateItem[] {
+  const seen = new Set(memories.map((memory) => memory.id));
+
+  return [
+    ...memories,
+    ...page
+      .filter((memory) => !seen.has(memory.id))
+      .map((memory) => ({
+        id: memory.id,
+        text: memory.content,
+        botApproved: memory.botApproved,
+        threadApproved: memory.conversationApproved,
+      })),
+  ];
+}
+
+function appendVersions(
+  versions: readonly ArtifactVersionView[],
+  page: readonly ArtifactVersionMetadataDto[],
+): readonly ArtifactVersionView[] {
+  const seen = new Set(versions.map((version) => version.version));
+
+  return [...versions, ...page.filter((version) => !seen.has(version.version)).map(versionView)];
+}
+
+function prependArtifact(
+  artifacts: readonly ArtifactSummaryView[],
+  artifact: ArtifactDto,
+): readonly ArtifactSummaryView[] {
+  return [artifactSummary(artifact), ...artifacts.filter((item) => item.id !== artifact.id)];
+}
+
+function appendArtifacts(
+  artifacts: readonly ArtifactSummaryView[],
+  page: readonly ArtifactDto[],
+): readonly ArtifactSummaryView[] {
+  const seen = new Set(artifacts.map((artifact) => artifact.id));
+
+  return [...artifacts, ...page.filter((artifact) => !seen.has(artifact.id)).map(artifactSummary)];
 }
 
 /** Replaces one artifact's summary after a save or restore. */
@@ -171,11 +297,23 @@ export function useWorkspaceActions(
   const [memoryPendingId, setMemoryPendingId] = useState<string | undefined>(undefined);
   const [memoryError, setMemoryError] = useState<string | undefined>(undefined);
   const [memoryStatus, setMemoryStatus] = useState<string | undefined>(undefined);
+  const [memoryExtras, setMemoryExtras] = useState<readonly MemoryGateItem[]>([]);
+  const [memoryCursor, setMemoryCursor] = useState<string | null>(
+    data.memoryNextCursor ?? null,
+  );
+  const [memoryLoadingMore, setMemoryLoadingMore] = useState(false);
+  const [memoryPagingError, setMemoryPagingError] = useState<string | undefined>(undefined);
 
   const [skills, setSkills] = useState<readonly SkillView[]>([]);
   const [skillsState, setSkillsState] = useState<LoadState>('idle');
   const [skillsError, setSkillsError] = useState<string | undefined>(undefined);
   const [skillPendingId, setSkillPendingId] = useState<string | undefined>(undefined);
+  const [skillCursor, setSkillCursor] = useState<string | null>(null);
+  const [skillsLoadingMore, setSkillsLoadingMore] = useState(false);
+  const [skillsPagingError, setSkillsPagingError] = useState<string | undefined>(undefined);
+  const [skillCreatePending, setSkillCreatePending] = useState(false);
+  const [skillCreateError, setSkillCreateError] = useState<string | undefined>(undefined);
+  const [skillCreateStatus, setSkillCreateStatus] = useState<string | undefined>(undefined);
 
   const [artifacts, setArtifacts] = useState<readonly ArtifactSummaryView[]>([]);
   const [artifactsState, setArtifactsState] = useState<LoadState>('idle');
@@ -186,23 +324,72 @@ export function useWorkspaceActions(
   );
   const [artifactError, setArtifactError] = useState<string | undefined>(undefined);
   const [artifactStatus, setArtifactStatus] = useState<string | undefined>(undefined);
+  const [artifactCursor, setArtifactCursor] = useState<string | null>(null);
+  const [artifactsLoadingMore, setArtifactsLoadingMore] = useState(false);
+  const [artifactsPagingError, setArtifactsPagingError] = useState<string | undefined>(undefined);
+  const [versionCursor, setVersionCursor] = useState<string | null>(null);
+  const [versionsLoadingMore, setVersionsLoadingMore] = useState(false);
+  const [versionsPagingError, setVersionsPagingError] = useState<string | undefined>(undefined);
+  const [artifactCreatePending, setArtifactCreatePending] = useState(false);
+  const [artifactCreateError, setArtifactCreateError] = useState<string | undefined>(undefined);
+  const [artifactCreateStatus, setArtifactCreateStatus] = useState<string | undefined>(undefined);
 
   const [searchState, setSearchState] = useState<LoadState>('idle');
   const [searchResults, setSearchResults] = useState<readonly SearchResultView[]>([]);
   const [searchError, setSearchError] = useState<string | undefined>(undefined);
   const [searchQuery, setSearchQuery] = useState<string | undefined>(undefined);
+  const [searchCursor, setSearchCursor] = useState<string | null>(null);
+  const [searchLoadingMore, setSearchLoadingMore] = useState(false);
+  const [searchPagingError, setSearchPagingError] = useState<string | undefined>(undefined);
 
   const enabled = live && panelOpen;
 
+  // Async callbacks compare against these refs so a page requested for one
+  // thread, artifact or query can never populate another one afterwards.
+  const threadRef = useRef(threadId);
+  const detailIdRef = useRef<string | undefined>(undefined);
+  const searchRequestRef = useRef(0);
+
+  useEffect(() => {
+    threadRef.current = threadId;
+  }, [threadId]);
+
+  useEffect(() => {
+    detailIdRef.current = artifactDetail?.artifact.id;
+  }, [artifactDetail]);
+
+  // The server page seeds the memory list and its cursor. Additional pages are
+  // appended locally; a server refresh replaces the first page, and the merge
+  // below drops any id already present instead of rendering it twice.
+  const memories = useMemo(() => {
+    const seen = new Set<string>();
+    const merged: MemoryGateItem[] = [];
+
+    for (const memory of [...data.memories, ...memoryExtras]) {
+      if (!seen.has(memory.id)) {
+        seen.add(memory.id);
+        merged.push(memory);
+      }
+    }
+
+    return merged;
+  }, [data.memories, memoryExtras]);
+
   const loadArtifact = useCallback(async (artifactId: string) => {
+    const requestThread = threadRef.current;
+
     setArtifactBusy('select');
     setArtifactError(undefined);
 
     try {
       const [detail, versions] = await Promise.all([
         readArtifact(artifactId),
-        readArtifactVersions(artifactId),
+        readArtifactVersionPage(artifactId, { limit: PAGE_SIZE }),
       ]);
+
+      if (threadRef.current !== requestThread) {
+        return;
+      }
 
       setArtifactDetail({
         artifact: artifactSummary(detail.artifact.artifact),
@@ -214,6 +401,8 @@ export function useWorkspaceActions(
         content: detail.artifact.version.content,
       });
       setArtifactVersions(versions.versions.map(versionView));
+      setVersionCursor(versions.nextCursor);
+      setVersionsPagingError(undefined);
       setArtifactStatus(undefined);
     } catch (error) {
       setArtifactError(chatErrorMessage(error));
@@ -233,9 +422,11 @@ export function useWorkspaceActions(
       setSkillsState('loading');
 
       try {
-        const page = await readSkills({ limit: 100 });
+        const page = await readSkills({ limit: PAGE_SIZE });
         if (!cancelled) {
           setSkills(page.skills.map(skillView));
+          setSkillCursor(page.nextCursor);
+          setSkillsPagingError(undefined);
           setSkillsState('ready');
           setSkillsError(undefined);
         }
@@ -253,6 +444,10 @@ export function useWorkspaceActions(
       setArtifactDetail(undefined);
       setArtifactVersions([]);
       setArtifactError(undefined);
+      setArtifactCursor(null);
+      setVersionCursor(null);
+      setArtifactsPagingError(undefined);
+      setVersionsPagingError(undefined);
 
       if (threadId === undefined) {
         if (!cancelled) {
@@ -265,12 +460,13 @@ export function useWorkspaceActions(
       }
 
       try {
-        const page = await readArtifacts({ conversationId: threadId, limit: 50 });
+        const page = await readArtifacts({ conversationId: threadId, limit: PAGE_SIZE });
         if (cancelled) {
           return;
         }
 
         setArtifacts(page.artifacts.map(artifactSummary));
+        setArtifactCursor(page.nextCursor);
         setArtifactsState('ready');
         setArtifactError(undefined);
 
@@ -484,8 +680,202 @@ export function useWorkspaceActions(
       .finally(() => setSkillPendingId(undefined));
   }
 
+  function createSkillForAccount(values: SkillFormValues) {
+    if (!live) {
+      return;
+    }
+
+    const nameLength = values.name.length;
+
+    if (nameLength < 1 || nameLength > SKILL_NAME_MAX_LENGTH) {
+      setSkillCreateError(`A skill name must be 1–${SKILL_NAME_MAX_LENGTH} characters.`);
+      return;
+    }
+
+    if (values.description.length > SKILL_DESCRIPTION_MAX_LENGTH) {
+      setSkillCreateError(
+        `A skill description must be at most ${SKILL_DESCRIPTION_MAX_LENGTH} characters.`,
+      );
+      return;
+    }
+
+    if (utf8Bytes(values.bodyMarkdown) > SKILL_BODY_MAX_BYTES) {
+      setSkillCreateError('The skill body is over the 64 KiB the API accepts, so it was not sent.');
+      return;
+    }
+
+    const token = readCsrfToken();
+
+    if (token === undefined) {
+      setSkillCreateError('This session did not publish a CSRF token, so no skill was created.');
+      return;
+    }
+
+    setSkillCreatePending(true);
+    setSkillCreateError(undefined);
+    setSkillCreateStatus(undefined);
+
+    void postSkill(
+      {
+        name: values.name,
+        description: values.description,
+        bodyMarkdown: values.bodyMarkdown,
+        ...(values.attachToBot ? { botId } : {}),
+      },
+      token,
+    )
+      .then((result) => {
+        setSkills((previous) => prependSkill(previous, result.skill));
+        setSkillCreateStatus(`Created “${result.skill.name}” as a draft. It grants no tools.`);
+      })
+      .catch((error: unknown) => setSkillCreateError(chatErrorMessage(error)))
+      .finally(() => setSkillCreatePending(false));
+  }
+
+  function loadMoreSkills() {
+    if (skillCursor === null || skillsLoadingMore) {
+      return;
+    }
+
+    setSkillsLoadingMore(true);
+    setSkillsPagingError(undefined);
+
+    void readSkills({ limit: PAGE_SIZE, cursor: skillCursor })
+      .then((page) => {
+        setSkills((previous) => appendSkills(previous, page.skills));
+        setSkillCursor(page.nextCursor);
+      })
+      .catch((error: unknown) => setSkillsPagingError(chatErrorMessage(error)))
+      .finally(() => setSkillsLoadingMore(false));
+  }
+
+  function loadMoreMemories() {
+    if (memoryCursor === null || memoryLoadingMore) {
+      return;
+    }
+
+    setMemoryLoadingMore(true);
+    setMemoryPagingError(undefined);
+
+    void readMemoryPage(botId, { limit: PAGE_SIZE, cursor: memoryCursor })
+      .then((page) => {
+        setMemoryExtras((previous) => appendMemories(previous, page.memories));
+        setMemoryCursor(page.nextCursor);
+      })
+      .catch((error: unknown) => setMemoryPagingError(chatErrorMessage(error)))
+      .finally(() => setMemoryLoadingMore(false));
+  }
+
   function selectArtifact(artifactId: string) {
     void loadArtifact(artifactId);
+  }
+
+  function createArtifactForThread(values: ArtifactFormValues) {
+    if (!live || threadId === undefined) {
+      return;
+    }
+
+    if (utf8Bytes(values.content) > ARTIFACT_CONTENT_MAX_BYTES) {
+      setArtifactCreateError(
+        'This artifact is over the 100 KB HTTP transport cap, so it was not sent.',
+      );
+      return;
+    }
+
+    const token = readCsrfToken();
+
+    if (token === undefined) {
+      setArtifactCreateError(
+        'This session did not publish a CSRF token, so no artifact was created.',
+      );
+      return;
+    }
+
+    setArtifactCreatePending(true);
+    setArtifactCreateError(undefined);
+    setArtifactCreateStatus(undefined);
+
+    void postArtifact(
+      {
+        kind: values.kind,
+        title: values.title,
+        content: values.content,
+        conversationId: threadId,
+      },
+      token,
+    )
+      .then(async (result) => {
+        const next = result.artifact;
+        setArtifacts((previous) => prependArtifact(previous, next.artifact));
+        setArtifactDetail({
+          artifact: artifactSummary(next.artifact),
+          version: {
+            version: next.version.version,
+            byteSize: next.version.byteSize,
+            createdAt: next.version.createdAt,
+          },
+          content: next.version.content,
+        });
+        setArtifactCreateStatus(
+          `Created “${next.artifact.title}” as version ${next.version.version}.`,
+        );
+
+        const versions = await readArtifactVersionPage(next.artifact.id, {
+          limit: PAGE_SIZE,
+        });
+        setArtifactVersions(versions.versions.map(versionView));
+        setVersionCursor(versions.nextCursor);
+        setVersionsPagingError(undefined);
+      })
+      .catch((error: unknown) => setArtifactCreateError(chatErrorMessage(error)))
+      .finally(() => setArtifactCreatePending(false));
+  }
+
+  function loadMoreArtifacts() {
+    if (artifactCursor === null || artifactsLoadingMore || threadId === undefined) {
+      return;
+    }
+
+    setArtifactsLoadingMore(true);
+    setArtifactsPagingError(undefined);
+
+    void readArtifacts({ conversationId: threadId, limit: PAGE_SIZE, cursor: artifactCursor })
+      .then((page) => {
+        if (threadRef.current !== threadId) {
+          return;
+        }
+
+        setArtifacts((previous) => appendArtifacts(previous, page.artifacts));
+        setArtifactCursor(page.nextCursor);
+      })
+      .catch((error: unknown) => setArtifactsPagingError(chatErrorMessage(error)))
+      .finally(() => setArtifactsLoadingMore(false));
+  }
+
+  function loadMoreVersions() {
+    const current = artifactDetail;
+
+    if (current === undefined || versionCursor === null || versionsLoadingMore) {
+      return;
+    }
+
+    setVersionsLoadingMore(true);
+    setVersionsPagingError(undefined);
+
+    void readArtifactVersionPage(current.artifact.id, {
+      limit: PAGE_SIZE,
+      cursor: versionCursor,
+    })
+      .then((page) => {
+        if (detailIdRef.current !== current.artifact.id) {
+          return;
+        }
+
+        setArtifactVersions((previous) => appendVersions(previous, page.versions));
+        setVersionCursor(page.nextCursor);
+      })
+      .catch((error: unknown) => setVersionsPagingError(chatErrorMessage(error)))
+      .finally(() => setVersionsLoadingMore(false));
   }
 
   function saveArtifact(content: string) {
@@ -527,8 +917,12 @@ export function useWorkspaceActions(
         });
         setArtifacts((previous) => withUpdatedArtifact(previous, next.artifact));
         setArtifactStatus(`Saved as version ${next.version.version}.`);
-        const versions = await readArtifactVersions(next.artifact.id);
+        const versions = await readArtifactVersionPage(next.artifact.id, {
+          limit: PAGE_SIZE,
+        });
         setArtifactVersions(versions.versions.map(versionView));
+        setVersionCursor(versions.nextCursor);
+        setVersionsPagingError(undefined);
       })
       .catch((error: unknown) => setArtifactError(chatErrorMessage(error)))
       .finally(() => setArtifactBusy(undefined));
@@ -566,37 +960,78 @@ export function useWorkspaceActions(
         });
         setArtifacts((previous) => withUpdatedArtifact(previous, next.artifact));
         setArtifactStatus(`Version ${version} restored as version ${next.version.version}.`);
-        const versions = await readArtifactVersions(next.artifact.id);
+        const versions = await readArtifactVersionPage(next.artifact.id, {
+          limit: PAGE_SIZE,
+        });
         setArtifactVersions(versions.versions.map(versionView));
+        setVersionCursor(versions.nextCursor);
+        setVersionsPagingError(undefined);
       })
       .catch((error: unknown) => setArtifactError(chatErrorMessage(error)))
       .finally(() => setArtifactBusy(undefined));
   }
 
   function runSearch(query: string) {
+    const requestId = searchRequestRef.current + 1;
+    searchRequestRef.current = requestId;
+
     setSearchState('loading');
     setSearchError(undefined);
     setSearchQuery(query);
+    setSearchCursor(null);
+    setSearchPagingError(undefined);
 
-    void searchMessages({ q: query, botId, limit: 20 })
+    void searchMessages({ q: query, botId, limit: PAGE_SIZE })
       .then((page) => {
-        setSearchResults(
-          page.results.map((hit) => ({
-            messageId: hit.messageId,
-            conversationId: hit.conversationId,
-            conversationTitle: hit.conversationTitle,
-            role: hit.role,
-            snippet: hit.snippet,
-            at: formatWhen(hit.createdAt),
-          })),
-        );
+        if (searchRequestRef.current !== requestId) {
+          return;
+        }
+
+        setSearchResults(page.results.map(searchHitView));
+        setSearchCursor(page.nextCursor);
         setSearchState('ready');
       })
       .catch((error: unknown) => {
+        if (searchRequestRef.current !== requestId) {
+          return;
+        }
+
         setSearchResults([]);
+        setSearchCursor(null);
         setSearchState('error');
         setSearchError(chatErrorMessage(error));
       });
+  }
+
+  function loadMoreSearch() {
+    const query = searchQuery;
+
+    if (query === undefined || searchCursor === null || searchLoadingMore) {
+      return;
+    }
+
+    const requestId = searchRequestRef.current;
+
+    setSearchLoadingMore(true);
+    setSearchPagingError(undefined);
+
+    void searchMessages({ q: query, botId, limit: PAGE_SIZE, cursor: searchCursor })
+      .then((page) => {
+        if (searchRequestRef.current !== requestId) {
+          return;
+        }
+
+        setSearchResults((previous) => appendSearchResults(previous, page.results));
+        setSearchCursor(page.nextCursor);
+      })
+      .catch((error: unknown) => {
+        if (searchRequestRef.current !== requestId) {
+          return;
+        }
+
+        setSearchPagingError(chatErrorMessage(error));
+      })
+      .finally(() => setSearchLoadingMore(false));
   }
 
   return {
@@ -612,6 +1047,13 @@ export function useWorkspaceActions(
     memoryPendingId,
     memoryError,
     memoryStatus,
+    memories,
+    memoryPaging: {
+      hasMore: memoryCursor !== null,
+      loading: memoryLoadingMore,
+      error: memoryPagingError,
+      loadMore: loadMoreMemories,
+    },
     toggleMemory,
     proposeMemory,
     skills,
@@ -620,6 +1062,16 @@ export function useWorkspaceActions(
     skillPendingId,
     attachSkillToBot,
     detachSkillFromBot,
+    createSkillForAccount,
+    skillCreatePending,
+    skillCreateError,
+    skillCreateStatus,
+    skillsPaging: {
+      hasMore: skillCursor !== null,
+      loading: skillsLoadingMore,
+      error: skillsPagingError,
+      loadMore: loadMoreSkills,
+    },
     artifacts,
     artifactsState,
     artifactDetail,
@@ -630,10 +1082,32 @@ export function useWorkspaceActions(
     selectArtifact,
     saveArtifact,
     restoreArtifact,
+    createArtifactForThread,
+    artifactCreatePending,
+    artifactCreateError,
+    artifactCreateStatus,
+    artifactsPaging: {
+      hasMore: artifactCursor !== null,
+      loading: artifactsLoadingMore,
+      error: artifactsPagingError,
+      loadMore: loadMoreArtifacts,
+    },
+    artifactVersionsPaging: {
+      hasMore: versionCursor !== null,
+      loading: versionsLoadingMore,
+      error: versionsPagingError,
+      loadMore: loadMoreVersions,
+    },
     searchState,
     searchResults,
     searchError,
     searchQuery,
+    searchPaging: {
+      hasMore: searchCursor !== null,
+      loading: searchLoadingMore,
+      error: searchPagingError,
+      loadMore: loadMoreSearch,
+    },
     runSearch,
   };
 }

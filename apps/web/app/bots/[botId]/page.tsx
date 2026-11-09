@@ -383,7 +383,7 @@ async function loadLiveWorkspace(
     fetchBot(botId, cookie),
     fetchBots(cookie),
     fetchThreads(botId, cookie),
-    fetchMemories(botId, cookie),
+    fetchMemories(botId, cookie, { limit: 20 }),
   ]);
 
   if (!detailResult.ok) {

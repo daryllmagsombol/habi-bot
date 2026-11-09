@@ -38,6 +38,8 @@ export interface WorkspaceData {
   readonly threads: readonly WorkspaceThread[];
   readonly memories: readonly MemoryGateItem[];
   readonly memoryItems: readonly MemoryItem[];
+  /** Cursor for the page after `memories`; null means the list is exhausted. */
+  readonly memoryNextCursor?: string | null;
   /** `unavailable` means the memory page could not be read; absent figures stay absent. */
   readonly memoryState?: 'ready' | 'unavailable';
   readonly approvedMemories: number;

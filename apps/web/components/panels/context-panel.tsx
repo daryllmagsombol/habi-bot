@@ -27,6 +27,8 @@ export interface ContextPanelProps {
     | undefined;
   /** The memory composer, bound by the coordinator to the open thread. */
   readonly memoryComposer?: ReactNode;
+  /** Cursor paging for the Bot's memory list; absent when there is no cursor. */
+  readonly memoryPaging?: ReactNode;
   readonly skillsSection?: ReactNode;
   readonly searchSection?: ReactNode;
   readonly artifactsSection?: ReactNode;
@@ -145,6 +147,7 @@ export function ContextPanel({
   memoryState = 'ready',
   onMemoryToggle,
   memoryComposer,
+  memoryPaging,
   skillsSection,
   searchSection,
   artifactsSection,
@@ -177,6 +180,7 @@ export function ContextPanel({
               changedNote={memoryChangedNote}
             />
             {memoryComposer}
+            {memoryPaging}
           </>
         )}
       </Section>

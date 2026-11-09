@@ -65,7 +65,7 @@ function sessionCookies(header: string | null): string | undefined {
   return pairs.length === 0 ? undefined : pairs.join('; ');
 }
 
-function upstreamHeaders(
+export function upstreamHeaders(
   request: Request,
   origin: string,
   accept: string,
@@ -90,7 +90,7 @@ function upstreamHeaders(
   return headers;
 }
 
-function relayJson(upstream: Response): Promise<Response> {
+export function relayJson(upstream: Response): Promise<Response> {
   return (async () => {
     const headers = new Headers({ 'cache-control': 'no-store' });
     const contentType = upstream.headers.get('content-type');

@@ -1,9 +1,12 @@
 'use client';
 
-import { useId, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { Badge, Button, TextArea } from '../ui';
 import { formatWhen } from '../../lib/api/format';
 import { ARTIFACT_CONTENT_MAX_BYTES, utf8Bytes } from '../../lib/api/limits';
+import { ArtifactForm } from './artifact-form';
+import type { ArtifactFormValues } from './artifact-form';
+import { PaginationFooter } from './pagination-footer';
 import type { ArtifactDetailView, ArtifactSummaryView, ArtifactVersionView } from './types';
 
 const COUNT = new Intl.NumberFormat('en-US');
@@ -20,6 +23,23 @@ export interface ArtifactPanelProps {
   /** Saves one new version. The cap is enforced before this is called. */
   readonly onSave: (content: string) => void;
   readonly onRestore: (version: number) => void;
+  /** Present when the surface may create a record bound to the open thread. */
+  readonly onCreate?: ((values: ArtifactFormValues) => void) | undefined;
+  readonly createPending?: boolean | undefined;
+  readonly createError?: string | undefined;
+  readonly createStatus?: string | undefined;
+  readonly canCreate?: boolean | undefined;
+  readonly createDisabledNote?: string | undefined;
+  /** Cursor paging for the artifact metadata list. */
+  readonly hasMore?: boolean | undefined;
+  readonly loadingMore?: boolean | undefined;
+  readonly pagingError?: string | undefined;
+  readonly onLoadMore?: (() => void) | undefined;
+  /** Cursor paging for the selected artifact's version metadata. */
+  readonly versionsHasMore?: boolean | undefined;
+  readonly versionsLoadingMore?: boolean | undefined;
+  readonly versionsPagingError?: string | undefined;
+  readonly onLoadMoreVersions?: (() => void) | undefined;
 }
 
 const CAP_HINT = `Artifact content is capped at 100 KB (${COUNT.format(
@@ -35,6 +55,10 @@ const CAP_HINT = `Artifact content is capped at 100 KB (${COUNT.format(
  * The server accepts 1 MiB, but the HTTP transport caps a request at 100 KB. The
  * editor refuses an over-cap save and says why instead of sending a request that
  * can only answer 413.
+ *
+ * Restore is a confirmation, not a one-click action: it appends a new version
+ * and never rewrites history. Both paging controls append the next cursor page
+ * to the list above them; neither changes the current selection.
  */
 export function ArtifactPanel({
   artifacts,
@@ -47,16 +71,49 @@ export function ArtifactPanel({
   onSelect,
   onSave,
   onRestore,
+  onCreate,
+  createPending = false,
+  createError,
+  createStatus,
+  canCreate = true,
+  createDisabledNote,
+  hasMore = false,
+  loadingMore = false,
+  pagingError,
+  onLoadMore,
+  versionsHasMore = false,
+  versionsLoadingMore = false,
+  versionsPagingError,
+  onLoadMoreVersions,
 }: Readonly<ArtifactPanelProps>) {
   const id = useId();
   const [draftState, setDraftState] = useState<
     { readonly version: number; readonly value: string } | undefined
   >(undefined);
+  const [creating, setCreating] = useState(false);
+  const [confirmVersion, setConfirmVersion] = useState<number | undefined>(undefined);
+  const detailHeading = useRef<HTMLParagraphElement>(null);
+  const wasBusy = useRef(false);
+
   const selectedVersion = detail?.version.version;
   const draft =
     selectedVersion !== undefined && draftState?.version === selectedVersion
       ? draftState.value
       : (detail?.content ?? '');
+
+  const busyNow = createPending || busy !== undefined;
+  const detailKey =
+    detail === undefined ? undefined : `${detail.artifact.id}:${detail.version.version}`;
+
+  // Move focus to the selected body after a create/save/restore completes. A
+  // plain selection does not steal focus, and the status line is a live region.
+  useEffect(() => {
+    if (wasBusy.current && !busyNow && detailKey !== undefined) {
+      detailHeading.current?.focus();
+    }
+
+    wasBusy.current = busyNow;
+  }, [busyNow, detailKey]);
 
   const setDraft = (value: string) => {
     if (selectedVersion === undefined) {
@@ -66,24 +123,72 @@ export function ArtifactPanel({
     setDraftState({ version: selectedVersion, value });
   };
 
+  const createSection =
+    onCreate === undefined ? null : (
+      <div className="mb-3">
+        <Button
+          type="button"
+          variant="secondary"
+          size="sm"
+          disabled={!canCreate}
+          aria-expanded={creating}
+          onClick={() => setCreating((open) => !open)}
+        >
+          {creating ? 'Close new-artifact form' : 'New artifact'}
+        </Button>
+        {!canCreate && createDisabledNote === undefined ? null : (
+          <p className="mt-1.5 text-2xs leading-relaxed text-subtle">
+            {canCreate ? 'The new record is bound to the open conversation.' : createDisabledNote}
+          </p>
+        )}
+
+        {creating ? (
+          <div className="mt-3 rounded-sm border border-line-soft p-3">
+            <ArtifactForm
+              onSubmit={onCreate}
+              pending={createPending}
+              error={createError}
+              status={createStatus}
+              enabled={canCreate}
+              disabledNote={createDisabledNote}
+            />
+          </div>
+        ) : null}
+      </div>
+    );
+
   if ((state === 'loading' || state === 'idle') && artifacts.length === 0) {
-    return <p className="text-xs leading-relaxed text-muted">Loading artifacts…</p>;
+    return (
+      <div>
+        {createSection}
+        <p role="status" className="text-xs leading-relaxed text-muted">
+          Loading artifacts…
+        </p>
+      </div>
+    );
   }
 
   if (state === 'error' && artifacts.length === 0) {
     return (
-      <p role="alert" className="text-xs leading-relaxed text-danger">
-        {error ?? 'The artifact list could not be loaded. Nothing was invented.'}
-      </p>
+      <div>
+        {createSection}
+        <p role="alert" className="text-xs leading-relaxed text-danger">
+          {error ?? 'The artifact list could not be loaded. Nothing was invented.'}
+        </p>
+      </div>
     );
   }
 
   if (artifacts.length === 0) {
     return (
-      <p className="text-xs leading-relaxed text-muted">
-        The API returned no artifacts for this conversation. Creating one is not exposed by this
-        interface.
-      </p>
+      <div>
+        {createSection}
+        <p className="text-xs leading-relaxed text-muted">
+          {onCreate === undefined
+            ? 'The API returned no artifacts for this conversation. Creating one is not exposed by this interface.'
+            : 'The API returned no artifacts for this conversation. Use “New artifact” to create one.'}
+        </p>
+      </div>
     );
   }
 
@@ -95,6 +200,8 @@ export function ArtifactPanel({
 
   return (
     <div>
+      {createSection}
+
       <ul className="border-t border-line-soft">
         {artifacts.map((artifact) => {
           const current = artifact.id === detail?.artifact.id;
@@ -128,13 +235,30 @@ export function ArtifactPanel({
         })}
       </ul>
 
+      {onLoadMore === undefined ? null : (
+        <PaginationFooter
+          hasMore={hasMore}
+          loading={loadingMore}
+          error={pagingError}
+          label="Load more artifacts"
+          loadingLabel="Loading more artifacts…"
+          onLoadMore={onLoadMore}
+        />
+      )}
+
       {detail === undefined ? (
         <p className="mt-3 text-xs leading-relaxed text-muted">
           {busy === 'select' ? 'Loading the selected artifact…' : 'Select an artifact to read it.'}
         </p>
       ) : (
         <div className="mt-4">
-          <p className="text-xs font-medium text-ink">{detail.artifact.title}</p>
+          <p
+            ref={detailHeading}
+            tabIndex={-1}
+            className="text-xs font-medium text-ink focus-visible:outline-offset-2"
+          >
+            {detail.artifact.title}
+          </p>
           <p className="u-figures mt-0.5 text-2xs text-subtle">
             version {detail.version.version} · {COUNT.format(detail.version.byteSize)} bytes stored
             · read-only history, append-only saves
@@ -194,6 +318,7 @@ export function ArtifactPanel({
               <ul className="mt-1.5">
                 {versions.map((version) => {
                   const current = version.version === detail.artifact.currentVersion;
+                  const confirming = confirmVersion === version.version;
 
                   return (
                     <li
@@ -205,12 +330,38 @@ export function ArtifactPanel({
                         {formatWhen(version.createdAt)}
                         {current ? ' · current' : ''}
                       </span>
-                      {current ? null : (
+                      {current ? null : confirming ? (
+                        <div className="flex flex-col gap-1">
+                          <p className="text-2xs leading-relaxed text-muted">
+                            Restoring v{version.version} appends a new version. Earlier versions
+                            are never rewritten.
+                          </p>
+                          <div className="flex flex-wrap gap-2">
+                            <Button
+                              size="sm"
+                              loading={busy === 'restore'}
+                              onClick={() => {
+                                setConfirmVersion(undefined);
+                                onRestore(version.version);
+                              }}
+                            >
+                              Restore v{version.version}
+                            </Button>
+                            <Button
+                              variant="secondary"
+                              size="sm"
+                              onClick={() => setConfirmVersion(undefined)}
+                            >
+                              Cancel
+                            </Button>
+                          </div>
+                        </div>
+                      ) : (
                         <Button
                           variant="ghost"
                           size="sm"
                           loading={busy === 'restore'}
-                          onClick={() => onRestore(version.version)}
+                          onClick={() => setConfirmVersion(version.version)}
                         >
                           Restore v{version.version}
                         </Button>
@@ -219,6 +370,17 @@ export function ArtifactPanel({
                   );
                 })}
               </ul>
+            )}
+
+            {onLoadMoreVersions === undefined ? null : (
+              <PaginationFooter
+                hasMore={versionsHasMore}
+                loading={versionsLoadingMore}
+                error={versionsPagingError}
+                label="Load older versions"
+                loadingLabel="Loading older versions…"
+                onLoadMore={onLoadMoreVersions}
+              />
             )}
           </div>
         </div>
