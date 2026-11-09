@@ -1,24 +1,22 @@
 /**
- * The signed-in viewer, read server-side for the account page.
+ * The signed-in account profile, read server-side for the account page.
  *
  * The page needs the account email to render the deletion confirmation and to
- * tell a signed-out visitor from a signed-in one. `GET /auth/me` is the
- * existing identity read on the same API origin; only the session cookie is
- * relayed, and the origin stays on this side of the BFF.
+ * tell a signed-out visitor from a signed-in one. It reads `GET /api/account`
+ * — the lightweight identity projection — instead of reaching the separate
+ * auth service, so the account page has one API dependency and never asks for
+ * export content just to show an email.
  *
- * A 401 is "sign in"; a missing or disabled identity surface is an explicit
+ * Only the session cookie is relayed, and the origin stays on this side of the
+ * BFF. A 401 is "sign in"; a missing or unreachable API surface is an explicit
  * unavailable state, never a made-up account.
  */
 import { readApiConfig } from '../../lib/api/config';
 import { callerCookieHeader } from '../../lib/api/server';
+import type { AccountEnvelopeDto, AccountProfileDto } from '../../lib/api/types';
 
-export interface AccountViewer {
-  readonly userId: string;
-  readonly email: string;
-}
-
-export type AccountViewerResult =
-  | { readonly ok: true; readonly viewer: AccountViewer }
+export type AccountProfileResult =
+  | { readonly ok: true; readonly account: AccountProfileDto }
   | {
       readonly ok: false;
       readonly reason: 'unconfigured' | 'invalid_config' | 'unauthorized' | 'unavailable';
@@ -40,22 +38,22 @@ function sessionCookies(header: string | undefined): string | undefined {
   return pairs.length === 0 ? undefined : pairs.join('; ');
 }
 
-function isViewerBody(value: unknown): value is { user: AccountViewer } {
+function isAccountBody(value: unknown): value is AccountEnvelopeDto {
   if (typeof value !== 'object' || value === null) {
     return false;
   }
 
-  const user = (value as { user?: unknown }).user;
+  const account = (value as { account?: unknown }).account;
 
   return (
-    typeof user === 'object' &&
-    user !== null &&
-    typeof (user as { userId?: unknown }).userId === 'string' &&
-    typeof (user as { email?: unknown }).email === 'string'
+    typeof account === 'object' &&
+    account !== null &&
+    typeof (account as { userId?: unknown }).userId === 'string' &&
+    typeof (account as { email?: unknown }).email === 'string'
   );
 }
 
-export async function fetchAccountViewer(): Promise<AccountViewerResult> {
+export async function fetchAccountProfile(): Promise<AccountProfileResult> {
   const config = readApiConfig();
 
   if (config.kind === 'unset') {
@@ -75,7 +73,7 @@ export async function fetchAccountViewer(): Promise<AccountViewerResult> {
   let response: Response;
 
   try {
-    response = await fetch(`${config.origin}/auth/me`, {
+    response = await fetch(`${config.origin}/api/account`, {
       method: 'GET',
       headers: { accept: 'application/json', cookie },
       cache: 'no-store',
@@ -91,9 +89,9 @@ export async function fetchAccountViewer(): Promise<AccountViewerResult> {
 
   const body: unknown = await response.json().catch(() => undefined);
 
-  if (!response.ok || !isViewerBody(body)) {
+  if (!response.ok || !isAccountBody(body)) {
     return { ok: false, reason: 'unavailable' };
   }
 
-  return { ok: true, viewer: { userId: body.user.userId, email: body.user.email } };
+  return { ok: true, account: body.account };
 }

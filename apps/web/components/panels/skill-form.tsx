@@ -20,6 +20,15 @@ export interface SkillFormValues {
   readonly attachToBot: boolean;
 }
 
+/** The values an edit form is prefilled with; the same shape the list holds. */
+export interface SkillFormInitialValues {
+  readonly name: string;
+  readonly description: string;
+  readonly bodyMarkdown: string;
+}
+
+export type SkillFormMode = 'create' | 'edit';
+
 export interface SkillFormProps {
   readonly onSubmit: (values: SkillFormValues) => void;
   readonly pending?: boolean | undefined;
@@ -27,15 +36,25 @@ export interface SkillFormProps {
   readonly status?: string | undefined;
   /** Present when the panel belongs to a Bot, enabling the attachment choice. */
   readonly botName?: string | undefined;
+  /**
+   * `edit` prefills from `initial`, hides the attachment choice, and submits a
+   * new version rather than creating a record. The caller sends only the fields
+   * that changed.
+   */
+  readonly mode?: SkillFormMode | undefined;
+  readonly initial?: SkillFormInitialValues | undefined;
+  /** Present in edit mode so the reader can close the inline editor. */
+  readonly onCancel?: (() => void) | undefined;
 }
 
 /**
- * Create one owner-scoped skill, optionally attached to the open Bot.
+ * Create or edit one owner-scoped skill, optionally attached to the open Bot.
  *
  * Every field bound is the API's, enforced before the request: name 1–80
  * characters, description at most 500, body at most 64 KiB of UTF-8. The body
  * is Markdown guidance stored as data; this form never treats it as HTML and a
- * skill grants no tool.
+ * skill grants no tool. An edit always appends a version; earlier versions are
+ * never rewritten.
  */
 export function SkillForm({
   onSubmit,
@@ -43,16 +62,28 @@ export function SkillForm({
   error,
   status,
   botName,
+  mode = 'create',
+  initial,
+  onCancel,
 }: Readonly<SkillFormProps>) {
   const baseId = useId();
-  const [name, setName] = useState('');
-  const [description, setDescription] = useState('');
-  const [bodyMarkdown, setBodyMarkdown] = useState('');
-  const [attachToBot, setAttachToBot] = useState(botName !== undefined);
+  const [name, setName] = useState(initial?.name ?? '');
+  const [description, setDescription] = useState(initial?.description ?? '');
+  const [bodyMarkdown, setBodyMarkdown] = useState(initial?.bodyMarkdown ?? '');
+  const [attachToBot, setAttachToBot] = useState(
+    mode === 'create' && botName !== undefined,
+  );
 
   const bodyBytes = utf8Bytes(bodyMarkdown);
   const overCap = bodyBytes > SKILL_BODY_MAX_BYTES;
-  const canSubmit = !pending && name.trim().length > 0 && !overCap;
+  const editing = mode === 'edit';
+  const unchanged =
+    editing &&
+    initial !== undefined &&
+    name.trim() === initial.name.trim() &&
+    description.trim() === initial.description.trim() &&
+    bodyMarkdown === initial.bodyMarkdown;
+  const canSubmit = !pending && name.trim().length > 0 && !overCap && !unchanged;
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -65,13 +96,21 @@ export function SkillForm({
       name: name.trim(),
       description: description.trim(),
       bodyMarkdown,
-      attachToBot: botName === undefined ? false : attachToBot,
+      attachToBot: editing || botName === undefined ? false : attachToBot,
     });
   }
 
   return (
     <form onSubmit={submit} className="flex flex-col gap-3">
-      <p className="text-sm font-medium text-ink">Create a skill</p>
+      <p className="text-sm font-medium text-ink">
+        {editing ? 'Edit skill' : 'Create a skill'}
+      </p>
+      {editing ? (
+        <p className="text-2xs leading-relaxed text-subtle">
+          Saving appends a new version. Earlier versions are preserved, and a skill still grants no
+          tools.
+        </p>
+      ) : null}
 
       <TextField
         id={`${baseId}-skill-name`}
@@ -116,7 +155,7 @@ export function SkillForm({
           {COUNT.format(bodyBytes)} / {COUNT.format(SKILL_BODY_MAX_BYTES)} bytes
         </span>
 
-        {botName === undefined ? null : (
+        {botName === undefined || editing ? null : (
           <label className="inline-flex min-h-11 cursor-pointer items-center gap-2 text-xs text-muted">
             <input
               type="checkbox"
@@ -130,10 +169,21 @@ export function SkillForm({
         )}
       </div>
 
-      <div>
+      <div className="flex flex-wrap items-center gap-2">
         <Button type="submit" size="sm" loading={pending} disabled={!canSubmit}>
-          Create skill
+          {editing ? 'Save new version' : 'Create skill'}
         </Button>
+        {editing && onCancel !== undefined ? (
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            disabled={pending}
+            onClick={onCancel}
+          >
+            Cancel
+          </Button>
+        ) : null}
       </div>
 
       <FormMessage error={error} status={status} />

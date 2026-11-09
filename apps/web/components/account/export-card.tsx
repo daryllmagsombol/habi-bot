@@ -107,7 +107,7 @@ export function AccountExportCard({
         <p id="account-export-note" className="text-xs leading-relaxed text-subtle">
           {mode === 'preview'
             ? 'Preview mode: no API is configured on this server, so there is no account to export.'
-            : 'Saved by your browser as habi-account-export-[timestamp].json. Nothing is emailed.'}
+            : 'Streamed by your browser straight to disk as habi-account-export-[timestamp].json. Nothing is emailed.'}
         </p>
       </div>
 

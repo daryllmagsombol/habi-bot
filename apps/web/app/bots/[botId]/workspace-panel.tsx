@@ -153,6 +153,10 @@ function skillsSectionOf(
       createPending={actions.skillCreatePending}
       createError={actions.skillCreateError}
       createStatus={actions.skillCreateStatus}
+      onUpdate={actions.updateSkillForAccount}
+      updatePendingId={actions.skillUpdatePendingId}
+      updateError={actions.skillUpdateError}
+      updateStatus={actions.skillUpdateStatus}
       hasMore={actions.skillsPaging.hasMore}
       loadingMore={actions.skillsPaging.loading}
       pagingError={actions.skillsPaging.error}
@@ -213,6 +217,10 @@ function artifactsSectionOf(
       createPending={actions.artifactCreatePending}
       createError={actions.artifactCreateError}
       createStatus={actions.artifactCreateStatus}
+      onUpdateMetadata={actions.updateArtifactMetadata}
+      metadataPending={actions.artifactMetadataPending}
+      metadataError={actions.artifactMetadataError}
+      metadataStatus={actions.artifactMetadataStatus}
       canCreate={threadId !== undefined}
       createDisabledNote="Open a thread first: an artifact is bound to its conversation."
       hasMore={actions.artifactsPaging.hasMore}

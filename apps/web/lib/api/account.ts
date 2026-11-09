@@ -1,15 +1,17 @@
 /**
- * Browser calls for the account export and deletion.
+ * Browser calls for the account profile, export and deletion.
  *
- * Both go to the same-origin `/api/account` BFF. The backend origin, the
- * session cookie and the CSRF token never cross into this module; it only knows
- * relative paths and the readable `habi_csrf` value the session layer
- * publishes.
+ * Every request goes to the same-origin `/api/account` BFF. The backend origin,
+ * the session cookie and the CSRF token never cross into this module; it only
+ * knows relative paths and the readable `habi_csrf` value the session layer
+ * publishes. The export itself is a navigation, not a buffered fetch, so the
+ * browser can stream it to disk.
  *
  * Errors reuse the chat surface's closed-code vocabulary (`ChatRequestError`
  * and `chatErrorMessage`), so the page never invents a second error language.
  */
 import { ChatRequestError, readCsrfToken } from './browser';
+import type { AccountProfileDto } from './types';
 
 export interface AccountRemovalCounts {
   readonly attachments: number;
@@ -68,40 +70,22 @@ function readErrorCode(value: unknown): string | undefined {
   return typeof code === 'string' ? code : undefined;
 }
 
-function filenameFrom(disposition: string | null): string | undefined {
-  if (disposition === null) {
-    return undefined;
-  }
-
-  const match = /filename="?([^";]+)"?/i.exec(disposition);
-
-  return match?.[1] === undefined ? undefined : decodeURIComponent(match[1]);
-}
-
-function saveBlob(blob: Blob, filename: string): void {
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-
-  anchor.href = url;
-  anchor.download = filename;
-  anchor.rel = 'noopener';
-  anchor.click();
-
-  // The browser starts the save synchronously; release the object URL after.
-  setTimeout(() => URL.revokeObjectURL(url), 0);
-}
+const ACCOUNT_PATH = '/api/account';
+/** The BFF route that streams the export with its `content-disposition`. */
+export const EXPORT_PATH = '/api/account/export';
 
 /**
- * Reads the export through the BFF so a 401 or 5xx becomes a typed error the
- * page can announce, rather than a navigation to a JSON error document. A
- * plain `<a download>` would be shorter but would silently hand the reader a
- * JSON error file when the session has ended.
+ * `GET /api/account` through the BFF: the lightweight profile read.
+ *
+ * It is cheap, it is the same shape the account page renders, and a 401 is a
+ * typed error rather than a navigation target. The export action reuses it as
+ * a preflight.
  */
-export async function downloadExport(): Promise<{ readonly filename: string }> {
+export async function readAccountProfile(): Promise<AccountProfileDto> {
   let response: Response;
 
   try {
-    response = await fetch('/api/account/export', {
+    response = await fetch(ACCOUNT_PATH, {
       method: 'GET',
       credentials: 'same-origin',
       cache: 'no-store',
@@ -110,18 +94,47 @@ export async function downloadExport(): Promise<{ readonly filename: string }> {
     throw new ChatRequestError('api_unavailable', 0);
   }
 
-  if (!response.ok) {
-    const body: unknown = await response.json().catch(() => undefined);
+  const body: unknown = await response.json().catch(() => undefined);
 
+  if (!response.ok) {
     throw new ChatRequestError(readErrorCode(body) ?? 'request_failed', response.status);
   }
 
-  const filename =
-    filenameFrom(response.headers.get('content-disposition')) ?? 'habi-account-export.json';
+  const account =
+    typeof body === 'object' && body !== null
+      ? (body as { account?: unknown }).account
+      : undefined;
 
-  saveBlob(await response.blob(), filename);
+  if (
+    typeof account !== 'object' ||
+    account === null ||
+    typeof (account as { email?: unknown }).email !== 'string'
+  ) {
+    throw new ChatRequestError('request_failed', response.status);
+  }
 
-  return { filename };
+  return account as AccountProfileDto;
+}
+
+/**
+ * Starts the export through a direct navigation, not a buffered fetch.
+ *
+ * Buffering the whole document as a Blob costs memory proportional to the
+ * account, while the BFF route already relays `content-disposition` and streams
+ * the upstream body to the browser, which writes it to disk.
+ *
+ * A bare `<a download>` was rejected earlier because a 401 or 5xx would
+ * navigate the reader to a raw JSON error document. The honesty fix is the
+ * cheap `GET /api/account` preflight: if the session or API is unavailable it
+ * throws a typed error and the page renders its existing error state; nothing
+ * navigates. Only a successful preflight triggers the download.
+ */
+export async function downloadExport(): Promise<{ readonly started: true }> {
+  await readAccountProfile();
+
+  window.location.replace(EXPORT_PATH);
+
+  return { started: true };
 }
 
 /** Deletes the account. The BFF relays the API's removal counts and disclosure. */

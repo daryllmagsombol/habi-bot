@@ -152,3 +152,26 @@ export function createSkill(
     body: JSON.stringify(input),
   });
 }
+
+/** The partial body for `PATCH /api/skills/:skillId`; omitted fields keep their value. */
+export interface SkillUpdateInput {
+  readonly name?: string;
+  readonly description?: string;
+  readonly bodyMarkdown?: string;
+}
+
+/** `PATCH /api/skills/:skillId` → 200 with the skill at its new version. */
+export function updateSkill(
+  skillId: string,
+  input: SkillUpdateInput,
+  csrfToken: string | undefined,
+): Promise<{ skill: SkillDto }> {
+  return requestJson<{ skill: SkillDto }>(
+    `/api/skills/${encodeURIComponent(skillId)}`,
+    {
+      method: 'PATCH',
+      headers: writeHeaders(csrfToken),
+      body: JSON.stringify(input),
+    },
+  );
+}

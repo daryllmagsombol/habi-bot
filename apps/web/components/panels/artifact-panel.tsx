@@ -5,7 +5,10 @@ import { Badge, Button, TextArea } from '../ui';
 import { formatWhen } from '../../lib/api/format';
 import { ARTIFACT_CONTENT_MAX_BYTES, utf8Bytes } from '../../lib/api/limits';
 import { ArtifactForm } from './artifact-form';
-import type { ArtifactFormValues } from './artifact-form';
+import type {
+  ArtifactFormValues,
+  ArtifactMetadataFormValues,
+} from './artifact-form';
 import { PaginationFooter } from './pagination-footer';
 import type { ArtifactDetailView, ArtifactSummaryView, ArtifactVersionView } from './types';
 
@@ -30,6 +33,16 @@ export interface ArtifactPanelProps {
   readonly createStatus?: string | undefined;
   readonly canCreate?: boolean | undefined;
   readonly createDisabledNote?: string | undefined;
+  /**
+   * Present when the selected artifact's metadata may be edited. The callback
+   * receives only `{title, kind, status}`; the content path below is separate.
+   */
+  readonly onUpdateMetadata?:
+    | ((artifactId: string, values: ArtifactMetadataFormValues) => void)
+    | undefined;
+  readonly metadataPending?: boolean | undefined;
+  readonly metadataError?: string | undefined;
+  readonly metadataStatus?: string | undefined;
   /** Cursor paging for the artifact metadata list. */
   readonly hasMore?: boolean | undefined;
   readonly loadingMore?: boolean | undefined;
@@ -59,6 +72,10 @@ const CAP_HINT = `Artifact content is capped at 100 KB (${COUNT.format(
  * Restore is a confirmation, not a one-click action: it appends a new version
  * and never rewrites history. Both paging controls append the next cursor page
  * to the list above them; neither changes the current selection.
+ *
+ * Metadata and content are two distinct paths. The metadata editor sends only
+ * `{title, kind, status}`; the API preserves the stored body and appends a
+ * version. The content editor below sends the body and keeps history too.
  */
 export function ArtifactPanel({
   artifacts,
@@ -77,6 +94,10 @@ export function ArtifactPanel({
   createStatus,
   canCreate = true,
   createDisabledNote,
+  onUpdateMetadata,
+  metadataPending = false,
+  metadataError,
+  metadataStatus,
   hasMore = false,
   loadingMore = false,
   pagingError,
@@ -91,6 +112,7 @@ export function ArtifactPanel({
     { readonly version: number; readonly value: string } | undefined
   >(undefined);
   const [creating, setCreating] = useState(false);
+  const [metadataEditorFor, setMetadataEditorFor] = useState<string | undefined>(undefined);
   const [confirmVersion, setConfirmVersion] = useState<number | undefined>(undefined);
   const detailHeading = useRef<HTMLParagraphElement>(null);
   const wasBusy = useRef(false);
@@ -101,7 +123,10 @@ export function ArtifactPanel({
       ? draftState.value
       : (detail?.content ?? '');
 
-  const busyNow = createPending || busy !== undefined;
+  const busyNow = createPending || metadataPending || busy !== undefined;
+  const selectedArtifactId = detail?.artifact.id;
+  const editingMetadata =
+    selectedArtifactId !== undefined && metadataEditorFor === selectedArtifactId;
   const detailKey =
     detail === undefined ? undefined : `${detail.artifact.id}:${detail.version.version}`;
 
@@ -263,6 +288,57 @@ export function ArtifactPanel({
             version {detail.version.version} · {COUNT.format(detail.version.byteSize)} bytes stored
             · read-only history, append-only saves
           </p>
+
+          {onUpdateMetadata === undefined ? null : (
+            <div className="mt-3 rounded-sm border border-line-soft p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-xs font-medium text-ink">Metadata</p>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  aria-expanded={editingMetadata}
+                  onClick={() =>
+                    setMetadataEditorFor((current) =>
+                      current === detail.artifact.id ? undefined : detail.artifact.id,
+                    )
+                  }
+                >
+                  {editingMetadata ? 'Close metadata editor' : 'Edit metadata'}
+                </Button>
+              </div>
+              <p className="mt-1 text-2xs leading-relaxed text-subtle">
+                Title, kind and status are metadata. Saving them appends a version and leaves the
+                stored content untouched; the content editor below is the separate path.
+              </p>
+
+              {editingMetadata ? (
+                <div className="mt-3">
+                  <ArtifactForm
+                    key={`${detail.artifact.id}:${detail.artifact.currentVersion}`}
+                    mode="metadata"
+                    initialValues={{
+                      title: detail.artifact.title,
+                      kind: detail.artifact.kind,
+                      content: detail.content,
+                      status: detail.artifact.status === 'final' ? 'final' : 'draft',
+                    }}
+                    onSubmit={(values) =>
+                      onUpdateMetadata(detail.artifact.id, {
+                        title: values.title,
+                        kind: values.kind,
+                        status: values.status ?? 'draft',
+                      })
+                    }
+                    pending={metadataPending}
+                    error={metadataError}
+                    status={metadataStatus}
+                    enabled
+                  />
+                </div>
+              ) : null}
+            </div>
+          )}
 
           <TextArea
             id={`${id}-artifact`}
