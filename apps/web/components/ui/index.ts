@@ -58,6 +58,9 @@ export type { SectionHeaderProps } from './section-header';
 export { Segmented } from './segmented';
 export type { SegmentedItem, SegmentedProps } from './segmented';
 
+export { SelectField } from './select-field';
+export type { SelectFieldProps, SelectOption } from './select-field';
+
 export { Sheet } from './sheet';
 export type { SheetProps } from './sheet';
 

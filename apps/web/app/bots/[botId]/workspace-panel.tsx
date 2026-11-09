@@ -7,6 +7,7 @@ import {
   ContextPanel,
   DocumentPanel,
   MemoryComposer,
+  PaginationFooter,
   PanelCard,
   SearchPanel,
   SkillsPanel,
@@ -131,6 +132,7 @@ function MemoryComposerSection({
 function skillsSectionOf(
   live: boolean,
   botId: string,
+  botName: string,
   actions: WorkspaceActions,
 ): ReactNode {
   if (!live) {
@@ -141,11 +143,20 @@ function skillsSectionOf(
     <SkillsPanel
       skills={actions.skills}
       botId={botId}
+      botName={botName}
       state={actions.skillsState === 'idle' ? 'loading' : actions.skillsState}
       error={actions.skillsError}
       onAttach={actions.attachSkillToBot}
       onDetach={actions.detachSkillFromBot}
       pendingId={actions.skillPendingId}
+      onCreate={actions.createSkillForAccount}
+      createPending={actions.skillCreatePending}
+      createError={actions.skillCreateError}
+      createStatus={actions.skillCreateStatus}
+      hasMore={actions.skillsPaging.hasMore}
+      loadingMore={actions.skillsPaging.loading}
+      pagingError={actions.skillsPaging.error}
+      onLoadMore={actions.skillsPaging.loadMore}
     />
   );
 }
@@ -168,12 +179,20 @@ function searchSectionOf(
       error={actions.searchError}
       lastQuery={actions.searchQuery}
       onSearch={actions.runSearch}
+      hasMore={actions.searchPaging.hasMore}
+      loadingMore={actions.searchPaging.loading}
+      pagingError={actions.searchPaging.error}
+      onLoadMore={actions.searchPaging.loadMore}
     />
   );
 }
 
 /** The artifact list and editor, absent rather than empty when not wired. */
-function artifactsSectionOf(live: boolean, actions: WorkspaceActions): ReactNode {
+function artifactsSectionOf(
+  live: boolean,
+  threadId: string | undefined,
+  actions: WorkspaceActions,
+): ReactNode {
   if (!live) {
     return undefined;
   }
@@ -190,6 +209,20 @@ function artifactsSectionOf(live: boolean, actions: WorkspaceActions): ReactNode
       onSelect={actions.selectArtifact}
       onSave={actions.saveArtifact}
       onRestore={actions.restoreArtifact}
+      onCreate={actions.createArtifactForThread}
+      createPending={actions.artifactCreatePending}
+      createError={actions.artifactCreateError}
+      createStatus={actions.artifactCreateStatus}
+      canCreate={threadId !== undefined}
+      createDisabledNote="Open a thread first: an artifact is bound to its conversation."
+      hasMore={actions.artifactsPaging.hasMore}
+      loadingMore={actions.artifactsPaging.loading}
+      pagingError={actions.artifactsPaging.error}
+      onLoadMore={actions.artifactsPaging.loadMore}
+      versionsHasMore={actions.artifactVersionsPaging.hasMore}
+      versionsLoadingMore={actions.artifactVersionsPaging.loading}
+      versionsPagingError={actions.artifactVersionsPaging.error}
+      onLoadMoreVersions={actions.artifactVersionsPaging.loadMore}
     />
   );
 }
@@ -206,7 +239,7 @@ interface ContextBodyProps {
 function ContextBody({ thread, live, liveRun, actions, data }: Readonly<ContextBodyProps>) {
   return (
     <ContextPanel
-      memories={data.memories}
+      memories={live ? actions.memories : data.memories}
       memoryState={data.memoryState}
       run={panelRunOf(thread, live, liveRun)}
       allowance={data.allowance}
@@ -216,9 +249,22 @@ function ContextBody({ thread, live, liveRun, actions, data }: Readonly<ContextB
       memoryComposer={
         <MemoryComposerSection threadId={thread.id} live={live} actions={actions} />
       }
-      skillsSection={skillsSectionOf(live, data.bot.id, actions)}
+      memoryPaging={
+        live ? (
+          <PaginationFooter
+            className="mt-2"
+            hasMore={actions.memoryPaging.hasMore}
+            loading={actions.memoryPaging.loading}
+            error={actions.memoryPaging.error}
+            label="Load more memories"
+            loadingLabel="Loading more memories…"
+            onLoadMore={actions.memoryPaging.loadMore}
+          />
+        ) : undefined
+      }
+      skillsSection={skillsSectionOf(live, data.bot.id, data.bot.name, actions)}
       searchSection={searchSectionOf(live, data.bot.id, actions)}
-      artifactsSection={artifactsSectionOf(live, actions)}
+      artifactsSection={artifactsSectionOf(live, thread.id, actions)}
     />
   );
 }

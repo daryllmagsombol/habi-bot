@@ -5,6 +5,7 @@ import { useId, useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
 import { Button, FormMessage, TextField } from '../ui';
 import { threadHref } from '../../lib/links';
+import { PaginationFooter } from './pagination-footer';
 import type { SearchResultView } from './types';
 
 export interface SearchPanelProps {
@@ -14,6 +15,11 @@ export interface SearchPanelProps {
   readonly error?: string | undefined;
   readonly onSearch: (query: string) => void;
   readonly lastQuery?: string | undefined;
+  /** Cursor paging over the current query's results. */
+  readonly hasMore?: boolean | undefined;
+  readonly loadingMore?: boolean | undefined;
+  readonly pagingError?: string | undefined;
+  readonly onLoadMore?: (() => void) | undefined;
 }
 
 function Snippet({ value }: Readonly<{ value: string }>) {
@@ -55,6 +61,10 @@ export function SearchPanel({
   error,
   onSearch,
   lastQuery,
+  hasMore = false,
+  loadingMore = false,
+  pagingError,
+  onLoadMore,
 }: Readonly<SearchPanelProps>) {
   const id = useId();
   const [query, setQuery] = useState(lastQuery ?? '');
@@ -126,6 +136,17 @@ export function SearchPanel({
             </li>
           ))}
         </ul>
+      )}
+
+      {onLoadMore === undefined ? null : (
+        <PaginationFooter
+          hasMore={hasMore}
+          loading={loadingMore}
+          error={pagingError}
+          label="Load more results"
+          loadingLabel="Loading more results…"
+          onLoadMore={onLoadMore}
+        />
       )}
     </div>
   );
