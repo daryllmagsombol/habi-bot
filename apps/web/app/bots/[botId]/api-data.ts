@@ -373,6 +373,7 @@ export function buildLiveWorkspace(input: LiveWorkspaceInput): WorkspaceData {
     ),
     memories: memoryMapping.gates,
     memoryItems: memoryMapping.items,
+    memoryNextCursor: memories?.nextCursor ?? null,
     memoryState: memories === undefined ? 'unavailable' : 'ready',
     approvedMemories: memoryMapping.approved,
     counts: { bots: bots.bots.length, threads: threadCount },

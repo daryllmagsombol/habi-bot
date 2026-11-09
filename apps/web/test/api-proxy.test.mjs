@@ -584,6 +584,17 @@ function createStub() {
           return;
         }
 
+        const payload = JSON.parse(body);
+
+        // The downstream transport owns this bound; the BFF must relay its 413.
+        if (
+          typeof payload.content === 'string' &&
+          Buffer.byteLength(payload.content, 'utf8') > 100 * 1024
+        ) {
+          json(response, 413, { error: { code: 'invalid_input' } });
+          return;
+        }
+
         json(response, 201, { artifact: ARTIFACT_DETAIL });
         return;
       }
@@ -852,6 +863,73 @@ test('the built chat surface forwards to the API and never renders sample data o
     assert.equal(createdThread.response.status, 201);
     assert.equal(createdThread.body.thread.id, THREAD_ID);
 
+    const createdArtifact = await write('POST', '/api/artifacts', {
+      kind: 'markdown',
+      title: 'Cursor note',
+      content: '# Cursor note\n\nThe cursor is opaque.',
+      conversationId: THREAD_ID,
+    });
+    assert.equal(createdArtifact.response.status, 201);
+    const artifactCreateForward = stub.requests.find(
+      (entry) => entry.method === 'POST' && entry.url === '/api/artifacts',
+    );
+    assert.ok(artifactCreateForward, 'the proxy did not forward artifact creation');
+    assert.equal(artifactCreateForward.headers['x-csrf-token'], CSRF);
+    assert.deepEqual(JSON.parse(artifactCreateForward.body), {
+      kind: 'markdown',
+      title: 'Cursor note',
+      content: '# Cursor note\n\nThe cursor is opaque.',
+      conversationId: THREAD_ID,
+    });
+
+    const oversizedArtifact = await write('POST', '/api/artifacts', {
+      kind: 'text',
+      title: 'Too big',
+      content: 'a'.repeat(101 * 1024),
+      conversationId: THREAD_ID,
+    });
+    assert.equal(oversizedArtifact.response.status, 413);
+    assert.deepEqual(oversizedArtifact.body, { error: { code: 'invalid_input' } });
+
+    const artifactPostsBeforeHuge = stub.requests.filter(
+      (entry) => entry.method === 'POST' && entry.url === '/api/artifacts',
+    ).length;
+    const hugeArtifact = await write('POST', '/api/artifacts', {
+      kind: 'text',
+      title: 'Over the BFF ceiling',
+      content: 'a'.repeat(300 * 1024),
+      conversationId: THREAD_ID,
+    });
+    assert.equal(hugeArtifact.response.status, 413);
+    assert.deepEqual(hugeArtifact.body, { error: { code: 'invalid_input' } });
+    assert.equal(
+      stub.requests.filter(
+        (entry) => entry.method === 'POST' && entry.url === '/api/artifacts',
+      ).length,
+      artifactPostsBeforeHuge,
+      'the BFF pre-empted an oversized body instead of forwarding it',
+    );
+
+    const createdSkill = await write('POST', '/api/skills', {
+      name: 'Cursor discipline',
+      description: 'Treat cursors as opaque.',
+      bodyMarkdown: 'Never parse a cursor.',
+      botId: BOT_ID,
+    });
+    assert.equal(createdSkill.response.status, 201);
+    assert.equal(createdSkill.body.skill.id, SKILL_ID);
+    const skillCreateForward = stub.requests.find(
+      (entry) => entry.method === 'POST' && entry.url === '/api/skills',
+    );
+    assert.ok(skillCreateForward, 'the proxy did not forward skill creation');
+    assert.equal(skillCreateForward.headers['x-csrf-token'], CSRF);
+    assert.deepEqual(JSON.parse(skillCreateForward.body), {
+      name: 'Cursor discipline',
+      description: 'Treat cursors as opaque.',
+      bodyMarkdown: 'Never parse a cursor.',
+      botId: BOT_ID,
+    });
+
     const renamedThread = await write('PATCH', `/api/threads/${THREAD_ID}`, { title: 'Renamed' });
     assert.equal(renamedThread.response.status, 200);
     assert.ok(
@@ -908,6 +986,20 @@ test('the built chat surface forwards to the API and never renders sample data o
     assert.equal(artifacts.status, 200);
     assert.equal((await artifacts.json()).artifacts[0].title, 'Ordering note');
 
+    const artifactPage = await fetch(
+      `${app.origin}/api/artifacts?conversationId=${THREAD_ID}&limit=20&cursor=artifact-cursor`,
+      { headers: { cookie }, signal: AbortSignal.timeout(5000) },
+    );
+    assert.equal(artifactPage.status, 200);
+    assert.ok(
+      stub.requests.find(
+        (entry) =>
+          entry.method === 'GET' &&
+          entry.url === `/api/artifacts?conversationId=${THREAD_ID}&limit=20&cursor=artifact-cursor`,
+      ),
+      'the proxy did not forward the artifact cursor',
+    );
+
     const artifact = await fetch(`${app.origin}/api/artifacts/${ARTIFACT_ID}?version=1`, {
       headers: { cookie },
       signal: AbortSignal.timeout(5000),
@@ -930,6 +1022,20 @@ test('the built chat surface forwards to the API and never renders sample data o
     assert.equal(versions.status, 200);
     assert.equal((await versions.json()).versions[0].version, 1);
 
+    const versionPage = await fetch(
+      `${app.origin}/api/artifacts/${ARTIFACT_ID}/versions?limit=20&cursor=version-cursor`,
+      { headers: { cookie }, signal: AbortSignal.timeout(5000) },
+    );
+    assert.equal(versionPage.status, 200);
+    assert.ok(
+      stub.requests.find(
+        (entry) =>
+          entry.method === 'GET' &&
+          entry.url === `/api/artifacts/${ARTIFACT_ID}/versions?limit=20&cursor=version-cursor`,
+      ),
+      'the proxy did not forward the artifact version cursor',
+    );
+
     const restored = await write('POST', `/api/artifacts/${ARTIFACT_ID}/restore`, { version: 1 });
     assert.equal(restored.response.status, 200);
     assert.equal(restored.body.artifact.version.version, 1);
@@ -940,6 +1046,20 @@ test('the built chat surface forwards to the API and never renders sample data o
     });
     assert.equal(memories.status, 200);
     assert.equal((await memories.json()).memories[0].content, MEMORY.content);
+
+    const memoryPage = await fetch(
+      `${app.origin}/api/bots/${BOT_ID}/memories?limit=20&cursor=memory-cursor`,
+      { headers: { cookie }, signal: AbortSignal.timeout(5000) },
+    );
+    assert.equal(memoryPage.status, 200);
+    assert.ok(
+      stub.requests.find(
+        (entry) =>
+          entry.method === 'GET' &&
+          entry.url === `/api/bots/${BOT_ID}/memories?limit=20&cursor=memory-cursor`,
+      ),
+      'the proxy did not forward the memory cursor',
+    );
 
     const proposed = await write('POST', `/api/bots/${BOT_ID}/memories`, {
       text: 'A new memory',
@@ -970,6 +1090,19 @@ test('the built chat surface forwards to the API and never renders sample data o
     assert.equal(skills.status, 200);
     assert.equal((await skills.json()).skills[0].name, 'Plain verbs');
 
+    const skillPage = await fetch(
+      `${app.origin}/api/skills?limit=20&cursor=skill-cursor`,
+      { headers: { cookie }, signal: AbortSignal.timeout(5000) },
+    );
+    assert.equal(skillPage.status, 200);
+    assert.ok(
+      stub.requests.find(
+        (entry) =>
+          entry.method === 'GET' && entry.url === '/api/skills?limit=20&cursor=skill-cursor',
+      ),
+      'the proxy did not forward the skill cursor',
+    );
+
     const skill = await fetch(`${app.origin}/api/skills/${SKILL_ID}`, {
       headers: { cookie },
       signal: AbortSignal.timeout(5000),
@@ -989,6 +1122,20 @@ test('the built chat surface forwards to the API and never renders sample data o
     });
     assert.equal(search.status, 200);
     assert.equal((await search.json()).results[0].messageId, 'message-1');
+
+    const searchPage = await fetch(
+      `${app.origin}/api/search?q=live&botId=${BOT_ID}&limit=20&cursor=search-cursor`,
+      { headers: { cookie }, signal: AbortSignal.timeout(5000) },
+    );
+    assert.equal(searchPage.status, 200);
+    assert.ok(
+      stub.requests.find(
+        (entry) =>
+          entry.method === 'GET' &&
+          entry.url === `/api/search?q=live&botId=${BOT_ID}&limit=20&cursor=search-cursor`,
+      ),
+      'the proxy did not forward the search cursor',
+    );
 
     const unauthenticatedArtifacts = await fetch(`${app.origin}/api/artifacts`, {
       signal: AbortSignal.timeout(5000),

@@ -60,10 +60,17 @@ export interface DocumentView {
   readonly blocks: readonly DocumentBlock[];
 }
 
+/** API bounds for `POST /api/skills`; the form enforces them before sending. */
+export const SKILL_NAME_MAX_LENGTH = 80;
+export const SKILL_DESCRIPTION_MAX_LENGTH = 500;
+export const SKILL_BODY_MAX_BYTES = 64 * 1024;
+
 export interface SkillView {
   readonly id: string;
   readonly name: string;
   readonly description: string;
+  /** Untrusted Markdown guidance. Rendered as text, never as HTML. */
+  readonly bodyMarkdown: string;
   readonly status: 'draft' | 'active' | 'archived' | 'deleted';
   readonly version: number;
   /** Null means owner-level; otherwise the Bot this skill is attached to. */
