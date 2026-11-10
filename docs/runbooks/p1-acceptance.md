@@ -182,6 +182,16 @@ browser; browser/mobile rendering remains a web-lane check.
    session and `200` with one, `GET /api/account` returned the six identity
    fields, and a write through the web BFF succeeded while the same write
    direct to the API with a mismatched `Origin` was refused `403 csrf_invalid`.
+   `compose.production.yaml` has been booted locally too, and its fail-closed
+   behaviour verified in all three states: with the P1 flags at their defaults
+   the stack is healthy and `GET /api/bots` answers **404** — the surface does
+   not exist; with the flags enabled against an unmigrated database the api
+   readiness probe goes **unhealthy**, because the probe asserts the migrated
+   schema and refuses a P1 surface without it; with the flags enabled and
+   `migrate` run, the surface answers **401**. Note that `migrate` is
+   profile-gated, so a production start must run `--profile tools` migrate
+   before the api can become healthy with P1 on.
+
    What remains owner-held is a **deployed** run: a host, a registry, an
    immutable `HABI_IMAGE_TAG`, and the production flag decisions. A local boot
    is evidence the stack is coherent, not that it survives a real deployment.
