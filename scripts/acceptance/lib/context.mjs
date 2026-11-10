@@ -159,8 +159,12 @@ export async function createContext({ outDir, keep = false } = {}) {
 
     /**
      * Boots the real Nest app in-process with only the P1 chat flag. The auth
-     * surface is exercised in a separate child process because each module owns
-     * its own in-memory SessionService and AppModule decides flags at import.
+     * surface is exercised in a separate child process because AppModule
+     * decides its flags at import time, so a different flag set needs a
+     * different process. Sessions are shared and durable: SessionCoreModule
+     * owns one SessionService, and with DATABASE_URL set it is backed by the
+     * postgres store, which is what lets the auth scenario prove restart
+     * survival.
      */
     async ensureP1() {
       if (this.p1 !== null) {
