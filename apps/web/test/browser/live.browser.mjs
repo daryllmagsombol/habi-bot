@@ -35,12 +35,22 @@
  *                UI says they do; a memory approval carries both gates and the
  *                thread, and the row shows the server's answer even when it
  *                contradicts the switch; search posts the query and renders the
- *                hit; one cursor page appends behind its footer and the footer
- *                goes when `nextCursor` is null
+ *                hit; every cursor footer (artifacts, versions, skills, memories,
+ *                search) appends one page behind its footer and the footer goes
+ *                when `nextCursor` is null
+ *   writes       a create posts the form body plus the CSRF token and the record
+ *                only appears after the answer; an artifact past the 100 KB cap
+ *                is refused before any request and the bound is stated; a skill
+ *                attach carries `{botId}`, detach carries none, and both badges
+ *                follow the server; a memory proposal carries `{text,
+ *                threadId}`; a Bot and both thread-create affordances post and
+ *                open what the server returned
  *   streaming    a sent message renders the streamed reply the stub wrote, a
- *                dropped stream reconnects from its last `id:`, and a stream
- *                that never resumes exhausts the documented bound of five
- *                connections into the explicit Retry state with its text kept
+ *                dropped stream reconnects from its last `id:`, a stream that
+ *                never resumes exhausts the documented bound of five
+ *                connections into the explicit Retry state with its text kept,
+ *                and Stop run posts one cancel whose label is the state the
+ *                server answered (never a local "stopped")
  *
  * Run `pnpm --filter @habi/web build` first. No screenshot is written or kept.
  */
@@ -68,6 +78,7 @@ import {
   CSRF,
   EXPORT_FILENAME,
   MEMORY_ID,
+  NEW_THREAD_ID,
   RUN_ID,
   SESSION,
   SKILL_ID,
@@ -243,7 +254,13 @@ async function startStub() {
   return {
     stub,
     origin: `http://127.0.0.1:${address.port}`,
-    stop: () => new Promise((resolve) => stub.server.close(resolve)),
+    stop: () =>
+      new Promise((resolve) => {
+        // A held event stream (a cancelled run) would otherwise keep `close`
+        // waiting for its socket to drain.
+        stub.server.closeAllConnections();
+        stub.server.close(resolve);
+      }),
   };
 }
 
@@ -339,6 +356,11 @@ function readPanelScroll(page) {
 
     return { top: scroller.scrollTop, height: scroller.scrollHeight };
   });
+}
+
+/** The Context panel's artifact section. */
+function artifactsSection(page) {
+  return page.locator('section[aria-labelledby="context-artifacts"]');
 }
 
 function assertNoSampleCopy(text, label) {
@@ -1065,9 +1087,6 @@ describe(
     });
 
     describe('context interactions', () => {
-      const artifactsSection = (page) =>
-        page.locator('section[aria-labelledby="context-artifacts"]');
-
       test('a content edit saves one new version and names it', async () => {
         stub.setMode('ok');
         stub.clearRequests();
@@ -1424,6 +1443,842 @@ describe(
       });
     });
 
+    describe('artifact writing', () => {
+      test('creating an artifact posts the body and the row follows the answer', async () => {
+        stub.setMode('ok');
+        stub.clearRequests();
+        // Held so the in-flight state is asserted instead of raced.
+        stub.setDelay(800);
+
+        const context = await openContext(browser, {
+          origin: server.origin,
+          width: 1440,
+          height: 1000,
+          theme: 'light',
+          session: SESSION,
+          csrf: true,
+        });
+        const page = await context.newPage();
+
+        try {
+          await gotoLive(page, server.origin, `${WORKSPACE}&panel=context`, 'Ordering note');
+
+          const artifacts = artifactsSection(page);
+          await artifacts.getByRole('button', { name: 'New artifact' }).click();
+
+          const form = artifacts.locator('form').filter({ hasText: 'Create an artifact' });
+          await form.waitFor({ state: 'visible' });
+
+          const title = 'Created from the browser';
+          const content = 'A new body, written in the browser.';
+
+          await form.getByLabel('Title', { exact: true }).fill(title);
+          await form.getByLabel('Kind', { exact: true }).selectOption('text');
+          await form.getByLabel('Content', { exact: true }).fill(content);
+
+          const submit = form.getByRole('button', { name: 'Create artifact' });
+          assert.equal(await submit.isDisabled(), false, 'a complete create form was not savable');
+
+          await submit.click();
+          await form
+            .locator('button[type="submit"][aria-busy="true"]')
+            .waitFor({ state: 'attached', timeout: 5_000 });
+
+          // While the write is in flight the list cannot carry the record.
+          assert.equal(
+            await artifacts.getByRole('button', { name: title }).count(),
+            0,
+            'the new artifact was listed before the server answered',
+          );
+
+          await page
+            .getByText(`Created “${title}” as version 1.`, { exact: false })
+            .first()
+            .waitFor({ state: 'visible', timeout: 15_000 });
+
+          await artifacts.getByRole('button', { name: title }).waitFor({ state: 'visible' });
+          assert.equal(
+            await artifacts
+              .locator('button[aria-current="true"]')
+              .filter({ hasText: title })
+              .count(),
+            1,
+            'the created artifact was not the open record',
+          );
+          assert.equal(
+            await artifacts.getByLabel('Artifact content').inputValue(),
+            content,
+            'the editor did not show the body the server stored',
+          );
+
+          const posts = stub.requests.filter(
+            (entry) => entry.method === 'POST' && entry.url === '/api/artifacts',
+          );
+          assert.equal(posts.length, 1, 'the create did not send exactly one POST');
+          assert.deepEqual(
+            JSON.parse(posts[0].body),
+            { kind: 'text', title, content, conversationId: THREAD_ID },
+            'the create did not carry the form and the open conversation',
+          );
+          assert.equal(posts[0].headers['x-csrf-token'], CSRF);
+        } finally {
+          stub.setDelay(0);
+          await page.close();
+          await context.close();
+        }
+      });
+
+      test('an over-cap body is refused before any request, and the bound is stated', async () => {
+        stub.setMode('ok');
+        stub.clearRequests();
+
+        const context = await openContext(browser, {
+          origin: server.origin,
+          width: 1440,
+          height: 1000,
+          theme: 'light',
+          session: SESSION,
+          csrf: true,
+        });
+        const page = await context.newPage();
+
+        try {
+          await gotoLive(page, server.origin, `${WORKSPACE}&panel=context`, 'Ordering note');
+
+          const artifacts = artifactsSection(page);
+          await artifacts.getByRole('button', { name: 'New artifact' }).click();
+
+          const form = artifacts.locator('form').filter({ hasText: 'Create an artifact' });
+          await form.waitFor({ state: 'visible' });
+
+          await form.getByLabel('Title', { exact: true }).fill('Too much body');
+
+          const overCap = 100 * 1024 + 1;
+          const content = form.getByLabel('Content', { exact: true });
+          await content.fill('x'.repeat(overCap));
+
+          await form
+            .getByText(
+              'This body is 102,401 bytes. Reduce it below the 100 KB transport cap.',
+              { exact: true },
+            )
+            .waitFor({ state: 'visible' });
+          assert.ok(
+            (await form.innerText()).includes(
+              'Content is capped at 102,400 bytes (100 KB) per HTTP request.',
+            ),
+            'the form did not state the transport bound',
+          );
+          assert.ok(
+            (await form.innerText()).includes('102,401 / 102,400 bytes'),
+            'the byte counter did not show the over-cap size',
+          );
+
+          const submit = form.getByRole('button', { name: 'Create artifact' });
+          assert.equal(await submit.isDisabled(), true, 'an over-cap body was offered as savable');
+
+          // The submit handler refuses too, not only the disabled attribute.
+          await form.evaluate((element) => element.requestSubmit());
+          await delay(400);
+          assert.equal(
+            stub.requests.filter(
+              (entry) => entry.method === 'POST' && entry.url === '/api/artifacts',
+            ).length,
+            0,
+            'an over-cap body was sent anyway',
+          );
+
+          // Back under the bound, the editor is usable again.
+          await content.fill('Small enough.');
+          assert.equal(
+            await submit.isDisabled(),
+            false,
+            'a body under the cap did not enable the create',
+          );
+        } finally {
+          await page.close();
+          await context.close();
+        }
+      });
+
+      test('the API 413 relay is shown and no record is invented', async () => {
+        stub.setMode('artifact-413');
+        stub.clearRequests();
+
+        const context = await openContext(browser, {
+          origin: server.origin,
+          width: 1440,
+          height: 1000,
+          theme: 'light',
+          session: SESSION,
+          csrf: true,
+        });
+        const page = await context.newPage();
+
+        try {
+          await gotoLive(page, server.origin, `${WORKSPACE}&panel=context`, 'Ordering note');
+
+          const artifacts = artifactsSection(page);
+          await artifacts.getByRole('button', { name: 'New artifact' }).click();
+
+          const form = artifacts.locator('form').filter({ hasText: 'Create an artifact' });
+          await form.getByLabel('Title', { exact: true }).fill('Refused by the API');
+          await form
+            .getByLabel('Content', { exact: true })
+            .fill('A body the transport refused.');
+          await form.getByRole('button', { name: 'Create artifact' }).click();
+
+          await page
+            .getByText('The request could not be sent as written.', { exact: true })
+            .first()
+            .waitFor({ state: 'visible', timeout: 15_000 });
+
+          const posts = stub.requests.filter(
+            (entry) => entry.method === 'POST' && entry.url === '/api/artifacts',
+          );
+          assert.equal(posts.length, 1, 'the refused create was not sent exactly once');
+          assert.equal(posts[0].headers['x-csrf-token'], CSRF);
+          assert.equal(
+            await artifacts.getByRole('button', { name: 'Refused by the API' }).count(),
+            0,
+            'a refused create was still listed',
+          );
+          assert.equal(
+            await artifacts.getByRole('button', { name: 'Ordering note' }).count(),
+            1,
+            'the refused create disturbed the record already open',
+          );
+        } finally {
+          stub.setMode('ok');
+          await page.close();
+          await context.close();
+        }
+      });
+    });
+
+    describe('skill and memory writing', () => {
+      test('attaching and detaching a skill posts the Bot and follows the server', async () => {
+        stub.setMode('ok');
+        stub.clearRequests();
+        stub.setDelay(500);
+
+        const context = await openContext(browser, {
+          origin: server.origin,
+          width: 1440,
+          height: 1000,
+          theme: 'light',
+          session: SESSION,
+          csrf: true,
+        });
+        const page = await context.newPage();
+
+        try {
+          await gotoLive(page, server.origin, `${WORKSPACE}&panel=context`, 'Plain verbs');
+
+          const skills = page.locator('section[aria-labelledby="context-skills"]');
+          await skills.getByText('Library', { exact: true }).waitFor({ state: 'visible' });
+
+          const attach = skills.getByRole('button', { name: 'Attach to this bot' });
+          await attach.click();
+          await skills
+            .locator('button[aria-busy="true"]')
+            .waitFor({ state: 'attached', timeout: 5_000 });
+
+          // Held by the stub: the badge cannot move before the write answers.
+          assert.equal(
+            await skills.getByText('Attached', { exact: true }).count(),
+            0,
+            'the skill was marked attached before the server answered',
+          );
+
+          await skills.getByText('Attached', { exact: true }).waitFor({ state: 'visible' });
+          await skills.getByRole('button', { name: 'Detach', exact: true }).waitFor();
+
+          const attaches = stub.requests.filter(
+            (entry) => entry.method === 'POST' && entry.url === `/api/skills/${SKILL_ID}/attach`,
+          );
+          assert.equal(attaches.length, 1, 'the attach did not send exactly one POST');
+          assert.deepEqual(
+            JSON.parse(attaches[0].body),
+            { botId: BOT_ID },
+            'the attach did not name the Bot',
+          );
+          assert.equal(attaches[0].headers['x-csrf-token'], CSRF);
+
+          await skills.getByRole('button', { name: 'Detach', exact: true }).click();
+          await skills.getByText('Library', { exact: true }).waitFor({ state: 'visible' });
+          await skills.getByRole('button', { name: 'Attach to this bot' }).waitFor();
+
+          const detaches = stub.requests.filter(
+            (entry) => entry.method === 'POST' && entry.url === `/api/skills/${SKILL_ID}/detach`,
+          );
+          assert.equal(detaches.length, 1, 'the detach did not send exactly one POST');
+          assert.equal(detaches[0].body, '', 'the detach carried a body it did not need');
+          assert.equal(detaches[0].headers['x-csrf-token'], CSRF);
+        } finally {
+          stub.setDelay(0);
+          await page.close();
+          await context.close();
+        }
+      });
+
+      test('a proposed memory carries its text and source thread', async () => {
+        stub.setMode('ok');
+        stub.clearRequests();
+
+        const context = await openContext(browser, {
+          origin: server.origin,
+          width: 1440,
+          height: 1000,
+          theme: 'light',
+          session: SESSION,
+          csrf: true,
+        });
+        const page = await context.newPage();
+
+        try {
+          await gotoLive(
+            page,
+            server.origin,
+            `${WORKSPACE}&panel=context`,
+            'Prefers short sections over bullet dumps.',
+          );
+
+          const memory = page.locator('section[aria-labelledby="context-memory"]');
+          const text = 'Keep the closing summary to one line.';
+
+          await memory.getByLabel('Propose a memory').fill(text);
+          await memory.getByRole('button', { name: 'Propose memory' }).click();
+
+          await page
+            .getByText('Memory proposed. Both gates start off, so nothing is recalled yet.', {
+              exact: false,
+            })
+            .first()
+            .waitFor({ state: 'visible', timeout: 15_000 });
+
+          const posts = stub.requests.filter(
+            (entry) =>
+              entry.method === 'POST' && entry.url === `/api/bots/${BOT_ID}/memories`,
+          );
+          assert.equal(posts.length, 1, 'the proposal did not send exactly one POST');
+          assert.deepEqual(
+            JSON.parse(posts[0].body),
+            { text, threadId: THREAD_ID },
+            'the proposal did not bind the memory to the open thread',
+          );
+          assert.equal(posts[0].headers['x-csrf-token'], CSRF);
+          assert.equal(
+            await memory.getByLabel('Propose a memory').inputValue(),
+            '',
+            'the composer kept the submitted text',
+          );
+        } finally {
+          await page.close();
+          await context.close();
+        }
+      });
+    });
+
+    describe('gallery and thread writing', () => {
+      test('creating a bot posts its profile and the card follows the answer', async () => {
+        stub.setMode('ok');
+        stub.clearRequests();
+        stub.setDelay(800);
+
+        const context = await openContext(browser, {
+          origin: server.origin,
+          width: 1440,
+          height: 1000,
+          theme: 'light',
+          session: SESSION,
+          csrf: true,
+        });
+        const page = await context.newPage();
+
+        try {
+          await gotoLive(page, server.origin, '/bots', 'Live Field Notes');
+
+          await page.getByRole('button', { name: 'Create bot', exact: true }).click();
+
+          const form = page.locator('form').filter({ hasText: 'Instructions' });
+          await form.waitFor({ state: 'visible' });
+
+          const name = 'Second Field Notes';
+          await form.getByLabel('Name', { exact: true }).fill(name);
+          await form.getByLabel('Purpose', { exact: true }).fill('Keeps the second notebook.');
+          await form
+            .getByLabel('Instructions', { exact: true })
+            .fill('Cite the second document.');
+
+          await form.getByRole('button', { name: 'Create bot' }).click();
+          await form
+            .locator('button[type="submit"][aria-busy="true"]')
+            .waitFor({ state: 'attached', timeout: 5_000 });
+
+          assert.equal(
+            await page.getByRole('link', { name, exact: false }).count(),
+            0,
+            'the card was rendered before the server answered',
+          );
+
+          await page.getByRole('link', { name, exact: false }).waitFor({
+            state: 'visible',
+            timeout: 15_000,
+          });
+
+          const posts = stub.requests.filter(
+            (entry) => entry.method === 'POST' && entry.url === '/api/bots',
+          );
+          assert.equal(posts.length, 1, 'the create did not send exactly one POST');
+          assert.deepEqual(
+            JSON.parse(posts[0].body),
+            {
+              name,
+              description: 'Keeps the second notebook.',
+              instructionsMarkdown: 'Cite the second document.',
+            },
+            'the create did not carry the form fields',
+          );
+          assert.equal(posts[0].headers['x-csrf-token'], CSRF);
+        } finally {
+          stub.setDelay(0);
+          await page.close();
+          await context.close();
+        }
+      });
+
+      test('creating a thread posts its title and opens the thread the server returned', async () => {
+        stub.setMode('ok');
+        stub.clearRequests();
+        stub.setDelay(600);
+
+        const context = await openContext(browser, {
+          origin: server.origin,
+          width: 1440,
+          height: 1000,
+          theme: 'light',
+          session: SESSION,
+          csrf: true,
+        });
+        const page = await context.newPage();
+
+        try {
+          await gotoLive(page, server.origin, WORKSPACE, 'First live question');
+
+          const threads = page.locator('section[aria-labelledby="bot-threads-title"]');
+          await threads.getByRole('button', { name: 'New thread', exact: true }).click();
+
+          const form = page.locator('form').filter({ hasText: 'Thread title' });
+          await form.getByLabel('Thread title').fill('Ordered by the browser');
+          await form.getByRole('button', { name: 'Create thread' }).click();
+          await form
+            .locator('button[type="submit"][aria-busy="true"]')
+            .waitFor({ state: 'attached', timeout: 5_000 });
+
+          // Held by the stub: no navigation and no row before the write answers.
+          assert.equal(
+            new URL(page.url()).searchParams.get('thread'),
+            THREAD_ID,
+            'the workspace moved before the server answered',
+          );
+          assert.equal(
+            await page.getByRole('link', { name: 'Ordered by the browser' }).count(),
+            0,
+            'the thread row appeared before the server answered',
+          );
+
+          await page.waitForURL(new RegExp(`thread=${NEW_THREAD_ID}`), { timeout: 15_000 });
+          await page.getByRole('link', { name: 'Ordered by the browser' }).waitFor({
+            state: 'visible',
+          });
+
+          const posts = stub.requests.filter(
+            (entry) =>
+              entry.method === 'POST' && entry.url === `/api/bots/${BOT_ID}/threads`,
+          );
+          assert.equal(posts.length, 1, 'the create did not send exactly one POST');
+          assert.deepEqual(
+            JSON.parse(posts[0].body),
+            { title: 'Ordered by the browser' },
+            'the create did not carry the title',
+          );
+          assert.equal(posts[0].headers['x-csrf-token'], CSRF);
+        } finally {
+          stub.setDelay(0);
+          await page.close();
+          await context.close();
+        }
+      });
+
+      test('the header create action sends no title and opens the server-named thread', async () => {
+        stub.setMode('ok');
+        stub.clearRequests();
+
+        const context = await openContext(browser, {
+          origin: server.origin,
+          width: 1440,
+          height: 1000,
+          theme: 'light',
+          session: SESSION,
+          csrf: true,
+        });
+        const page = await context.newPage();
+
+        try {
+          await gotoLive(page, server.origin, WORKSPACE, 'First live question');
+
+          // Two real affordances: the header creates immediately, the Threads
+          // card opens the titled form. The header's precedes it in the DOM.
+          const newThread = page.getByRole('button', { name: 'New thread', exact: true });
+          assert.equal(
+            await newThread.count(),
+            2,
+            'the workspace did not offer both create-thread actions',
+          );
+
+          await newThread.first().click();
+          await page.waitForURL(new RegExp(`thread=${NEW_THREAD_ID}`), { timeout: 15_000 });
+          await page.getByRole('link', { name: 'New conversation' }).waitFor({
+            state: 'visible',
+          });
+
+          const posts = stub.requests.filter(
+            (entry) =>
+              entry.method === 'POST' && entry.url === `/api/bots/${BOT_ID}/threads`,
+          );
+          assert.equal(posts.length, 1, 'the create did not send exactly one POST');
+          assert.deepEqual(
+            JSON.parse(posts[0].body),
+            {},
+            'a create without a title invented one instead of letting the server name it',
+          );
+          assert.equal(posts[0].headers['x-csrf-token'], CSRF);
+        } finally {
+          await page.close();
+          await context.close();
+        }
+      });
+
+      test('renaming a thread posts the changed title and the row follows the server', async () => {
+        stub.setMode('ok');
+        stub.clearRequests();
+        stub.setDelay(600);
+
+        const context = await openContext(browser, {
+          origin: server.origin,
+          width: 1440,
+          height: 1000,
+          theme: 'light',
+          session: SESSION,
+          csrf: true,
+        });
+        const page = await context.newPage();
+
+        try {
+          await gotoLive(page, server.origin, WORKSPACE, 'First live question');
+
+          const threads = page.locator('section[aria-labelledby="bot-threads-title"]');
+          await threads.getByRole('button', { name: 'Rename', exact: true }).click();
+
+          const form = page.locator('form').filter({ hasText: 'Rename thread' });
+          const title = form.getByLabel('Rename thread');
+          assert.equal(
+            await title.inputValue(),
+            'Live thread about ordering',
+            'the rename form was not prefilled',
+          );
+
+          await title.fill('Ordering, renamed');
+          await form.getByRole('button', { name: 'Save title' }).click();
+          await form
+            .locator('button[type="submit"][aria-busy="true"]')
+            .waitFor({ state: 'attached', timeout: 5_000 });
+
+          assert.equal(
+            await page.getByRole('link', { name: 'Ordering, renamed' }).count(),
+            0,
+            'the row changed before the server answered',
+          );
+
+          await page.getByRole('link', { name: 'Ordering, renamed' }).waitFor({
+            state: 'visible',
+            timeout: 15_000,
+          });
+          await page.getByText('Thread renamed.', { exact: true }).waitFor({
+            state: 'visible',
+          });
+
+          const patches = stub.requests.filter(
+            (entry) =>
+              entry.method === 'PATCH' && entry.url === `/api/threads/${THREAD_ID}`,
+          );
+          assert.equal(patches.length, 1, 'the rename did not send exactly one PATCH');
+          assert.deepEqual(
+            JSON.parse(patches[0].body),
+            { title: 'Ordering, renamed' },
+            'the rename did not carry the new title',
+          );
+          assert.equal(patches[0].headers['x-csrf-token'], CSRF);
+        } finally {
+          stub.setDelay(0);
+          await page.close();
+          await context.close();
+        }
+      });
+    });
+
+    describe('cursor footers', () => {
+      test('the skills footer loads one cursor page, then goes', async () => {
+        stub.setMode('paged-skills');
+        stub.clearRequests();
+
+        const context = await openContext(browser, {
+          origin: server.origin,
+          width: 1440,
+          height: 1000,
+          theme: 'light',
+          session: SESSION,
+        });
+        const page = await context.newPage();
+
+        try {
+          await gotoLive(page, server.origin, `${WORKSPACE}&panel=context`, 'Plain verbs');
+
+          const skills = page.locator('section[aria-labelledby="context-skills"]');
+          const loadMore = skills.getByRole('button', { name: 'Load more skills' });
+          await loadMore.waitFor({ state: 'visible' });
+          assert.ok(
+            (await skills.innerText()).includes('More results are available.'),
+            'a page with a nextCursor did not offer another page',
+          );
+
+          await loadMore.click();
+          await skills.getByText('Short sentences', { exact: true }).waitFor({
+            state: 'visible',
+            timeout: 15_000,
+          });
+
+          assert.ok(
+            (await skills.innerText()).includes('Plain verbs'),
+            'the next page replaced the first one',
+          );
+          assert.equal(
+            await skills.getByRole('button', { name: 'Load more skills' }).count(),
+            0,
+            'the footer survived a page with no nextCursor',
+          );
+
+          const lists = stub.requests.filter(
+            (entry) => entry.method === 'GET' && entry.url.startsWith('/api/skills?'),
+          );
+          assert.equal(lists.length, 2, 'the list was not read once per cursor page');
+          const second = new URL(lists[1].url, 'http://stub.test');
+          assert.equal(second.searchParams.get('cursor'), 'skills-page-2');
+          assert.equal(second.searchParams.get('limit'), '20');
+        } finally {
+          stub.setMode('ok');
+          await page.close();
+          await context.close();
+        }
+      });
+
+      test('the memories footer loads one cursor page, then goes', async () => {
+        stub.setMode('paged-memories');
+        stub.clearRequests();
+
+        const context = await openContext(browser, {
+          origin: server.origin,
+          width: 1440,
+          height: 1000,
+          theme: 'light',
+          session: SESSION,
+        });
+        const page = await context.newPage();
+
+        try {
+          await gotoLive(
+            page,
+            server.origin,
+            `${WORKSPACE}&panel=context`,
+            'Prefers short sections over bullet dumps.',
+          );
+
+          const memory = page.locator('section[aria-labelledby="context-memory"]');
+          const loadMore = memory.getByRole('button', { name: 'Load more memories' });
+          await loadMore.waitFor({ state: 'visible' });
+
+          await loadMore.click();
+          await memory
+            .getByText('Wants a one-line summary at the end of long replies.', {
+              exact: true,
+            })
+            .waitFor({ state: 'visible', timeout: 15_000 });
+
+          assert.equal(
+            await memory.getByRole('checkbox').count(),
+            4,
+            'the second memory page was not appended with its gates',
+          );
+          assert.equal(
+            await memory.getByRole('button', { name: 'Load more memories' }).count(),
+            0,
+            'the footer survived a page with no nextCursor',
+          );
+
+          const pages = stub.requests.filter(
+            (entry) =>
+              entry.method === 'GET' &&
+              entry.url.startsWith(`/api/bots/${BOT_ID}/memories`),
+          );
+          const paged = pages.filter(
+            (entry) =>
+              new URL(entry.url, 'http://stub.test').searchParams.get('cursor') ===
+              'memories-page-2',
+          );
+          assert.equal(paged.length, 1, 'the next page was not requested with its cursor');
+        } finally {
+          stub.setMode('ok');
+          await page.close();
+          await context.close();
+        }
+      });
+
+      test('the versions footer loads one older page, then goes', async () => {
+        stub.setMode('paged-versions');
+        stub.clearRequests();
+
+        const context = await openContext(browser, {
+          origin: server.origin,
+          width: 1440,
+          height: 1000,
+          theme: 'light',
+          session: SESSION,
+        });
+        const page = await context.newPage();
+
+        try {
+          await gotoLive(page, server.origin, `${WORKSPACE}&panel=context`, 'Ordering note');
+
+          const artifacts = artifactsSection(page);
+          const loadMore = artifacts.getByRole('button', { name: 'Load older versions' });
+          await loadMore.waitFor({ state: 'visible' });
+
+          assert.equal(
+            await artifacts.getByText(/^v2 ·/).count(),
+            1,
+            'the head version was not listed',
+          );
+          assert.equal(
+            await artifacts.getByText(/^v1 ·/).count(),
+            0,
+            'the next version page was already listed',
+          );
+
+          await loadMore.click();
+          await artifacts.getByText(/^v1 ·/).first().waitFor({
+            state: 'visible',
+            timeout: 15_000,
+          });
+
+          assert.equal(
+            await artifacts.getByText(/^v2 ·/).count(),
+            1,
+            'the next page replaced the head version',
+          );
+          assert.equal(
+            await artifacts.getByRole('button', { name: 'Load older versions' }).count(),
+            0,
+            'the footer survived a page with no nextCursor',
+          );
+          assert.equal(
+            await artifacts.getByLabel('Artifact content').inputValue(),
+            '# Ordering note\n\nThe cursor is the sequence, not the clock.',
+            'paging the versions changed the open body',
+          );
+
+          const pages = stub.requests.filter(
+            (entry) =>
+              entry.method === 'GET' &&
+              entry.url.startsWith(`/api/artifacts/${ARTIFACT_ID}/versions?`),
+          );
+          const paged = pages.filter(
+            (entry) =>
+              new URL(entry.url, 'http://stub.test').searchParams.get('cursor') ===
+              'versions-page-2',
+          );
+          assert.equal(paged.length, 1, 'the older page was not requested with its cursor');
+        } finally {
+          stub.setMode('ok');
+          await page.close();
+          await context.close();
+        }
+      });
+
+      test('the search footer loads one cursor page, then goes', async () => {
+        stub.setMode('paged-search');
+        stub.clearRequests();
+
+        const context = await openContext(browser, {
+          origin: server.origin,
+          width: 1440,
+          height: 1000,
+          theme: 'light',
+          session: SESSION,
+        });
+        const page = await context.newPage();
+
+        try {
+          await gotoLive(page, server.origin, `${WORKSPACE}&panel=context`, 'Plain verbs');
+
+          const search = page.locator('section[aria-labelledby="context-search"]');
+          await search.getByLabel('Search this account').fill('First live');
+          await search.getByRole('button', { name: 'Search messages' }).click();
+
+          const loadMore = search.getByRole('button', { name: 'Load more results' });
+          await loadMore.waitFor({ state: 'visible' });
+          await search
+            .getByRole('link', { name: 'Live thread about ordering' })
+            .first()
+            .waitFor({ state: 'visible' });
+
+          await loadMore.click();
+          await search
+            .getByRole('link', { name: 'Live thread about ordering' })
+            .nth(1)
+            .waitFor({ state: 'visible', timeout: 15_000 });
+
+          assert.equal(
+            await search.locator('li').count(),
+            2,
+            'the next hit page was not appended',
+          );
+          assert.equal(
+            await search.locator('li').nth(1).locator('mark').textContent(),
+            'live',
+            'the second hit did not render its escaped mark',
+          );
+          assert.equal(
+            await search.getByRole('button', { name: 'Load more results' }).count(),
+            0,
+            'the footer survived a page with no nextCursor',
+          );
+
+          const calls = stub.requests.filter(
+            (entry) => entry.method === 'GET' && entry.url.startsWith('/api/search?'),
+          );
+          assert.equal(calls.length, 2, 'the search was not read once per cursor page');
+          const second = new URL(calls[1].url, 'http://stub.test');
+          assert.equal(second.searchParams.get('cursor'), 'search-page-2');
+          assert.equal(second.searchParams.get('q'), 'First live');
+        } finally {
+          stub.setMode('ok');
+          await page.close();
+          await context.close();
+        }
+      });
+    });
+
     describe('streaming', () => {
       test('a sent message renders the streamed reply and the completed run', async () => {
         stub.setMode('ok');
@@ -1629,6 +2484,136 @@ describe(
           }
         },
       );
+
+      test('Stop run posts one cancel and shows the stopped state the server returned', async () => {
+        stub.setMode('stream-hold');
+        stub.clearRequests();
+
+        const context = await openContext(browser, {
+          origin: server.origin,
+          width: 1440,
+          height: 1000,
+          theme: 'light',
+          session: SESSION,
+          csrf: true,
+        });
+        const page = await context.newPage();
+
+        try {
+          await gotoLive(page, server.origin, WORKSPACE, 'First live question');
+
+          await page
+            .getByLabel('Write a message to Live Field Notes')
+            .fill('Stop this run');
+          await page.getByRole('button', { name: 'Send message' }).click();
+
+          // The stub holds the stream open after one delta, so the run is live.
+          const stop = page.getByRole('button', { name: 'Stop run' });
+          await stop.waitFor({ state: 'visible', timeout: 15_000 });
+
+          assert.equal(
+            await page.getByText(`Run ${RUN_ID} · stopped`, { exact: true }).count(),
+            0,
+            'the run was labelled stopped before the cancel answered',
+          );
+
+          await stop.click();
+
+          await page
+            .getByText(`Run ${RUN_ID} · stopped`, { exact: true })
+            .first()
+            .waitFor({ state: 'visible', timeout: 15_000 });
+          await page
+            .getByText('Run stopped before it was dispatched. The reply will not continue.', {
+              exact: true,
+            })
+            .first()
+            .waitFor({ state: 'visible' });
+
+          const cancels = stub.requests.filter(
+            (entry) =>
+              entry.method === 'POST' && entry.url === `/api/runs/${RUN_ID}/cancel`,
+          );
+          assert.equal(cancels.length, 1, 'the stop did not send exactly one POST');
+          assert.equal(cancels[0].headers['x-csrf-token'], CSRF);
+          assert.equal(cancels[0].body, '', 'the cancel carried a body it did not need');
+
+          // The delta that arrived before the stop is still in the transcript.
+          assert.ok(
+            (await bodyText(page)).includes('Streaming'),
+            'the text streamed before the stop was dropped',
+          );
+        } finally {
+          stub.setMode('ok');
+          await page.close();
+          await context.close();
+        }
+      });
+
+      test('a cancel the server refuses keeps the terminal state it answered', async () => {
+        stub.setMode('stream-hold-terminal');
+        stub.clearRequests();
+
+        const context = await openContext(browser, {
+          origin: server.origin,
+          width: 1440,
+          height: 1000,
+          theme: 'light',
+          session: SESSION,
+          csrf: true,
+        });
+        const page = await context.newPage();
+
+        try {
+          await gotoLive(page, server.origin, WORKSPACE, 'First live question');
+
+          await page
+            .getByLabel('Write a message to Live Field Notes')
+            .fill('Stop an already-finished run');
+          await page.getByRole('button', { name: 'Send message' }).click();
+
+          const stop = page.getByRole('button', { name: 'Stop run' });
+          await stop.waitFor({ state: 'visible', timeout: 15_000 });
+          await stop.click();
+
+          // The server's answer is a finished run, not a cancel; the client must
+          // show that instead of claiming the stop it asked for.
+          await page
+            .getByText('The run is already terminal; it was not changed.', { exact: true })
+            .first()
+            .waitFor({ state: 'visible', timeout: 15_000 });
+          await page
+            .getByText(`Run ${RUN_ID} · complete`, { exact: true })
+            .first()
+            .waitFor({ state: 'visible' });
+          assert.equal(
+            await page.getByText(`Run ${RUN_ID} · stopped`, { exact: true }).count(),
+            0,
+            'a refused cancel was labelled stopped',
+          );
+          assert.equal(
+            await page
+              .getByText(
+                'Run stopped before it was dispatched. The reply will not continue.',
+                { exact: true },
+              )
+              .count(),
+            0,
+            'a refused cancel claimed the run stopped',
+          );
+
+          const cancels = stub.requests.filter(
+            (entry) =>
+              entry.method === 'POST' && entry.url === `/api/runs/${RUN_ID}/cancel`,
+          );
+          assert.equal(cancels.length, 1, 'the stop did not send exactly one POST');
+          assert.equal(cancels[0].headers['x-csrf-token'], CSRF);
+        } finally {
+          stub.setMode('ok');
+          await page.close();
+          await context.close();
+        }
+      });
     });
   },
 );
