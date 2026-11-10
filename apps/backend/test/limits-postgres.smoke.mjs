@@ -10,8 +10,15 @@
  *   schema guards             columns, unique-per-run key, non-negative and
  *                             state/value consistency constraints
  *   reservation atomicity     12 parallel reservations cannot exceed 100,000
- *   boundary                  exactly 100,000 admitted, next unit refused
+ *   last-unit race            two concurrent reserves for the final unit admit
+ *                             exactly one; the loser is 429 with no overspend
+ *   boundary                  exactly 100,000 admitted, next unit refused;
+ *                             settled usage counts toward the same cap, and a
+ *                             refusal near Manila midnight retries in 1 s
  *   over-limit                an estimate above the cap writes nothing
+ *   refusal shape             429 allowance_exhausted body carries limit,
+ *                             remaining, and retryAfterSeconds; a release
+ *                             frees the cap for a fresh full reservation
  *   unknown block             fail closed, then owner reconcile + audit
  *   accounting                known/partial/unknown mapping never zeroes
  *   overrun                   provider usage above the estimate is recorded
@@ -446,6 +453,101 @@ describe(
           return true;
         },
       );
+    });
+
+    test('two concurrent reserves for the final unit admit exactly one', async () => {
+      const owner = await seedUser();
+
+      await service.reserve({
+        ownerUserId: owner,
+        runId: randomUUID(),
+        estimateTokens: ALLOWANCE - 1,
+      });
+
+      const contenders = [
+        { ownerUserId: owner, runId: randomUUID(), estimateTokens: 1 },
+        { ownerUserId: owner, runId: randomUUID(), estimateTokens: 1 },
+      ];
+      const outcomes = await Promise.allSettled(
+        contenders.map((input) => service.reserve(input)),
+      );
+      const fulfilled = outcomes.filter((outcome) => outcome.status === 'fulfilled');
+      const rejected = outcomes.filter((outcome) => outcome.status === 'rejected');
+
+      assert.equal(fulfilled.length, 1, 'exactly one contender takes the last unit');
+      assert.equal(rejected.length, 1);
+      const refusal = rejected[0].reason;
+      assert.equal(refusal.code, 'allowance_exhausted');
+      assert.equal(refusal.status, 429);
+
+      const bucket = await bucketRow(owner, '2026-11-03');
+      assert.equal(Number(bucket.reserved_tokens), ALLOWANCE);
+      assert.equal(Number(bucket.input_tokens) + Number(bucket.output_tokens), 0);
+
+      const rows = await reservationRows(owner);
+      assert.equal(rows.length, 2);
+      assert.ok(rows.every((row) => row.state === 'reserved'));
+      assert.equal((await service.getUsage(owner)).remainingTokens, 0);
+    });
+
+    test('a refusal just before the Manila reset retries in one second', async () => {
+      const owner = await seedUser();
+      const evening = serviceWithClock(() => at('2026-11-03T15:59:59.000Z'));
+
+      await evening.reserve({
+        ownerUserId: owner,
+        runId: randomUUID(),
+        estimateTokens: ALLOWANCE,
+      });
+
+      try {
+        await evening.reserve({
+          ownerUserId: owner,
+          runId: randomUUID(),
+          estimateTokens: 1,
+        });
+        assert.fail('the over-cap reserve should have been refused');
+      } catch (error) {
+        assert.equal(error.code, 'allowance_exhausted');
+        assert.equal(error.status, 429);
+        assert.equal(error.retryAfterSeconds, 1);
+
+        const body = limits.usageLimitErrorBody(error);
+        assert.equal(body.error.code, 'allowance_exhausted');
+        assert.equal(body.error.limit, ALLOWANCE);
+        assert.equal(body.error.remaining, 0);
+        assert.equal(body.error.retryAfterSeconds, 1);
+      }
+    });
+
+    test('releasing a hold restores the full allowance', async () => {
+      const owner = await seedUser();
+
+      const held = await service.reserve({
+        ownerUserId: owner,
+        runId: randomUUID(),
+        estimateTokens: ALLOWANCE,
+      });
+      await rejectsWithCode(
+        service.reserve({
+          ownerUserId: owner,
+          runId: randomUUID(),
+          estimateTokens: 1,
+        }),
+        'allowance_exhausted',
+      );
+
+      const released = await service.release(held.id, { ownerUserId: owner });
+      assert.equal(released.state, 'released');
+      assert.equal((await service.getUsage(owner)).usedTokens, 0);
+
+      const fresh = await service.reserve({
+        ownerUserId: owner,
+        runId: randomUUID(),
+        estimateTokens: ALLOWANCE,
+      });
+      assert.equal(fresh.state, 'reserved');
+      assert.equal((await service.getUsage(owner)).remainingTokens, 0);
     });
 
     test('an estimate above the whole allowance writes nothing', async () => {
