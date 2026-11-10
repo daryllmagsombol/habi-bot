@@ -320,20 +320,20 @@ export class PostgresSessionStore implements SessionStore, OnModuleInit, OnModul
     const revoked = this.revokeCached((record) => record.familyId === familyId, reason, at);
     const id = stripPrefix(familyId, FAMILY_ID_PREFIX);
 
-    if (id === undefined) {
-      return revoked;
+    // A malformed family id has no row to revoke, so there is nothing to
+    // enqueue; the cached count is the answer either way.
+    if (id !== undefined) {
+      this.enqueue(async () => {
+        await this.pool.query(
+          `UPDATE auth_sessions
+              SET revoked_at = COALESCE(revoked_at, $2::timestamptz),
+                  revoked_reason = COALESCE(revoked_reason, $3::text)
+            WHERE session_family_id = $1::uuid
+              AND revoked_at IS NULL`,
+          [id, new Date(at), reason],
+        );
+      });
     }
-
-    this.enqueue(async () => {
-      await this.pool.query(
-        `UPDATE auth_sessions
-            SET revoked_at = COALESCE(revoked_at, $2::timestamptz),
-                revoked_reason = COALESCE(revoked_reason, $3::text)
-          WHERE session_family_id = $1::uuid
-            AND revoked_at IS NULL`,
-        [id, new Date(at), reason],
-      );
-    });
 
     return revoked;
   }

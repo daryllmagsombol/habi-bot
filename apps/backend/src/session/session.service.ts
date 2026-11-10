@@ -65,7 +65,7 @@ export type SessionRevocationReason = (typeof SESSION_REVOCATION_REASONS)[number
 
 /** Validates a stored reason before it becomes a domain value. */
 export function isSessionRevocationReason(value: string): value is SessionRevocationReason {
-  return SESSION_REVOCATION_REASONS.some((reason) => reason === value);
+  return SESSION_REVOCATION_REASONS.includes(value as SessionRevocationReason);
 }
 
 export interface SessionRecord {
