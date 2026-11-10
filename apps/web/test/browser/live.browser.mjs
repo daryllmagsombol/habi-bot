@@ -31,8 +31,16 @@
  *                bytes), and no navigation when that preflight fails
  *   editors      a skill edit prefills and submits only changed fields; artifact
  *                metadata editing has no content field and sends none
- *   streaming    a sent message renders the streamed reply the stub wrote, and a
- *                dropped stream reconnects from its last `id:`
+ *   interactions a content save and a restore post the body and the version the
+ *                UI says they do; a memory approval carries both gates and the
+ *                thread, and the row shows the server's answer even when it
+ *                contradicts the switch; search posts the query and renders the
+ *                hit; one cursor page appends behind its footer and the footer
+ *                goes when `nextCursor` is null
+ *   streaming    a sent message renders the streamed reply the stub wrote, a
+ *                dropped stream reconnects from its last `id:`, and a stream
+ *                that never resumes exhausts the documented bound of five
+ *                connections into the explicit Retry state with its text kept
  *
  * Run `pnpm --filter @habi/web build` first. No screenshot is written or kept.
  */
@@ -59,6 +67,7 @@ import {
   BOT_ID,
   CSRF,
   EXPORT_FILENAME,
+  MEMORY_ID,
   RUN_ID,
   SESSION,
   SKILL_ID,
@@ -308,6 +317,28 @@ async function assertDesignFloor(page, label) {
 
 async function bodyText(page) {
   return page.evaluate(() => document.body.innerText.replace(/\s+/g, ' '));
+}
+
+/** Both memory gates render unchecked. Module-level so it stays one callback. */
+function bothMemoryGatesOff() {
+  const section = document.querySelector('section[aria-labelledby="context-memory"]');
+  const boxes = section === null ? [] : [...section.querySelectorAll('input[type="checkbox"]')];
+
+  return boxes.length === 2 && boxes.every((box) => !box.checked);
+}
+
+/** The Context panel's scrolling body, so a paging test can watch its position. */
+function readPanelScroll(page) {
+  return page.evaluate(() => {
+    const panel = document.querySelector('aside[aria-labelledby="context-panel-title"]');
+    const scroller = panel === null ? null : panel.lastElementChild;
+
+    if (!(scroller instanceof HTMLElement)) {
+      return undefined;
+    }
+
+    return { top: scroller.scrollTop, height: scroller.scrollHeight };
+  });
 }
 
 function assertNoSampleCopy(text, label) {
@@ -1033,6 +1064,366 @@ describe(
       });
     });
 
+    describe('context interactions', () => {
+      const artifactsSection = (page) =>
+        page.locator('section[aria-labelledby="context-artifacts"]');
+
+      test('a content edit saves one new version and names it', async () => {
+        stub.setMode('ok');
+        stub.clearRequests();
+
+        const context = await openContext(browser, {
+          origin: server.origin,
+          width: 1440,
+          height: 1000,
+          theme: 'light',
+          session: SESSION,
+          csrf: true,
+        });
+        const page = await context.newPage();
+
+        try {
+          await gotoLive(page, server.origin, `${WORKSPACE}&panel=context`, 'Ordering note');
+
+          const artifacts = artifactsSection(page);
+          const content = artifacts.getByLabel('Artifact content');
+          const saved = '# Ordering note\n\nSecond body, saved from the browser.';
+
+          await content.fill(saved);
+          await artifacts.getByRole('button', { name: 'Save new version' }).click();
+          await page
+            .getByText('Saved as version 2.', { exact: false })
+            .first()
+            .waitFor({ state: 'visible' });
+
+          const patches = stub.requests.filter(
+            (entry) =>
+              entry.method === 'PATCH' && entry.url === `/api/artifacts/${ARTIFACT_ID}`,
+          );
+          assert.equal(patches.length, 1, 'the content save did not send exactly one PATCH');
+          assert.deepEqual(
+            JSON.parse(patches[0].body),
+            { content: saved },
+            'the content save did not carry the edited body',
+          );
+          assert.equal(patches[0].headers['x-csrf-token'], CSRF);
+
+          assert.ok(
+            (await bodyText(page)).includes('Saved as version 2.'),
+            'the success state did not name the appended version',
+          );
+          await page.getByText(/^version 2 ·/).first().waitFor({ state: 'visible' });
+          assert.equal(
+            await content.inputValue(),
+            saved,
+            'the editor did not show the version the server returned',
+          );
+        } finally {
+          await page.close();
+          await context.close();
+        }
+      });
+
+      test('restoring a listed version confirms the append and posts the version', async () => {
+        stub.setMode('ok');
+        stub.clearRequests();
+
+        const context = await openContext(browser, {
+          origin: server.origin,
+          width: 1440,
+          height: 1000,
+          theme: 'light',
+          session: SESSION,
+          csrf: true,
+        });
+        const page = await context.newPage();
+
+        try {
+          await gotoLive(page, server.origin, `${WORKSPACE}&panel=context`, 'Ordering note');
+
+          const artifacts = artifactsSection(page);
+
+          // Setup: a second version makes v1 history rather than the head, which
+          // is the only state in which the UI offers a restore.
+          await artifacts.getByLabel('Artifact content').fill('Second body.');
+          await artifacts.getByRole('button', { name: 'Save new version' }).click();
+          await page
+            .getByText('Saved as version 2.', { exact: false })
+            .first()
+            .waitFor({ state: 'visible' });
+
+          await artifacts.getByRole('button', { name: 'Restore v1', exact: true }).click();
+          await page
+            .getByText(
+              'Restoring v1 appends a new version. Earlier versions are never rewritten.',
+              { exact: true },
+            )
+            .waitFor({ state: 'visible' });
+          assert.ok(
+            await artifacts.getByRole('button', { name: 'Cancel', exact: true }).isVisible(),
+            'the restore confirmation cannot be declined',
+          );
+
+          // The confirmation replaces the row's control, so this is the same
+          // accessible name on the one button that performs the restore.
+          await artifacts.getByRole('button', { name: 'Restore v1', exact: true }).click();
+          await page
+            .getByText('Version 1 restored as version 3.', { exact: false })
+            .first()
+            .waitFor({ state: 'visible' });
+
+          const restores = stub.requests.filter(
+            (entry) =>
+              entry.method === 'POST' &&
+              entry.url === `/api/artifacts/${ARTIFACT_ID}/restore`,
+          );
+          assert.equal(restores.length, 1, 'the restore did not send exactly one POST');
+          assert.deepEqual(
+            JSON.parse(restores[0].body),
+            { version: 1 },
+            'the restore did not name the version it restored',
+          );
+          assert.equal(restores[0].headers['x-csrf-token'], CSRF);
+          assert.equal(
+            await artifacts.getByLabel('Artifact content').inputValue(),
+            '# Ordering note\n\nThe cursor is the sequence, not the clock.',
+            'the editor did not show the body the server restored',
+          );
+          assert.ok(
+            (await bodyText(page)).includes('append'),
+            'the restore did not say it appends rather than rewrites',
+          );
+        } finally {
+          await page.close();
+          await context.close();
+        }
+      });
+
+      test('memory approvals post both gates and the row follows the server', async () => {
+        stub.setMode('ok');
+        stub.clearRequests();
+
+        const context = await openContext(browser, {
+          origin: server.origin,
+          width: 1440,
+          height: 1000,
+          theme: 'light',
+          session: SESSION,
+          csrf: true,
+        });
+        const page = await context.newPage();
+
+        try {
+          await gotoLive(
+            page,
+            server.origin,
+            `${WORKSPACE}&panel=context`,
+            'Prefers short sections over bullet dumps.',
+          );
+
+          const memory = page.locator('section[aria-labelledby="context-memory"]');
+          const bot = memory.getByRole('checkbox', { name: /^Bot approval/ });
+          const thread = memory.getByRole('checkbox', { name: /^Thread approval/ });
+
+          // The API's seed: the Bot gate is on, the thread gate is off.
+          assert.equal(await bot.isChecked(), true, 'the Bot gate did not start approved');
+          assert.equal(await thread.isChecked(), false, 'the thread gate did not start held');
+          await memory.getByText('Held', { exact: true }).waitFor({ state: 'visible' });
+
+          await thread.click();
+          await memory.getByText('Recalled', { exact: true }).waitFor({ state: 'visible' });
+          assert.equal(await bot.isChecked(), true, 'moving the thread gate moved the Bot gate');
+          assert.equal(await thread.isChecked(), true, 'the thread gate did not move');
+
+          // Now the server keeps both gates off, whatever the write asked for.
+          // The click only moves the Bot switch, so both switches ending off can
+          // only be the server's answer arriving through the refresh.
+          stub.setMode('approval-hold');
+          await bot.click();
+
+          await page.waitForFunction(bothMemoryGatesOff, undefined, { timeout: 15_000 });
+          await memory.getByText('Held', { exact: true }).waitFor({ state: 'visible' });
+
+          const approvals = stub.requests.filter(
+            (entry) =>
+              entry.method === 'POST' && entry.url === `/api/memories/${MEMORY_ID}/approvals`,
+          );
+          assert.equal(approvals.length, 2, 'the gates were not written twice');
+          assert.deepEqual(
+            JSON.parse(approvals[0].body),
+            { bot: true, thread: true, threadId: THREAD_ID },
+            'the first approval did not carry both gates and the thread',
+          );
+          assert.deepEqual(
+            JSON.parse(approvals[1].body),
+            { bot: false, thread: true, threadId: THREAD_ID },
+            'the second approval did not carry the moved gate and the held one',
+          );
+          assert.equal(approvals[0].headers['x-csrf-token'], CSRF);
+          assert.equal(approvals[1].headers['x-csrf-token'], CSRF);
+        } finally {
+          stub.setMode('ok');
+          await page.close();
+          await context.close();
+        }
+      });
+
+      test('search posts the query and renders the hit', async () => {
+        stub.setMode('ok');
+        stub.clearRequests();
+
+        const context = await openContext(browser, {
+          origin: server.origin,
+          width: 1440,
+          height: 1000,
+          theme: 'light',
+          session: SESSION,
+        });
+        const page = await context.newPage();
+
+        try {
+          await gotoLive(page, server.origin, `${WORKSPACE}&panel=context`, 'Plain verbs');
+
+          const search = page.locator('section[aria-labelledby="context-search"]');
+          await search.getByLabel('Search this account').fill('First live');
+          await search.getByRole('button', { name: 'Search messages' }).click();
+
+          const link = search.getByRole('link', { name: 'Live thread about ordering' });
+          await link.waitFor({ state: 'visible' });
+          assert.equal(
+            await link.getAttribute('href'),
+            `/bots/${BOT_ID}?thread=${THREAD_ID}`,
+            'the hit did not link to its conversation',
+          );
+          assert.equal(
+            await search.locator('mark').textContent(),
+            'live',
+            'the escaped <mark> fragment was not rendered as the only markup',
+          );
+          assert.ok(
+            (await bodyText(search)).includes('First live question'),
+            'the snippet did not render its text around the mark',
+          );
+
+          const calls = stub.requests.filter(
+            (entry) => entry.method === 'GET' && entry.url.startsWith('/api/search'),
+          );
+          assert.equal(calls.length, 1, 'the search did not send exactly one request');
+          const url = new URL(calls[0].url, 'http://stub.test');
+          assert.equal(url.searchParams.get('q'), 'First live');
+          assert.equal(url.searchParams.get('botId'), BOT_ID);
+          assert.equal(url.searchParams.get('limit'), '20');
+        } finally {
+          await page.close();
+          await context.close();
+        }
+      });
+
+      test('a cursor page appends behind its footer, then the footer goes', async () => {
+        stub.setMode('paged-artifacts');
+        stub.clearRequests();
+        // The stub's answer is held so the in-flight state is observable, not raced.
+        stub.setDelay(400);
+
+        const context = await openContext(browser, {
+          origin: server.origin,
+          width: 1440,
+          height: 1000,
+          theme: 'light',
+          session: SESSION,
+        });
+        const page = await context.newPage();
+
+        try {
+          await gotoLive(page, server.origin, `${WORKSPACE}&panel=context`, 'Ordering note');
+
+          const artifacts = artifactsSection(page);
+          const loadMore = artifacts.getByRole('button', { name: 'Load more artifacts' });
+          await loadMore.waitFor({ state: 'visible' });
+
+          // Page one ends with a cursor, so the footer says so.
+          assert.ok(
+            (await bodyText(artifacts)).includes('More results are available.'),
+            'a page with a nextCursor did not offer another page',
+          );
+
+          await loadMore.click();
+          await page
+            .getByText('Loading more artifacts…', { exact: true })
+            .waitFor({ state: 'visible', timeout: 5_000 });
+
+          // In flight: busy, disabled, and announced politely.
+          assert.equal(
+            await loadMore.getAttribute('aria-busy'),
+            'true',
+            'the in-flight footer control was not busy',
+          );
+          assert.equal(
+            await loadMore.isDisabled(),
+            true,
+            'the in-flight footer control was still clickable',
+          );
+
+          const before = await readPanelScroll(page);
+          assert.ok(before !== undefined, 'the panel has no scrolling body');
+
+          await page
+            .getByRole('button', { name: /Second ordering note/ })
+            .waitFor({ state: 'visible', timeout: 10_000 });
+
+          // Appended, not replaced: the first row, its selection and the body the
+          // reader had open are all still there, and the panel did not jump back
+          // to the top.
+          assert.equal(
+            await page.locator('button[aria-current="true"]').filter({ hasText: 'Ordering note' }).count(),
+            1,
+            'paging replaced the selected row',
+          );
+          assert.equal(
+            await artifacts.getByLabel('Artifact content').inputValue(),
+            '# Ordering note\n\nThe cursor is the sequence, not the clock.',
+            'paging replaced the open artifact',
+          );
+
+          const after = await readPanelScroll(page);
+          assert.ok(after !== undefined, 'the panel lost its scrolling body');
+          assert.equal(
+            await artifacts.locator('ul').first().getByRole('button').count(),
+            2,
+            'the next cursor page was not appended to the list',
+          );
+          assert.ok(
+            after.top >= before.top && after.top > 0,
+            `the panel lost its reading position (${before.top} → ${after.top})`,
+          );
+
+          // Page two has `nextCursor: null`, so the footer is gone entirely.
+          assert.equal(
+            await artifacts.getByRole('button', { name: 'Load more artifacts' }).count(),
+            0,
+            'the footer survived a page with no nextCursor',
+          );
+          assert.ok(
+            !(await bodyText(artifacts)).includes('More results are available.'),
+            'the footer copy survived a page with no nextCursor',
+          );
+
+          const lists = stub.requests.filter(
+            (entry) => entry.method === 'GET' && entry.url.startsWith('/api/artifacts?'),
+          );
+          assert.equal(lists.length, 2, 'the list was not read once per cursor page');
+          const second = new URL(lists[1].url, 'http://stub.test');
+          assert.equal(second.searchParams.get('cursor'), 'artifacts-page-2');
+          assert.equal(second.searchParams.get('conversationId'), THREAD_ID);
+        } finally {
+          stub.setDelay(0);
+          stub.setMode('ok');
+          await page.close();
+          await context.close();
+        }
+      });
+    });
+
     describe('streaming', () => {
       test('a sent message renders the streamed reply and the completed run', async () => {
         stub.setMode('ok');
@@ -1137,6 +1528,107 @@ describe(
           await context.close();
         }
       });
+
+      test(
+        'a stream that never resumes exhausts five connections into the Retry state',
+        { timeout: 90_000 },
+        async () => {
+          stub.setMode('stream-exhaust');
+          stub.clearRequests();
+
+          const context = await openContext(browser, {
+            origin: server.origin,
+            width: 1440,
+            height: 1000,
+            theme: 'light',
+            session: SESSION,
+            csrf: true,
+          });
+          const page = await context.newPage();
+
+          try {
+            await gotoLive(page, server.origin, WORKSPACE, 'First live question');
+
+            await page
+              .getByLabel('Write a message to Live Field Notes')
+              .fill('Exhaust this stream');
+
+            const started = Date.now();
+            await page.getByRole('button', { name: 'Send message' }).click();
+
+            // Deliberately slow but real: the product's backoff is
+            // 400 + 800 + 1600 + 3200 ms, and shortening it would mean editing
+            // product code. This waits the real ~6 s instead.
+            await page
+              .getByText(
+                'The run stream stopped and could not be resumed. Retry to reconnect with the last sequence this tab saw.',
+                { exact: true },
+              )
+              .first()
+              .waitFor({ state: 'visible', timeout: 30_000 });
+            const elapsed = Date.now() - started;
+
+            assert.ok(
+              elapsed >= 5_900,
+              `the bounded retries did not wait their backoff (${elapsed} ms)`,
+            );
+
+            // One initial connection plus MAX_RECONNECTS = 4 in
+            // `app/bots/[botId]/use-live-run.ts`: five attempts, not "some".
+            const streams = stub.requests.filter(
+              (entry) => entry.method === 'GET' && entry.url === `/api/runs/${RUN_ID}/events`,
+            );
+            assert.equal(
+              streams.length,
+              5,
+              `the terminal state arrived after ${streams.length} connections, not the documented five`,
+            );
+            assert.deepEqual(
+              streams.map((entry) => entry.headers['last-event-id']),
+              [
+                undefined,
+                `e1.${RUN_ID}.4`,
+                `e1.${RUN_ID}.5`,
+                `e1.${RUN_ID}.6`,
+                `e1.${RUN_ID}.7`,
+              ],
+              'a reconnect did not resume from the last applied frame id',
+            );
+
+            // Every delta the stub wrote before the terminal state is still
+            // rendered, in order: the failure is not allowed to drop text.
+            const text = await bodyText(page);
+            assert.ok(
+              text.includes('attempt 1 attempt 2 attempt 3 attempt 4 attempt 5'),
+              `the streamed text was lost or reordered: ${text}`,
+            );
+            assert.ok(text.includes('Exhaust this stream'), 'the sent turn disappeared');
+
+            const retry = page.getByRole('button', { name: 'Retry', exact: true });
+            await retry.waitFor({ state: 'visible' });
+            assert.equal(
+              await retry.isEnabled(),
+              true,
+              'the retry affordance is present but cannot be used',
+            );
+
+            // Not falsely terminal: no completed run and no completed reply.
+            assert.equal(
+              await page.getByText(`Run ${RUN_ID} · complete`, { exact: true }).count(),
+              0,
+              'the exhausted stream was marked complete',
+            );
+            assert.ok(
+              !text.includes('Reply complete.'),
+              'the exhausted stream claimed the reply completed',
+            );
+          } finally {
+            stub.setMode('ok');
+            await page.close();
+            await context.close();
+          }
+        },
+      );
     });
   },
 );
