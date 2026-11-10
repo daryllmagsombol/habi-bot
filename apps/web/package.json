@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test": "node --test test/*.smoke.mjs",
-    "test:browser": "node --test test/browser/*.browser.mjs"
+    "test:browser": "node --test test/browser/*.browser.mjs",
+    "test:browser:live": "node --test test/browser/live.browser.mjs"
   },
   "dependencies": {
     "motion": "14.9.0",
