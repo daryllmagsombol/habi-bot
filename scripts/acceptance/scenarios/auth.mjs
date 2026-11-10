@@ -2,9 +2,10 @@
  * H-025 scenario: signup, login, logout, recovery, and session continuity.
  *
  * Runs the real auth HTTP surface in a child API process against the same
- * disposable database. Also checks the one thing a unit test cannot: whether a
+ * disposable database. Also checks the two things a unit test cannot: whether a
  * session issued by `/auth/login` is accepted by the P1 chat surface when both
- * modules are enabled in one deployment.
+ * modules are enabled in one deployment, and whether that session is still
+ * accepted by a *freshly booted* process while a revoked one stays rejected.
  */
 import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
@@ -41,11 +42,14 @@ export const authScenario = {
   title: 'Signup, login, logout, recovery, and session continuity',
   async run(ctx) {
     const checks = [];
-    const api = await startApiChild({
+    // Same environment for every API process this scenario boots, including the
+    // restart: a durable run must not depend on a different flag set.
+    const apiEnv = {
       HABI_AUTH_SPIKE: '1',
       HABI_P1_API: '1',
       DATABASE_URL: ctx.postgres.url,
-    });
+    };
+    const api = await startApiChild(apiEnv);
 
     try {
       const request = createClient(api.base);
@@ -196,10 +200,9 @@ export const authScenario = {
         };
       });
 
-      // This is the integration check a per-module unit test cannot make. The
-      // auth module and the P1 API module each provide their own in-memory
-      // SessionService, so a login cookie is expected to be accepted here only
-      // if deployment wiring shares one session core.
+      // This is the integration check a per-module unit test cannot make. Every
+      // authenticated surface resolves one SessionCoreModule, so a login cookie
+      // is accepted by chat only if deployment wiring really shares it.
       await runCheck(
         checks,
         'login session is accepted by the P1 chat surface',
@@ -216,21 +219,145 @@ export const authScenario = {
           return { status: result.status, botCount: result.body.bots.length };
         },
       );
+
+      // Durable sessions landed behind the unchanged SessionService contract
+      // (auth_sessions), so the harness's own process boundary is now something
+      // acceptance can prove. The check above shows one process accepting the
+      // cookie it issued; this one stops that process and proves a *fresh* one
+      // accepts the same cookie — and that survival is selective rather than
+      // "everything authenticates". The restart is graceful (SIGTERM), which is
+      // what runs the store's shutdown flush; a SIGKILL would be expected to
+      // lose queued writes, and that boundary is not what this check claims.
+      await runCheck(
+        checks,
+        'a session survives an API restart while a revoked one stays rejected',
+        async () => {
+          const survivingLogin = await request('/auth/login', {
+            body: { email: KNOWN_EMAIL, password: PASSWORD },
+          });
+
+          assert.equal(survivingLogin.status, 200, JSON.stringify(survivingLogin.body));
+
+          const survivor = sessionFromResponse(survivingLogin);
+
+          assert.ok(survivor.cookie, 'the session that must survive login set no cookie');
+
+          const revokedLogin = await request('/auth/login', {
+            body: { email: KNOWN_EMAIL, password: PASSWORD },
+          });
+
+          assert.equal(revokedLogin.status, 200, JSON.stringify(revokedLogin.body));
+
+          const revoked = sessionFromResponse(revokedLogin);
+
+          assert.ok(revoked.cookie, 'the session that will be revoked login set no cookie');
+          assert.notEqual(revoked.cookie, survivor.cookie, 'login returned the same session twice');
+
+          const before = await createClient(api.base, survivor)('/api/bots');
+
+          assert.equal(before.status, 200, JSON.stringify(before.body));
+
+          const beforeMe = await createClient(api.base, survivor)('/auth/me');
+
+          assert.equal(beforeMe.status, 200, JSON.stringify(beforeMe.body));
+
+          const userId = beforeMe.body.user.userId;
+
+          // Revoke the second session over the real logout route *before* the
+          // restart, so the post-restart 401 proves durable revocation rather
+          // than a cookie the fresh process simply never learned about.
+          const logout = await createClient(api.base, revoked)('/auth/logout', {
+            method: 'POST',
+            csrf: true,
+          });
+
+          assert.equal(logout.status, 200, JSON.stringify(logout.body));
+
+          const stoppedBase = api.base;
+
+          // Stop the process the harness booted. SIGTERM runs Nest's shutdown
+          // hooks, which flush the store's ordered write queue before the pool
+          // closes, so both the surviving insert and the revocation are durable.
+          await api.stop();
+
+          // Boot a fresh process against the same disposable database. It
+          // hydrates from auth_sessions, so the rows — not the first process's
+          // memory — are the whole handoff.
+          const restarted = await startApiChild(apiEnv);
+
+          try {
+            assert.notEqual(
+              restarted.base,
+              stoppedBase,
+              'the API was not actually restarted (same address was reused)',
+            );
+
+            const after = await createClient(restarted.base, survivor)('/api/bots');
+
+            assert.equal(
+              after.status,
+              200,
+              `the restarted API rejected a live session as ${after.status} ` +
+                `(${JSON.stringify(after.body)}); the session did not survive the restart`,
+            );
+
+            const afterMe = await createClient(restarted.base, survivor)('/auth/me');
+
+            assert.equal(afterMe.status, 200, JSON.stringify(afterMe.body));
+            assert.equal(
+              afterMe.body.user.userId,
+              userId,
+              'the restarted API resolved the session to a different user',
+            );
+
+            const revokedAfter = await createClient(restarted.base, revoked)('/api/bots');
+
+            assert.equal(
+              revokedAfter.status,
+              401,
+              `a revoked session reached /api/bots as ${revokedAfter.status} after the restart`,
+            );
+            assert.deepEqual(revokedAfter.body, { error: { code: 'unauthenticated' } });
+
+            const revokedMe = await createClient(restarted.base, revoked)('/auth/me');
+
+            assert.equal(
+              revokedMe.status,
+              401,
+              `a revoked session reached /auth/me as ${revokedMe.status} after the restart`,
+            );
+
+            return {
+              apiRestarted: true,
+              sameCookieReused: true,
+              survivorBotStatus: after.status,
+              survivorUserIdMatches: true,
+              revokedBotStatus: revokedAfter.status,
+              revokedMeStatus: revokedMe.status,
+            };
+          } finally {
+            await restarted.stop();
+          }
+        },
+      );
     } finally {
+      // No-op when the restart check already stopped it; idempotent either way.
       await api.stop();
     }
 
     return {
       checks,
       evidence: {
-        apiBase: '127.0.0.1 (child process, ephemeral port)',
+        apiBase: '127.0.0.1 (child process, ephemeral port; restarted on a new port)',
+        sessionStore: 'postgres (auth_sessions; default selection because DATABASE_URL is set)',
+        restartGraceful: true,
         email: KNOWN_EMAIL,
         rawPasswordIncluded: false,
         rawInviteTokenIncluded: false,
       },
       residualRisks: [
         'Email delivery is not implemented; recovery records a hashed token but no message is sent.',
-        'Auth and chat each own an in-memory SessionService in this commit; logout is not shared across those modules either.',
+        'The session store is write-behind: a graceful stop flushes queued writes (what the restart check exercises), a hard kill can lose writes not yet committed, and a process already running does not see another process\u2019s session changes until it restarts.',
         'Auth rate limits are in-process, not a distributed deployment control.',
       ],
     };
