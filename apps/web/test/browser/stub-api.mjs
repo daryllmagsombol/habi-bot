@@ -118,6 +118,16 @@ const ARTIFACT_VERSION = {
 
 const ARTIFACT_DETAIL = { artifact: ARTIFACT, version: ARTIFACT_VERSION };
 
+/** The second row the `paged-artifacts` mode appends behind the first cursor. */
+const ARTIFACT_2 = {
+  ...ARTIFACT,
+  id: '99999999-9999-4999-8999-999999999999',
+  title: 'Second ordering note',
+  currentVersion: 1,
+};
+
+const ARTIFACTS_CURSOR = 'artifacts-page-2';
+
 const SKILL = {
   id: SKILL_ID,
   botId: null,
@@ -254,13 +264,28 @@ function parseJson(body) {
  *   `stream-drop`     the first run-event connection ends after one delta with
  *                     no terminal event; the next one finishes the run, so the
  *                     reconnect path can be observed with its resume cursor.
+ *   `stream-exhaust`  every run-event connection ends after one distinct delta
+ *                     with no terminal event, so the client's bounded
+ *                     reconnect loop runs out and must show its terminal state.
+ *   `paged-artifacts` `GET /api/artifacts` answers a first page with a
+ *                     `nextCursor` and a second page that ends the list.
+ *   `approval-hold`   an approval write is recorded but the server keeps both
+ *                     memory gates off, so a client can be shown discarding its
+ *                     optimistic switch for the server's answer.
+ *
+ * `setDelay` holds every answer for that many milliseconds, so a busy state can
+ * be observed instead of raced. It is 0 by default.
  */
 export function createStub() {
   const requests = [];
   const sent = [];
   let mode = 'ok';
+  let delayMs = 0;
   let accountReadsLeft = 1;
   let streamAttempts = 0;
+  // The server's memory gates; `POST …/approvals` moves them and the Bot's
+  // memory read reports them, exactly as the real API would after a write.
+  let memoryGates = { bot: true, thread: false };
 
   function setMode(next) {
     mode = next;
@@ -269,9 +294,17 @@ export function createStub() {
       accountReadsLeft = 1;
     }
 
-    if (next === 'stream-drop') {
+    if (next === 'stream-drop' || next === 'stream-exhaust') {
       streamAttempts = 0;
     }
+
+    if (next === 'ok') {
+      memoryGates = { bot: true, thread: false };
+    }
+  }
+
+  function setDelay(next) {
+    delayMs = next;
   }
 
   const server = createHttpServer((request, response) => {
@@ -285,6 +318,12 @@ export function createStub() {
         headers: { ...request.headers },
         body,
       });
+
+      if (delayMs > 0) {
+        await new Promise((resolve) => {
+          setTimeout(resolve, delayMs);
+        });
+      }
 
       if (mode === 'drop') {
         request.socket.destroy();
@@ -420,7 +459,16 @@ export function createStub() {
       }
 
       if (method === 'GET' && path === `/api/bots/${BOT_ID}/memories`) {
-        json(response, 200, { memories: [MEMORY], nextCursor: null });
+        json(response, 200, {
+          memories: [
+            {
+              ...MEMORY,
+              botApproved: memoryGates.bot,
+              conversationApproved: memoryGates.thread,
+            },
+          ],
+          nextCursor: null,
+        });
         return;
       }
 
@@ -440,8 +488,19 @@ export function createStub() {
           return;
         }
 
+        // The server's answer is authoritative: `approval-hold` refuses both
+        // gates even when the request asked for them.
+        memoryGates =
+          mode === 'approval-hold'
+            ? { bot: false, thread: false }
+            : { bot: payload.bot === true, thread: payload.thread === true };
+
         json(response, 200, {
-          memory: { ...MEMORY, botApproved: true, conversationApproved: true },
+          memory: {
+            ...MEMORY,
+            botApproved: memoryGates.bot,
+            conversationApproved: memoryGates.thread,
+          },
         });
         return;
       }
@@ -523,7 +582,17 @@ export function createStub() {
       }
 
       if (method === 'GET' && path === '/api/artifacts') {
-        json(response, 200, { artifacts: [ARTIFACT], nextCursor: null });
+        if (mode !== 'paged-artifacts') {
+          json(response, 200, { artifacts: [ARTIFACT], nextCursor: null });
+          return;
+        }
+
+        if (url.searchParams.get('cursor') === ARTIFACTS_CURSOR) {
+          json(response, 200, { artifacts: [ARTIFACT_2], nextCursor: null });
+          return;
+        }
+
+        json(response, 200, { artifacts: [ARTIFACT], nextCursor: ARTIFACTS_CURSOR });
         return;
       }
 
@@ -593,7 +662,14 @@ export function createStub() {
           return;
         }
 
-        json(response, 200, { artifact: ARTIFACT_DETAIL });
+        // A restore is an append: the stored history is never rewritten, so the
+        // answer is a new version number carrying the restored body.
+        json(response, 200, {
+          artifact: {
+            artifact: { ...ARTIFACT, currentVersion: 3 },
+            version: { ...ARTIFACT_VERSION, version: 3 },
+          },
+        });
         return;
       }
 
@@ -685,6 +761,21 @@ export function createStub() {
             createdAt: NOW,
           })}\n\n`;
 
+        if (mode === 'stream-exhaust') {
+          streamAttempts += 1;
+
+          // Every connection ends after one distinct delta and no terminal
+          // event: the client must exhaust its bounded retries, keep the text
+          // it already applied, and show its retry affordance.
+          response.write(
+            frame(3 + streamAttempts, 'message.delta', {
+              text: `attempt ${streamAttempts} `,
+            }),
+          );
+          response.end();
+          return;
+        }
+
         if (mode === 'stream-drop') {
           streamAttempts += 1;
 
@@ -729,6 +820,8 @@ export function createStub() {
     /** The messages this stub has accepted, so a test can assert what was sent. */
     sent,
     setMode,
+    /** Holds every answer for `ms`, so an in-flight state can be asserted. */
+    setDelay,
     mode: () => mode,
     /** Forgets recorded requests; called between tests so assertions stay local. */
     clearRequests() {
