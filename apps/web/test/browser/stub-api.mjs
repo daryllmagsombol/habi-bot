@@ -25,6 +25,8 @@ export const SKILL_ID = '88888888-8888-4888-8888-888888888888';
 /** The record a create answers with; it is not in the list the page starts on. */
 export const NEW_BOT_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 export const NEW_THREAD_ID = 'abababab-abab-4bab-8bab-abababababab';
+/** The skill a create answers with; distinct from the listed skill's id. */
+export const NEW_SKILL_ID = 'dededede-dede-4ded-8ded-dededededede';
 export const CSRF = 'csrf-test-token';
 export const SESSION = 'session-test-secret';
 export const EXPORT_FILENAME = 'habi-account-export-20261104T060000Z.json';
@@ -346,6 +348,11 @@ function parseJson(body) {
  *
  * `setDelay` holds every answer for that many milliseconds, so a busy state can
  * be observed instead of raced. It is 0 by default.
+ *
+ * Writes are stateful where a follow-up read would otherwise contradict them: a
+ * `PATCH /api/bots/:id` rewrites the profile the list and detail routes serve,
+ * and a skill create is answered with a new id and added to the served list.
+ * `setMode('ok')` restores all of that state.
  */
 export function createStub() {
   const requests = [];
@@ -361,6 +368,13 @@ export function createStub() {
   // write, which is what "the card appears after the server answers" means.
   let createdBots = [];
   let createdThreads = [];
+  let createdSkills = [];
+  // The profile the API serves. A `PATCH /api/bots/:id` rewrites it, so the
+  // refreshed page can only show what the server answered.
+  let botProfile = { ...BOT };
+  // The gallery's one-line purpose is longer than the profile description the
+  // detail route serves; a patch moves both, as the API would.
+  let botPurpose = 'Reads what you attach and names the paragraph behind every claim.';
   let threadTitle = THREAD.title;
 
   function setMode(next) {
@@ -378,6 +392,9 @@ export function createStub() {
       memoryGates = { bot: true, thread: false };
       createdBots = [];
       createdThreads = [];
+      createdSkills = [];
+      botProfile = { ...BOT };
+      botPurpose = 'Reads what you attach and names the paragraph behind every claim.';
       threadTitle = THREAD.title;
     }
   }
@@ -475,8 +492,8 @@ export function createStub() {
           bots: [
             {
               id: BOT_ID,
-              name: BOT.name,
-              purpose: 'Reads what you attach and names the paragraph behind every claim.',
+              name: botProfile.name,
+              purpose: botPurpose,
               status: 'active',
               avatarRef: null,
               conversationCount: 1,
@@ -525,24 +542,48 @@ export function createStub() {
 
       if (method === 'GET' && path === `/api/bots/${BOT_ID}`) {
         json(response, 200, {
-          bot: BOT,
-          purpose: 'Reads what you attach.',
+          bot: botProfile,
+          purpose: botProfile.description,
           conversationCount: 1,
           lastActivityAt: NOW,
         });
         return;
       }
 
-      if (
-        (method === 'PATCH' || method === 'DELETE') &&
-        path === `/api/bots/${BOT_ID}`
-      ) {
+      // A patch is applied to the served profile, and answered with it: a page
+      // that refreshed can only show the server's version, never its own draft.
+      if (method === 'PATCH' && path === `/api/bots/${BOT_ID}`) {
         if (!csrfOk) {
           json(response, 403, { error: { code: 'csrf_invalid' } });
           return;
         }
 
-        json(response, 200, { bot: { ...BOT, ...payload } });
+        if (typeof payload.name === 'string') {
+          botProfile = { ...botProfile, name: payload.name };
+        }
+
+        if (typeof payload.description === 'string') {
+          botProfile = { ...botProfile, description: payload.description };
+          botPurpose = payload.description;
+        }
+
+        if (typeof payload.instructionsMarkdown === 'string') {
+          botProfile = { ...botProfile, instructionsMarkdown: payload.instructionsMarkdown };
+        }
+
+        botProfile = { ...botProfile, updatedAt: NOW };
+
+        json(response, 200, { bot: botProfile });
+        return;
+      }
+
+      if (method === 'DELETE' && path === `/api/bots/${BOT_ID}`) {
+        if (!csrfOk) {
+          json(response, 403, { error: { code: 'csrf_invalid' } });
+          return;
+        }
+
+        json(response, 200, { bot: { ...botProfile, status: 'archived' } });
         return;
       }
 
@@ -887,7 +928,7 @@ export function createStub() {
           return;
         }
 
-        json(response, 200, { skills: [SKILL], nextCursor: null });
+        json(response, 200, { skills: [SKILL, ...createdSkills], nextCursor: null });
         return;
       }
 
@@ -897,7 +938,21 @@ export function createStub() {
           return;
         }
 
-        json(response, 201, { skill: { ...SKILL, ...payload } });
+        // A create answers a new record: a fresh id, version 1, and the Bot the
+        // form attached it to (or the library when it named none).
+        const skill = {
+          ...SKILL,
+          name: typeof payload.name === 'string' ? payload.name : SKILL.name,
+          description: typeof payload.description === 'string' ? payload.description : '',
+          bodyMarkdown: typeof payload.bodyMarkdown === 'string' ? payload.bodyMarkdown : '',
+          botId: typeof payload.botId === 'string' ? payload.botId : null,
+          id: NEW_SKILL_ID,
+          version: 1,
+        };
+
+        createdSkills = [...createdSkills, skill];
+
+        json(response, 201, { skill });
         return;
       }
 

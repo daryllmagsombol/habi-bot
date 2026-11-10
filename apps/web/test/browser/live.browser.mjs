@@ -41,10 +41,14 @@
  *   writes       a create posts the form body plus the CSRF token and the record
  *                only appears after the answer; an artifact past the 100 KB cap
  *                is refused before any request and the bound is stated; a skill
- *                attach carries `{botId}`, detach carries none, and both badges
- *                follow the server; a memory proposal carries `{text,
- *                threadId}`; a Bot and both thread-create affordances post and
- *                open what the server returned
+ *                create posts the form and the Bot it attaches to, and its name
+ *                and 64 KiB body bounds refuse before any request; a Bot profile
+ *                edit patches all three profile fields and only the refreshed
+ *                card or identity takes the server's answer; a skill attach
+ *                carries `{botId}`, detach carries none, and both badges follow
+ *                the server; a memory proposal carries `{text, threadId}`; a Bot
+ *                and both thread-create affordances post and open what the
+ *                server returned
  *   streaming    a sent message renders the streamed reply the stub wrote, a
  *                dropped stream reconnects from its last `id:`, a stream that
  *                never resumes exhausts the documented bound of five
@@ -1722,6 +1726,200 @@ describe(
         }
       });
 
+      test('creating a skill posts the form and the new skill appears after the answer', async () => {
+        stub.setMode('ok');
+        stub.clearRequests();
+        stub.setDelay(600);
+
+        const context = await openContext(browser, {
+          origin: server.origin,
+          width: 1440,
+          height: 1000,
+          theme: 'light',
+          session: SESSION,
+          csrf: true,
+        });
+        const page = await context.newPage();
+
+        try {
+          await gotoLive(page, server.origin, `${WORKSPACE}&panel=context`, 'Plain verbs');
+
+          const skills = page.locator('section[aria-labelledby="context-skills"]');
+          await skills.getByRole('button', { name: 'New skill', exact: true }).click();
+
+          const form = skills.locator('form');
+          await form.waitFor({ state: 'visible' });
+          assert.ok(
+            (await form.innerText()).includes('Create a skill'),
+            'the panel did not open the create mode',
+          );
+
+          const name = 'Plain nouns';
+          const description = 'Prefer a noun when it is the subject.';
+          const bodyMarkdown = 'Name the actor, then the action.';
+
+          await form.getByLabel('Name', { exact: true }).fill(name);
+          await form.getByLabel('Description', { exact: true }).fill(description);
+          await form.getByLabel('Body Markdown', { exact: true }).fill(bodyMarkdown);
+
+          // The panel belongs to a Bot, so the create form offers the optional
+          // attachment and starts it checked.
+          const attach = form.getByLabel('Attach to Live Field Notes');
+          assert.equal(
+            await attach.isChecked(),
+            true,
+            'the create form did not default to attaching the skill to the open Bot',
+          );
+
+          const submit = form.getByRole('button', { name: 'Create skill' });
+          assert.equal(await submit.isDisabled(), false, 'a complete skill form was not savable');
+
+          await submit.click();
+          await form
+            .locator('button[type="submit"][aria-busy="true"]')
+            .waitFor({ state: 'attached', timeout: 5_000 });
+
+          // Held by the stub: the list cannot carry a record the server has not
+          // answered with yet.
+          assert.equal(
+            await skills.getByText(name, { exact: true }).count(),
+            0,
+            'the skill was listed before the server answered',
+          );
+
+          await page
+            .getByText('Created “Plain nouns” as a draft. It grants no tools.', {
+              exact: false,
+            })
+            .first()
+            .waitFor({ state: 'visible', timeout: 15_000 });
+
+          const row = skills.locator('li').filter({ hasText: name });
+          await row.waitFor({ state: 'visible' });
+          assert.equal(
+            await row.getByText('Attached', { exact: true }).count(),
+            1,
+            'the created skill did not follow the attachment the server answered with',
+          );
+          assert.equal(
+            await skills.getByText('Plain verbs', { exact: true }).count(),
+            1,
+            'the create disturbed the skill already listed',
+          );
+
+          const posts = stub.requests.filter(
+            (entry) => entry.method === 'POST' && entry.url === '/api/skills',
+          );
+          assert.equal(posts.length, 1, 'the create did not send exactly one POST');
+          assert.deepEqual(
+            JSON.parse(posts[0].body),
+            { name, description, bodyMarkdown, botId: BOT_ID },
+            'the create did not carry the form and the attached Bot',
+          );
+          assert.equal(posts[0].headers['x-csrf-token'], CSRF);
+        } finally {
+          stub.setDelay(0);
+          await page.close();
+          await context.close();
+        }
+      });
+
+      test('the skill bounds are enforced before any request, and the bound is stated', async () => {
+        stub.setMode('ok');
+        stub.clearRequests();
+
+        const context = await openContext(browser, {
+          origin: server.origin,
+          width: 1440,
+          height: 1000,
+          theme: 'light',
+          session: SESSION,
+          csrf: true,
+        });
+        const page = await context.newPage();
+
+        try {
+          await gotoLive(page, server.origin, `${WORKSPACE}&panel=context`, 'Plain verbs');
+
+          const skills = page.locator('section[aria-labelledby="context-skills"]');
+          await skills.getByRole('button', { name: 'New skill', exact: true }).click();
+
+          const form = skills.locator('form');
+          await form.waitFor({ state: 'visible' });
+
+          const submit = form.getByRole('button', { name: 'Create skill' });
+          assert.equal(
+            await submit.isDisabled(),
+            true,
+            'an empty skill name was offered as savable',
+          );
+
+          // The name bound is the field's own: an 81st character cannot be typed.
+          const name = form.getByLabel('Name', { exact: true });
+          assert.equal(
+            await name.getAttribute('maxlength'),
+            '80',
+            'the name field did not carry the 80-character bound',
+          );
+          assert.ok(
+            (await form.innerText()).includes('1–80 characters. Names are unique per owner.'),
+            'the form did not state the name bound',
+          );
+
+          await name.fill('n'.repeat(80));
+          await name.press('n');
+          assert.equal(
+            (await name.inputValue()).length,
+            80,
+            'the name field accepted an 81st character',
+          );
+
+          // The body bound is measured in UTF-8 bytes and refused in the form.
+          await name.fill('Too much guidance');
+
+          const overCap = 64 * 1024 + 1;
+          const body = form.getByLabel('Body Markdown', { exact: true });
+          await body.fill('x'.repeat(overCap));
+
+          await form
+            .getByText(
+              'This body is 65,537 bytes. The API accepts at most 65,536 bytes.',
+              { exact: true },
+            )
+            .waitFor({ state: 'visible' });
+          assert.ok(
+            (await form.innerText()).includes('65,537 / 65,536 bytes'),
+            'the byte counter did not show the over-cap size',
+          );
+          assert.equal(
+            await submit.isDisabled(),
+            true,
+            'an over-cap skill body was offered as savable',
+          );
+
+          // The submit handler refuses too, not only the disabled attribute.
+          await form.evaluate((element) => element.requestSubmit());
+          await delay(400);
+          assert.equal(
+            stub.requests.filter(
+              (entry) => entry.method === 'POST' && entry.url === '/api/skills',
+            ).length,
+            0,
+            'a skill outside the bounds was sent anyway',
+          );
+
+          await body.fill('Small enough.');
+          assert.equal(
+            await submit.isDisabled(),
+            false,
+            'a skill inside the bounds did not enable the create',
+          );
+        } finally {
+          await page.close();
+          await context.close();
+        }
+      });
+
       test('a proposed memory carries its text and source thread', async () => {
         stub.setMode('ok');
         stub.clearRequests();
@@ -2018,6 +2216,232 @@ describe(
             JSON.parse(patches[0].body),
             { title: 'Ordering, renamed' },
             'the rename did not carry the new title',
+          );
+          assert.equal(patches[0].headers['x-csrf-token'], CSRF);
+        } finally {
+          stub.setDelay(0);
+          await page.close();
+          await context.close();
+        }
+      });
+
+      test('editing a bot from the gallery patches the profile and the card follows the server', async () => {
+        stub.setMode('ok');
+        stub.clearRequests();
+        stub.setDelay(700);
+
+        const context = await openContext(browser, {
+          origin: server.origin,
+          width: 1440,
+          height: 1000,
+          theme: 'light',
+          session: SESSION,
+          csrf: true,
+        });
+        const page = await context.newPage();
+
+        try {
+          await gotoLive(page, server.origin, '/bots', 'Live Field Notes');
+
+          await page.getByRole('button', { name: 'Edit bot', exact: true }).click();
+
+          const form = page.locator('form').filter({ hasText: 'Instructions' });
+          await form.waitFor({ state: 'visible' });
+
+          // The edit card reads the profile before it opens, so all three
+          // fields are the API's text rather than the gallery's summary line.
+          assert.equal(
+            await form.getByLabel('Name', { exact: true }).inputValue(),
+            'Live Field Notes',
+            'the edit form was not prefilled from the profile read',
+          );
+          assert.equal(
+            await form.getByLabel('Purpose', { exact: true }).inputValue(),
+            'Reads what you attach.',
+            'the purpose was not prefilled from the profile read',
+          );
+          assert.equal(
+            await form.getByLabel('Instructions', { exact: true }).inputValue(),
+            'Cite the document.',
+            'the instructions were not prefilled from the profile read',
+          );
+
+          const name = 'Field Notes, edited';
+          const purpose = 'Reads only the edited notes.';
+
+          await form.getByLabel('Name', { exact: true }).fill(name);
+          await form.getByLabel('Purpose', { exact: true }).fill(purpose);
+          await form.getByRole('button', { name: 'Save changes' }).click();
+          await form
+            .locator('button[type="submit"][aria-busy="true"]')
+            .waitFor({ state: 'attached', timeout: 5_000 });
+
+          // Held by the stub: the card cannot take the draft name before the
+          // answer, and it keeps the name the server still serves.
+          assert.equal(
+            await page.getByRole('link', { name, exact: false }).count(),
+            0,
+            'the card took the draft name before the server answered',
+          );
+          assert.ok(
+            (await bodyText(page)).includes('Live Field Notes'),
+            'the card left its served name before the answer',
+          );
+
+          await page.getByRole('link', { name, exact: false }).waitFor({
+            state: 'visible',
+            timeout: 15_000,
+          });
+          await page.getByText(purpose, { exact: true }).first().waitFor({ state: 'visible' });
+          await form.waitFor({ state: 'detached' });
+
+          const patches = stub.requests.filter(
+            (entry) => entry.method === 'PATCH' && entry.url === `/api/bots/${BOT_ID}`,
+          );
+          assert.equal(patches.length, 1, 'the edit did not send exactly one PATCH');
+          assert.deepEqual(
+            JSON.parse(patches[0].body),
+            { name, description: purpose, instructionsMarkdown: 'Cite the document.' },
+            'the edit form sends all three profile fields, including the unchanged instructions',
+          );
+          assert.equal(patches[0].headers['x-csrf-token'], CSRF);
+        } finally {
+          stub.setDelay(0);
+          await page.close();
+          await context.close();
+        }
+      });
+
+      test('a no-change bot edit is still offered and sends the prefilled profile', async () => {
+        stub.setMode('ok');
+        stub.clearRequests();
+
+        const context = await openContext(browser, {
+          origin: server.origin,
+          width: 1440,
+          height: 1000,
+          theme: 'light',
+          session: SESSION,
+          csrf: true,
+        });
+        const page = await context.newPage();
+
+        try {
+          await gotoLive(page, server.origin, '/bots', 'Live Field Notes');
+
+          await page.getByRole('button', { name: 'Edit bot', exact: true }).click();
+
+          const form = page.locator('form').filter({ hasText: 'Instructions' });
+          await form.waitFor({ state: 'visible' });
+
+          // The edit form validates the name, not the difference: submitting an
+          // unchanged profile is offered and writes the fields it was given.
+          const submit = form.getByRole('button', { name: 'Save changes' });
+          assert.equal(
+            await submit.isDisabled(),
+            false,
+            'the edit form blocked a submit it does not diff',
+          );
+
+          await submit.click();
+          await form.waitFor({ state: 'detached', timeout: 15_000 });
+
+          const patches = stub.requests.filter(
+            (entry) => entry.method === 'PATCH' && entry.url === `/api/bots/${BOT_ID}`,
+          );
+          assert.equal(patches.length, 1, 'the no-change edit did not send exactly one PATCH');
+          assert.deepEqual(
+            JSON.parse(patches[0].body),
+            {
+              name: 'Live Field Notes',
+              description: 'Reads what you attach.',
+              instructionsMarkdown: 'Cite the document.',
+            },
+            'the no-change edit sent fields that were not the prefilled profile',
+          );
+          assert.equal(patches[0].headers['x-csrf-token'], CSRF);
+          assert.equal(
+            await page.getByRole('link', { name: 'Live Field Notes', exact: false }).count(),
+            1,
+            'the no-change edit removed or duplicated the card',
+          );
+        } finally {
+          await page.close();
+          await context.close();
+        }
+      });
+
+      test('editing a bot from the workspace refreshes the identity from the server', async () => {
+        stub.setMode('ok');
+        stub.clearRequests();
+        stub.setDelay(600);
+
+        const context = await openContext(browser, {
+          origin: server.origin,
+          width: 1440,
+          height: 1000,
+          theme: 'light',
+          session: SESSION,
+          csrf: true,
+        });
+        const page = await context.newPage();
+
+        try {
+          await gotoLive(page, server.origin, WORKSPACE, 'First live question');
+
+          await page.getByRole('button', { name: 'Edit bot', exact: true }).click();
+
+          const form = page.locator('form').filter({ hasText: 'Instructions' });
+          await form.waitFor({ state: 'visible' });
+
+          assert.equal(
+            await form.getByLabel('Instructions', { exact: true }).inputValue(),
+            'Cite the document.',
+            'the edit form did not hold the instructions the page already rendered',
+          );
+
+          const name = 'Workspace Notes';
+          const purpose = 'Reads the workspace notes.';
+          const instructions = 'Cite the workspace document.';
+
+          await form.getByLabel('Name', { exact: true }).fill(name);
+          await form.getByLabel('Purpose', { exact: true }).fill(purpose);
+          await form.getByLabel('Instructions', { exact: true }).fill(instructions);
+          await form.getByRole('button', { name: 'Save changes' }).click();
+          await form
+            .locator('button[type="submit"][aria-busy="true"]')
+            .waitFor({ state: 'attached', timeout: 5_000 });
+
+          // Held by the stub: the identity heading keeps the served name.
+          assert.equal(
+            await page.getByRole('heading', { level: 1, name, exact: true }).count(),
+            0,
+            'the identity took the draft name before the server answered',
+          );
+          await page
+            .getByRole('heading', { level: 1, name: 'Live Field Notes', exact: true })
+            .waitFor({ state: 'visible' });
+
+          await page.getByRole('heading', { level: 1, name, exact: true }).waitFor({
+            state: 'visible',
+            timeout: 15_000,
+          });
+
+          // The refreshed page remounts the form with the server's profile.
+          assert.equal(
+            await form.getByLabel('Name', { exact: true }).inputValue(),
+            name,
+            'the open edit form did not re-prefill from the refreshed profile',
+          );
+
+          const patches = stub.requests.filter(
+            (entry) => entry.method === 'PATCH' && entry.url === `/api/bots/${BOT_ID}`,
+          );
+          assert.equal(patches.length, 1, 'the edit did not send exactly one PATCH');
+          assert.deepEqual(
+            JSON.parse(patches[0].body),
+            { name, description: purpose, instructionsMarkdown: instructions },
+            'the workspace edit did not carry the changed profile',
           );
           assert.equal(patches[0].headers['x-csrf-token'], CSRF);
         } finally {
