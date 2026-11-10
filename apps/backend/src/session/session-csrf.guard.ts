@@ -7,6 +7,10 @@
  * missing/mismatched Origin/Referer all return the same `403 csrf_invalid`
  * body without account or session detail. Double-submit cookies are not used.
  *
+ * The presented token is compared with the record's stored SHA-256 hash in
+ * constant time, so the raw token may live only with the client and a restarted
+ * process can still verify it.
+ *
  * SessionAuthGuard must have run first; this guard only reads its attachment.
  */
 import { ForbiddenException, Injectable } from '@nestjs/common';

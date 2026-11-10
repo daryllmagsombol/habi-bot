@@ -117,9 +117,10 @@ export class SessionSpikeController {
     @Res({ passthrough: true }) response: Response,
   ): { csrfToken: string } {
     const { record } = requireSession(request);
+    const csrfToken = this.sessions.csrfTokenFor(record);
 
-    response.setHeader('x-csrf-token', record.csrfToken);
-    return { csrfToken: record.csrfToken };
+    response.setHeader('x-csrf-token', csrfToken);
+    return { csrfToken };
   }
 
   @Get('me')
