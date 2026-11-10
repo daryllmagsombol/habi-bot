@@ -22,6 +22,9 @@ export const MISSING_BYTES_ID = '55555555-5555-4555-8555-555555555555';
 export const ARTIFACT_ID = '66666666-6666-4666-8666-666666666666';
 export const MEMORY_ID = '77777777-7777-4777-8777-777777777777';
 export const SKILL_ID = '88888888-8888-4888-8888-888888888888';
+/** The record a create answers with; it is not in the list the page starts on. */
+export const NEW_BOT_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+export const NEW_THREAD_ID = 'abababab-abab-4bab-8bab-abababababab';
 export const CSRF = 'csrf-test-token';
 export const SESSION = 'session-test-secret';
 export const EXPORT_FILENAME = 'habi-account-export-20261104T060000Z.json';
@@ -47,6 +50,14 @@ const THREAD = {
   lastMessageSeq: 2,
   createdAt: NOW,
   updatedAt: NOW,
+};
+
+/** The thread a create answers with; the list only carries it after that write. */
+const THREAD_2 = {
+  ...THREAD,
+  id: NEW_THREAD_ID,
+  title: 'Fresh thread',
+  lastMessageSeq: 0,
 };
 
 const ATTACHMENT = {
@@ -128,6 +139,42 @@ const ARTIFACT_2 = {
 
 const ARTIFACTS_CURSOR = 'artifacts-page-2';
 
+/** The head version in `paged-versions`; the older page is version 1. */
+const ARTIFACT_VERSION_HEAD = {
+  artifactId: ARTIFACT_ID,
+  version: 2,
+  contentSha256: 'd'.repeat(64),
+  byteSize: 58,
+  createdBy: 'user-1',
+  createdAt: NOW,
+};
+
+const VERSIONS_CURSOR = 'versions-page-2';
+
+/** The second memory behind the `paged-memories` cursor. */
+const MEMORY_2 = {
+  ...MEMORY,
+  id: 'efefefef-efef-4efe-8efe-efefefefefef',
+  content: 'Wants a one-line summary at the end of long replies.',
+};
+
+const MEMORIES_CURSOR = 'memories-page-2';
+
+/** The second hit behind the `paged-search` cursor. */
+const SEARCH_HIT_2 = {
+  messageId: 'message-2',
+  conversationId: THREAD_ID,
+  conversationTitle: THREAD.title,
+  botId: BOT_ID,
+  role: 'assistant',
+  seq: 2,
+  createdAt: NOW,
+  score: 0.25,
+  snippet: 'Streamed <mark>live</mark> reply.',
+};
+
+const SEARCH_CURSOR = 'search-page-2';
+
 const SKILL = {
   id: SKILL_ID,
   botId: null,
@@ -141,6 +188,17 @@ const SKILL = {
   updatedAt: NOW,
   deletedAt: null,
 };
+
+/** The second skill behind the `paged-skills` cursor. */
+const SKILL_2 = {
+  ...SKILL,
+  id: 'cdcdcdcd-cdcd-4cdc-8cdc-cdcdcdcdcdcd',
+  name: 'Short sentences',
+  description: 'Keep every sentence short.',
+  bodyMarkdown: 'One clause per sentence.',
+};
+
+const SKILLS_CURSOR = 'skills-page-2';
 
 const RUN = {
   id: RUN_ID,
@@ -269,6 +327,19 @@ function parseJson(body) {
  *                     reconnect loop runs out and must show its terminal state.
  *   `paged-artifacts` `GET /api/artifacts` answers a first page with a
  *                     `nextCursor` and a second page that ends the list.
+ *   `paged-skills`    `GET /api/skills` answers two cursor pages.
+ *   `paged-memories`  `GET /api/bots/:id/memories` answers two cursor pages, so
+ *                     the server-rendered page starts with a `nextCursor`.
+ *   `paged-versions`  the selected artifact is at version 2, whose version list
+ *                     answers a second, older page.
+ *   `paged-search`    `GET /api/search` answers two cursor pages.
+ *   `artifact-413`    `POST /api/artifacts` answers the API's `413`
+ *                     `invalid_input` refusal, which the BFF must relay.
+ *   `stream-hold`     the run-event connection sends one delta and then stays
+ *                     open, so a streaming run can be cancelled.
+ *   `stream-hold-terminal` the same held stream, but `/cancel` answers a run the
+ *                     server already finished, so the client must show that
+ *                     terminal state instead of a local "stopped" label.
  *   `approval-hold`   an approval write is recorded but the server keeps both
  *                     memory gates off, so a client can be shown discarding its
  *                     optimistic switch for the server's answer.
@@ -286,6 +357,11 @@ export function createStub() {
   // The server's memory gates; `POST …/approvals` moves them and the Bot's
   // memory read reports them, exactly as the real API would after a write.
   let memoryGates = { bot: true, thread: false };
+  // Records the browser created. The list routes include them only after the
+  // write, which is what "the card appears after the server answers" means.
+  let createdBots = [];
+  let createdThreads = [];
+  let threadTitle = THREAD.title;
 
   function setMode(next) {
     mode = next;
@@ -300,6 +376,9 @@ export function createStub() {
 
     if (next === 'ok') {
       memoryGates = { bot: true, thread: false };
+      createdBots = [];
+      createdThreads = [];
+      threadTitle = THREAD.title;
     }
   }
 
@@ -404,6 +483,7 @@ export function createStub() {
               lastActivityAt: NOW,
               updatedAt: NOW,
             },
+            ...createdBots,
           ],
           nextCursor: null,
         });
@@ -416,7 +496,30 @@ export function createStub() {
           return;
         }
 
-        json(response, 201, { bot: BOT });
+        const bot = {
+          ...BOT,
+          id: NEW_BOT_ID,
+          name: typeof payload.name === 'string' ? payload.name : BOT.name,
+          description: typeof payload.description === 'string' ? payload.description : '',
+          instructionsMarkdown:
+            typeof payload.instructionsMarkdown === 'string' ? payload.instructionsMarkdown : '',
+        };
+
+        createdBots = [
+          ...createdBots,
+          {
+            id: bot.id,
+            name: bot.name,
+            purpose: bot.description,
+            status: bot.status,
+            avatarRef: null,
+            conversationCount: 0,
+            lastActivityAt: NOW,
+            updatedAt: NOW,
+          },
+        ];
+
+        json(response, 201, { bot });
         return;
       }
 
@@ -444,7 +547,10 @@ export function createStub() {
       }
 
       if (method === 'GET' && path === `/api/bots/${BOT_ID}/threads`) {
-        json(response, 200, { threads: [THREAD], nextCursor: null });
+        json(response, 200, {
+          threads: [{ ...THREAD, title: threadTitle }, ...createdThreads],
+          nextCursor: null,
+        });
         return;
       }
 
@@ -454,11 +560,40 @@ export function createStub() {
           return;
         }
 
-        json(response, 201, { thread: THREAD });
+        const thread = {
+          ...THREAD_2,
+          title:
+            typeof payload.title === 'string' && payload.title.length > 0
+              ? payload.title
+              : 'New conversation',
+        };
+
+        createdThreads = [...createdThreads, thread];
+
+        json(response, 201, { thread });
         return;
       }
 
       if (method === 'GET' && path === `/api/bots/${BOT_ID}/memories`) {
+        if (mode === 'paged-memories') {
+          if (url.searchParams.get('cursor') === MEMORIES_CURSOR) {
+            json(response, 200, { memories: [MEMORY_2], nextCursor: null });
+            return;
+          }
+
+          json(response, 200, {
+            memories: [
+              {
+                ...MEMORY,
+                botApproved: memoryGates.bot,
+                conversationApproved: memoryGates.thread,
+              },
+            ],
+            nextCursor: MEMORIES_CURSOR,
+          });
+          return;
+        }
+
         json(response, 200, {
           memories: [
             {
@@ -516,6 +651,20 @@ export function createStub() {
         return;
       }
 
+      if (
+        method === 'GET' &&
+        createdThreads.some((thread) => path === `/api/threads/${thread.id}/messages`)
+      ) {
+        json(response, 200, {
+          messages: [],
+          beforeCursor: null,
+          afterCursor: null,
+          hasMoreBefore: false,
+          hasMoreAfter: false,
+        });
+        return;
+      }
+
       if (method === 'POST' && path === `/api/threads/${THREAD_ID}/messages`) {
         if (!csrfOk) {
           json(response, 403, { error: { code: 'csrf_invalid' } });
@@ -546,6 +695,10 @@ export function createStub() {
         if (!csrfOk) {
           json(response, 403, { error: { code: 'csrf_invalid' } });
           return;
+        }
+
+        if (method === 'PATCH' && typeof payload.title === 'string') {
+          threadTitle = payload.title;
         }
 
         json(response, 200, { thread: { ...THREAD, ...payload } });
@@ -582,6 +735,14 @@ export function createStub() {
       }
 
       if (method === 'GET' && path === '/api/artifacts') {
+        if (mode === 'paged-versions') {
+          json(response, 200, {
+            artifacts: [{ ...ARTIFACT, currentVersion: 2 }],
+            nextCursor: null,
+          });
+          return;
+        }
+
         if (mode !== 'paged-artifacts') {
           json(response, 200, { artifacts: [ARTIFACT], nextCursor: null });
           return;
@@ -602,6 +763,13 @@ export function createStub() {
           return;
         }
 
+        // The transport bound is enforced by the API and the BFF relays it; the
+        // editor's own cap cannot know a server-side refusal.
+        if (mode === 'artifact-413') {
+          json(response, 413, { error: { code: 'invalid_input' } });
+          return;
+        }
+
         json(response, 201, {
           artifact: {
             artifact: { ...ARTIFACT, title: payload.title ?? ARTIFACT.title },
@@ -612,6 +780,16 @@ export function createStub() {
       }
 
       if (method === 'GET' && path === `/api/artifacts/${ARTIFACT_ID}`) {
+        if (mode === 'paged-versions') {
+          json(response, 200, {
+            artifact: {
+              artifact: { ...ARTIFACT, currentVersion: 2 },
+              version: { ...ARTIFACT_VERSION, version: 2 },
+            },
+          });
+          return;
+        }
+
         json(response, 200, { artifact: ARTIFACT_DETAIL });
         return;
       }
@@ -640,6 +818,31 @@ export function createStub() {
       }
 
       if (method === 'GET' && path === `/api/artifacts/${ARTIFACT_ID}/versions`) {
+        if (mode === 'paged-versions') {
+          if (url.searchParams.get('cursor') === VERSIONS_CURSOR) {
+            json(response, 200, {
+              versions: [
+                {
+                  artifactId: ARTIFACT_ID,
+                  version: 1,
+                  contentSha256: ARTIFACT_VERSION.contentSha256,
+                  byteSize: ARTIFACT_VERSION.byteSize,
+                  createdBy: ARTIFACT_VERSION.createdBy,
+                  createdAt: NOW,
+                },
+              ],
+              nextCursor: null,
+            });
+            return;
+          }
+
+          json(response, 200, {
+            versions: [ARTIFACT_VERSION_HEAD],
+            nextCursor: VERSIONS_CURSOR,
+          });
+          return;
+        }
+
         json(response, 200, {
           versions: [
             {
@@ -674,6 +877,16 @@ export function createStub() {
       }
 
       if (method === 'GET' && path === '/api/skills') {
+        if (mode === 'paged-skills') {
+          if (url.searchParams.get('cursor') === SKILLS_CURSOR) {
+            json(response, 200, { skills: [SKILL_2], nextCursor: null });
+            return;
+          }
+
+          json(response, 200, { skills: [SKILL], nextCursor: SKILLS_CURSOR });
+          return;
+        }
+
         json(response, 200, { skills: [SKILL], nextCursor: null });
         return;
       }
@@ -725,6 +938,31 @@ export function createStub() {
       }
 
       if (method === 'GET' && path === '/api/search') {
+        if (mode === 'paged-search') {
+          if (url.searchParams.get('cursor') === SEARCH_CURSOR) {
+            json(response, 200, { results: [SEARCH_HIT_2], nextCursor: null });
+            return;
+          }
+
+          json(response, 200, {
+            results: [
+              {
+                messageId: 'message-1',
+                conversationId: THREAD_ID,
+                conversationTitle: THREAD.title,
+                botId: BOT_ID,
+                role: 'user',
+                seq: 1,
+                createdAt: NOW,
+                score: 0.5,
+                snippet: 'First <mark>live</mark> question',
+              },
+            ],
+            nextCursor: SEARCH_CURSOR,
+          });
+          return;
+        }
+
         json(response, 200, {
           results: [
             {
@@ -776,6 +1014,18 @@ export function createStub() {
           return;
         }
 
+        if (mode === 'stream-hold' || mode === 'stream-hold-terminal') {
+          // One delta, then no terminal event: the run stays live until the
+          // browser cancels it. The connection closes with the client.
+          response.write(frame(4, 'message.delta', { text: 'Streaming ' }));
+          response.on('close', () => {
+            if (!response.writableEnded) {
+              response.end();
+            }
+          });
+          return;
+        }
+
         if (mode === 'stream-drop') {
           streamAttempts += 1;
 
@@ -806,7 +1056,11 @@ export function createStub() {
           return;
         }
 
-        json(response, 200, { run: { ...RUN, status: 'cancelled' } });
+        // `stream-hold-terminal` answers a run the server already finished, so a
+        // client that relabels locally would claim a cancel the server refused.
+        json(response, 200, {
+          run: { ...RUN, status: mode === 'stream-hold-terminal' ? 'completed' : 'cancelled' },
+        });
         return;
       }
 
