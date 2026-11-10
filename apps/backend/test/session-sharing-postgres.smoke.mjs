@@ -425,6 +425,8 @@ describe(
         'run',
         '-d',
         '--rm',
+        '--tmpfs',
+        '/var/lib/postgresql:rw,noexec,nosuid',
         '--name',
         containerName,
         '-e',

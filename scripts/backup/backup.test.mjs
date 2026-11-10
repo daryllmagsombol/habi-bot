@@ -181,6 +181,8 @@ test('backup and restore rehearsal against a disposable PostgreSQL container', {
     'run',
     '--detach',
     '--rm',
+    '--tmpfs',
+    '/var/lib/postgresql:rw,noexec,nosuid',
     '--name',
     container,
     '--label',

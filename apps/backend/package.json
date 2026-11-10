@@ -10,7 +10,7 @@
     "start:worker": "node dist/worker.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint .",
-    "test": "node --test test/*.smoke.mjs"
+    "test": "nest build && node --test test/*.smoke.mjs"
   },
   "dependencies": {
     "@habi/contracts": "workspace:*",
