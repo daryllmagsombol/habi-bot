@@ -175,12 +175,20 @@ browser; browser/mobile rendering remains a web-lane check.
    unrecoverable.** The Run becomes `execution_uncertain` and is not
    re-dispatched, to avoid duplicate paid work. A deliberate safety tradeoff,
    not a silent success.
-3. **No stack has been started from `compose.staging.yaml` or
-   `compose.production.yaml`.** Those files pass `DATABASE_URL`, the P1 flags,
-   the provider pair and the web's API origins, and their readiness probes
-   assert the real surface rather than `/health`, but a deployment host, a
-   registry and an immutable image tag are still owner-held. The local harness
-   cannot substitute for a deployed run.
+3. **No stack has been *deployed*.** `compose.staging.yaml` has now been built
+   and started locally, which retires the "never booted" part of this risk:
+   all four services reached `healthy`, the migrate service applied 18
+   migrations on a fresh database, `GET /api/bots` answered `401` without a
+   session and `200` with one, `GET /api/account` returned the six identity
+   fields, and a write through the web BFF succeeded while the same write
+   direct to the API with a mismatched `Origin` was refused `403 csrf_invalid`.
+   What remains owner-held is a **deployed** run: a host, a registry, an
+   immutable `HABI_IMAGE_TAG`, and the production flag decisions. A local boot
+   is evidence the stack is coherent, not that it survives a real deployment.
+
+   Note for whoever reproduces this: the images need more memory than the
+   2 GiB default this repository's Docker VM had — the build is OOM-killed
+   (exit 137) below roughly 4 GiB.
 
 Closed since this runbook was written, recorded so the history is traceable:
 
