@@ -167,10 +167,19 @@ browser; browser/mobile rendering remains a web-lane check.
 
 ## Residual risks and known gaps to carry into a real deployment
 
-1. **Sessions are non-durable.** They are in-memory and per-process, so a
-   restart drops every session. Backup restore therefore verifies ownership at
-   the data/service layer, not a replayed browser session. (#98 made one
-   session authority per process; durability is a separate, still-open gap.)
+1. **Sessions are durable where a database exists.** `0019_sessions.sql` stores
+   sessions behind the unchanged `SessionService` contract, keyed by the
+   SHA-256 verifier of the raw secret — never the secret itself, and the CSRF
+   token is stored only as a digest and compared in constant time. A session
+   minted in one process authenticates in a separately booted process against
+   the same database, which is the restart-survival evidence this risk asked
+   for. The store is an ordered write-behind cache: a hard kill can lose
+   writes not yet committed (a graceful stop flushes them), and a process
+   already running does not see another process's sessions until it restarts
+   and rehydrates — fine for the single-api-process stack, and the boundary is
+   stated in code for a future multi-replica design. `HABI_SESSION_STORE`
+   forces memory or postgres; the default is postgres when `DATABASE_URL` is
+   present and aborts boot when the mode is set but the database is not.
 2. **A hard worker kill leaves provider output after the last persisted event
    unrecoverable.** The Run becomes `execution_uncertain` and is not
    re-dispatched, to avoid duplicate paid work. A deliberate safety tradeoff,
