@@ -172,10 +172,18 @@ pnpm --filter @habi/web lint           # eslint + next core-web-vitals
 pnpm --filter @habi/web test           # server-rendered smoke assertions, fast and browser-free
 pnpm --filter @habi/web test:browser   # Chromium: 3 viewports x 2 themes x 11 routes + stateful tests
 node --test apps/web/test/api-proxy.test.mjs  # BFF forwarding, SSE, 401/5xx mapping, no origin leak
+pnpm --filter @habi/web test:browser:live     # Chromium against a stub API: the §2.1 live state matrix
 ```
 
-`test:browser` skips with the install command when Chromium is absent. A UI change is not done until
-both test commands pass and the affected route has been checked at 320, 768 and 1440 in light and dark.
+`test:browser` runs the preview matrix and skips with the install command when Chromium is absent.
+`test:browser:live` boots the built app against a settable stub upstream and covers the live half of
+§2.1 — 401, 5xx, unreachable, invalid config, attachment 503, the account disclosure and its
+disabled-until-match delete control, the editors' partial PATCH bodies, and stream reconnect. It
+assertes DOM and computed styles only; no screenshots.
+
+A UI change is not done until both test commands pass and the affected route has been checked at 320,
+768 and 1440 in light and dark — in **both** modes, because preview and live render different data and
+different failure states.
 
 ## 8. Adding something
 
