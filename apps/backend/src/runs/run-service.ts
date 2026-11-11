@@ -51,6 +51,18 @@ import {
 } from '../persistence/rows.js';
 import { RunIdempotencyConflictError, RunContextError } from './errors.js';
 import {
+  PROVIDER_CALL_EVENT,
+  RUN_DISPATCH_ACCEPTED_EVENT,
+  RUN_DISPATCH_SKIPPED_EVENT,
+  RUN_DUPLICATE_EVENT,
+  RUN_ENQUEUED_EVENT,
+  RUN_RESERVED_EVENT,
+  RUN_TERMINAL_EVENT,
+  correlateRun,
+  providerCallFields,
+  usageSummary,
+} from '../observability/run-telemetry.js';
+import {
   RunRepository,
   toRunView,
   type RecoveryScanFilter,
@@ -244,11 +256,48 @@ export interface RunServiceOptions {
   readonly events?: RunEventStore;
   readonly limits?: UsageLimitService;
   readonly logger?: RunSideEffectLogger;
+  /**
+   * Optional observability hooks. Logging/metrics calls only: the service
+   * never branches on these and never changes a transition because of them.
+   * When absent (for example in unit tests), the service stays silent and
+   * uncounted rather than constructing a default.
+   */
+  readonly telemetry?: RunTelemetryHooks;
+}
+
+/** Logging/metrics seam for run observability. All methods are best-effort. */
+export interface RunTelemetryHooks {
+  readonly events?: RunTelemetryEventLogger;
+  readonly metrics?: RunTelemetryMetrics;
+}
+
+export interface RunTelemetryEventLogger {
+  info(event: string, fields?: Record<string, unknown>): void;
+  warn(event: string, fields?: Record<string, unknown>): void;
+  error(event: string, fields?: Record<string, unknown>): void;
+}
+
+export interface RunTelemetryMetrics {
+  recordEnqueue(deduplicated: boolean): void;
+  recordDispatchAccepted(): void;
+  recordDispatchSkip(reason: string): void;
+  recordTerminal(status: string): void;
+  recordProviderCall(
+    outcome: 'success' | 'failure',
+    errorCode?: string,
+    retried?: boolean,
+  ): void;
+  recordQueueFailure(): void;
+  setQueueHealth(input: {
+    readonly depth: number;
+    readonly oldestAgeMs: number | null;
+  }): void;
 }
 
 export class RunService {
   private readonly repository: RunRepository;
   private readonly finalization: RunSideEffectDeps;
+  private readonly telemetry: RunTelemetryHooks;
 
   constructor(
     private readonly pool: Pool,
@@ -262,6 +311,7 @@ export class RunService {
       ...(options.limits === undefined ? {} : { limits: options.limits }),
       ...(options.logger === undefined ? {} : { logger: options.logger }),
     };
+    this.telemetry = options.telemetry ?? {};
   }
 
   /**
@@ -308,6 +358,7 @@ export class RunService {
     );
 
     if (existing !== null) {
+      this.observeEnqueue(existing.id, existing.conversation_id, true);
       return this.reuse(existing, fingerprint);
     }
 
@@ -317,6 +368,10 @@ export class RunService {
       idempotencyKey,
       requestFingerprint: fingerprint,
     });
+
+    if (reserved !== null) {
+      this.observeEnqueue(reserved.id, reserved.conversation_id, false);
+    }
 
     if (reserved === null) {
       // A concurrent submit won the unique constraint. Read it instead of
@@ -330,6 +385,7 @@ export class RunService {
         throw new Error('Run reservation disappeared after a unique conflict.');
       }
 
+      this.observeEnqueue(raced.id, raced.conversation_id, true);
       return this.reuse(raced, fingerprint);
     }
 
@@ -378,6 +434,7 @@ export class RunService {
     const current = await this.repository.loadOwnedRun(owner, id);
 
     if (isTerminalRunStatus(current.status)) {
+      this.observeDispatchSkip(current.id, current.conversation_id, 'terminal');
       return { run: toRunView(current), dispatched: false };
     }
 
@@ -385,10 +442,20 @@ export class RunService {
       // A durable cancellation intent wins over dispatch: the Run must never be
       // sent to the provider after the user asked to stop it. The worker's idle
       // sweep terminalizes this reservation.
+      this.observeDispatchSkip(
+        current.id,
+        current.conversation_id,
+        'cancel_requested',
+      );
       return { run: toRunView(current), dispatched: false };
     }
 
     if (current.dispatch_state !== 'not_dispatched') {
+      this.observeDispatchSkip(
+        current.id,
+        current.conversation_id,
+        'claimed_elsewhere',
+      );
       return { run: toRunView(current), dispatched: false };
     }
 
@@ -396,6 +463,11 @@ export class RunService {
 
     if (claimed === null) {
       const stored = await this.repository.loadOwnedRun(owner, id);
+      this.observeDispatchSkip(
+        stored.id,
+        stored.conversation_id,
+        isTerminalRunStatus(stored.status) ? 'terminal' : 'claimed_elsewhere',
+      );
       return { run: toRunView(stored), dispatched: false };
     }
 
@@ -410,8 +482,14 @@ export class RunService {
           runId: claimed.id,
           reason: error.message,
         });
+        this.observeDispatchSkip(
+          claimed.id,
+          claimed.conversation_id,
+          'invalid_context',
+        );
 
         const row = await this.failInvalidRequest(claimed);
+        this.observeTerminal(row);
         return { run: toRunView(row), dispatched: false };
       }
 
@@ -582,6 +660,7 @@ export class RunService {
     }
 
     await this.applyEffects(updated);
+    this.observeTerminal(updated);
     return { kind: 'terminal', run: toRunView(updated), errorCode: null };
   }
 
@@ -603,6 +682,7 @@ export class RunService {
 
     if (isTerminalRunStatus(failed.status)) {
       await this.applyEffects(failed);
+      this.observeTerminal(failed);
       return {
         kind: 'terminal',
         run: toRunView(failed),
@@ -657,6 +737,14 @@ export class RunService {
       updated ?? (await this.repository.loadOwnedRun(ownerUserId, runId));
 
     await this.applyEffects(finalRow);
+    this.observeProviderCall(
+      { id: runId, conversation_id: finalRow.conversation_id },
+      'success',
+      status === 'failed' ? 'provider_error' : null,
+      result.dispatchState,
+      usage,
+    );
+    this.observeTerminal(finalRow);
 
     return {
       kind: 'terminal',
@@ -851,6 +939,7 @@ export class RunService {
       updated ?? (await this.repository.loadOwnedRun(row.owner_user_id, row.id));
 
     await this.applyEffects(finalRow);
+    this.observeTerminal(finalRow);
 
     return {
       runId: row.id,
@@ -901,6 +990,8 @@ export class RunService {
           reserved.id,
         ));
       await this.applyEffects(row);
+      this.observeProviderCall(reserved, 'failure', 'harness_unavailable', 'unknown', unknownUsage());
+      this.observeTerminal(row);
       throw error;
     }
 
@@ -923,6 +1014,8 @@ export class RunService {
           reserved.id,
         ));
       await this.applyEffects(row);
+      this.observeProviderCall(reserved, 'success', null, 'unknown', unknownUsage());
+      this.observeTerminal(row);
       return { run: toRunView(row), dispatched: false };
     }
 
@@ -941,6 +1034,11 @@ export class RunService {
     if (updated === null) {
       // Another writer terminalized the Run between claim and acceptance.
       await this.applyEffects(row);
+      this.observeProviderCall(reserved, 'success', null, result.dispatchState, unknownUsage());
+      this.observeTerminal(row);
+    } else {
+      this.observeProviderCall(reserved, 'success', null, result.dispatchState, unknownUsage());
+      this.observeDispatchAccepted(reserved);
     }
 
     return {
@@ -984,6 +1082,14 @@ export class RunService {
       (await this.repository.loadOwnedRun(reserved.owner_user_id, reserved.id));
 
     await this.applyEffects(finalRow);
+    this.observeProviderCall(
+      reserved,
+      'failure',
+      error.code,
+      error.dispatchState,
+      usage,
+    );
+    this.observeTerminal(finalRow);
 
     return finalRow;
   }
@@ -1021,6 +1127,7 @@ export class RunService {
       (await this.repository.loadOwnedRun(row.owner_user_id, row.id));
 
     await this.applyEffects(finalRow);
+    this.observeTerminal(finalRow);
 
     return {
       runId: row.id,
@@ -1061,6 +1168,7 @@ export class RunService {
         (await this.repository.loadOwnedRun(row.owner_user_id, row.id));
 
       await this.applyEffects(finalRow);
+      this.observeTerminal(finalRow);
 
       return { kind: 'exhausted', run: toRunView(finalRow), errorCode: null };
     }
@@ -1081,6 +1189,7 @@ export class RunService {
       updated ?? (await this.repository.loadOwnedRun(row.owner_user_id, row.id));
 
     await this.applyEffects(finalRow);
+    this.observeTerminal(finalRow);
 
     return { kind: 'exhausted', run: toRunView(finalRow), errorCode };
   }
@@ -1158,6 +1267,132 @@ export class RunService {
 
   private applyEffects(row: RunRow): Promise<void> {
     return applyTerminalSideEffects(this.finalization, row);
+  }
+
+  /**
+   * Telemetry observers. Logging/metrics calls only: each one is guarded so a
+   * throwing hook can never change a transition, and the metrics call is
+   * issued before the log call so a broken sink still leaves the count.
+   */
+  private observeEnqueue(
+    runId: string,
+    conversationId: string | undefined,
+    deduplicated: boolean,
+  ): void {
+    try {
+      this.telemetry.metrics?.recordEnqueue(deduplicated);
+    } catch {
+      // Telemetry must never change a transition.
+    }
+
+    try {
+      const correlation = correlateRun(runId, conversationId);
+      this.telemetry.events?.info(
+        deduplicated ? RUN_DUPLICATE_EVENT : RUN_ENQUEUED_EVENT,
+        { ...correlation, deduplicated },
+      );
+      if (!deduplicated) {
+        this.telemetry.events?.info(RUN_RESERVED_EVENT, {
+          ...correlation,
+          dispatchState: 'not_dispatched',
+          status: 'queued',
+        });
+      }
+    } catch {
+      // Telemetry must never change a transition.
+    }
+  }
+
+  private observeDispatchAccepted(reserved: RunRow): void {
+    try {
+      this.telemetry.metrics?.recordDispatchAccepted();
+    } catch {
+      // Telemetry must never change a transition.
+    }
+
+    try {
+      this.telemetry.events?.info(RUN_DISPATCH_ACCEPTED_EVENT, {
+        ...correlateRun(reserved.id, reserved.conversation_id),
+        dispatchState: reserved.dispatch_state,
+      });
+    } catch {
+      // Telemetry must never change a transition.
+    }
+  }
+
+  private observeDispatchSkip(
+    runId: string,
+    conversationId: string | undefined,
+    reason: string,
+  ): void {
+    try {
+      this.telemetry.metrics?.recordDispatchSkip(reason);
+    } catch {
+      // Telemetry must never change a transition.
+    }
+
+    try {
+      this.telemetry.events?.info(RUN_DISPATCH_SKIPPED_EVENT, {
+        ...correlateRun(runId, conversationId),
+        reason,
+      });
+    } catch {
+      // Telemetry must never change a transition.
+    }
+  }
+
+  private observeTerminal(row: RunRow): void {
+    try {
+      this.telemetry.metrics?.recordTerminal(row.status);
+    } catch {
+      // Telemetry must never change a transition.
+    }
+
+    try {
+      this.telemetry.events?.info(RUN_TERMINAL_EVENT, {
+        ...correlateRun(row.id, row.conversation_id),
+        status: row.status,
+        dispatchState: row.dispatch_state,
+        ...(row.error_code === null ? {} : { errorCode: row.error_code }),
+      });
+    } catch {
+      // Telemetry must never change a transition.
+    }
+  }
+
+  private observeProviderCall(
+    reserved: Pick<RunRow, 'id' | 'conversation_id'>,
+    outcome: 'success' | 'failure',
+    errorCode: string | null,
+    dispatchState: string | null,
+    usage: PersistedRunUsage,
+  ): void {
+    const retried = false;
+
+    try {
+      this.telemetry.metrics?.recordProviderCall(
+        outcome,
+        errorCode ?? undefined,
+        retried,
+      );
+    } catch {
+      // Telemetry must never change a transition.
+    }
+
+    try {
+      this.telemetry.events?.info(
+        PROVIDER_CALL_EVENT,
+        providerCallFields(correlateRun(reserved.id, reserved.conversation_id), {
+          outcome,
+          errorCode,
+          dispatchState,
+          retried,
+          usage: usageSummary(usage),
+        }),
+      );
+    } catch {
+      // Telemetry must never change a transition.
+    }
   }
 
   private async readUsage(

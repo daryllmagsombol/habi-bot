@@ -18,6 +18,8 @@ const {
   UNSUPPORTED,
   sanitizeErrorMessage,
   safeError,
+  EMAIL_KEY_PATTERN,
+  FILE_KEY_PATTERN,
 } = await import('../dist/observability/structured-logger.js');
 const { normalizeObservabilityConfig, parseLogLevel } = await import(
   '../dist/observability/observability-config.js'
@@ -249,6 +251,65 @@ describe('redaction', () => {
     assert.equal(record.body, REDACTED);
     // A safe, low-cardinality correlation id survives in the clear.
     assert.equal(record.requestId, 'req-abc_123');
+  });
+
+  test('redacts filename and email keys without touching safe handles', () => {
+    const harness = createLogger();
+
+    harness.logger.info('test.pii_keys', {
+      fileName: 'my-divorce-papers.pdf',
+      file_name: 'secret-plan.docx',
+      filePath: '/home/user/secret.txt',
+      email: 'someone@example.com',
+      userEmail: 'other@example.org',
+      emailAddress: 'third@example.net',
+      runId: 'run-123',
+      requestId: 'req-abc_123',
+      conversationId: 'conv-456',
+    });
+
+    const record = onlyRecord(harness);
+    const serialized = harness.lines.join('');
+
+    for (const sentinel of [
+      'my-divorce-papers.pdf',
+      'secret-plan.docx',
+      '/home/user/secret.txt',
+      'someone@example.com',
+      'other@example.org',
+      'third@example.net',
+    ]) {
+      assert.equal(serialized.includes(sentinel), false, sentinel);
+    }
+
+    assert.equal(record.fileName, REDACTED);
+    assert.equal(record.file_name, REDACTED);
+    assert.equal(record.filePath, REDACTED);
+    assert.equal(record.email, REDACTED);
+    assert.equal(record.userEmail, REDACTED);
+    assert.equal(record.emailAddress, REDACTED);
+    // Safe correlation handles stay in the clear.
+    assert.equal(record.runId, 'run-123');
+    assert.equal(record.requestId, 'req-abc_123');
+    assert.equal(record.conversationId, 'conv-456');
+
+    assert.ok(EMAIL_KEY_PATTERN.test('email'), 'email pattern matches');
+    assert.ok(EMAIL_KEY_PATTERN.test('user_email'), 'user_email matches');
+    assert.ok(FILE_KEY_PATTERN.test('fileName'), 'filename matches');
+    assert.ok(FILE_KEY_PATTERN.test('file_path'), 'file_path matches');
+    assert.equal(FILE_KEY_PATTERN.test('file'), false, 'bare file stays content-keyed');
+    assert.equal(FILE_KEY_PATTERN.test('path'), false, 'bare path is not a filename');
+  });
+
+  test('scrubs inline email addresses from error messages', () => {
+    assert.equal(
+      sanitizeErrorMessage('notify someone@example.com about failure'),
+      'notify [redacted] about failure',
+    );
+    assert.equal(
+      sanitizeErrorMessage('contact a@b.co and c.d@e-f.gov.uk now'),
+      'contact [redacted] and [redacted] now',
+    );
   });
 
   test('is cycle-safe for objects and arrays', () => {

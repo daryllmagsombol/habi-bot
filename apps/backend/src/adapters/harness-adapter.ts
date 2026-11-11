@@ -223,6 +223,36 @@ export type FailureCode =
   | 'timeout'
   | 'harness_unavailable';
 
+/**
+ * Closed failure-code vocabulary for telemetry labels. Anything outside the
+ * adapter contract collapses to `other_error` so a new vendor string can
+ * never multiply Prometheus series.
+ */
+export type ProviderTelemetryCode = FailureCode | 'other_error';
+
+const KNOWN_PROVIDER_CODES: readonly string[] = Object.freeze([
+  'auth_rejected',
+  'invalid_request',
+  'policy_denied',
+  'idempotency_conflict',
+  'transport_ambiguous',
+  'provider_error',
+  'provider_rate_limited',
+  'provider_exhausted',
+  'timeout',
+  'harness_unavailable',
+]);
+
+/**
+ * Normalizes one adapter failure code to the closed telemetry vocabulary.
+ * Logging/metrics helper only: it never changes a dispatch decision, and it
+ * accepts `unknown` so callers do not need a cast to log safely.
+ */
+export function normalizeProviderCode(code: string): ProviderTelemetryCode {
+  const found = KNOWN_PROVIDER_CODES.find((value) => value === code);
+  return (found ?? 'other_error') as ProviderTelemetryCode;
+}
+
 export interface HarnessAdapterErrorOptions {
   readonly message?: string;
   readonly httpStatus?: number;
