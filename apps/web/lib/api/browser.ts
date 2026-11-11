@@ -552,6 +552,75 @@ function isGap(value: unknown): value is GapDto {
 }
 
 /**
+ * SSE resume plus its polling fallback share one cursor contract:
+ * `afterSeq` is an exclusive sequence. The SSE path carries it as a
+ * `Last-Event-ID`/`?seq=` frame id; the polling path carries it as
+ * `?after=`. `advancePollCursor` is the one place the polling client updates
+ * the cursor, so the two paths can never disagree about what "next" means.
+ */
+export interface RunEventPollPageDto {
+  readonly runId: string;
+  readonly afterSeq: number;
+  readonly events: readonly RunEventDto[];
+  readonly hasMore: boolean;
+  readonly lastEventSeq: number;
+  readonly terminalEventSeq: number | null;
+}
+
+/** Next cursor after applying a page; strictly after every seen event. */
+export function advancePollCursor(
+  page: Pick<RunEventPollPageDto, 'afterSeq' | 'events'>,
+): number {
+  let cursor = page.afterSeq;
+
+  for (const event of page.events) {
+    if (event.seq > cursor) {
+      cursor = event.seq;
+    }
+  }
+
+  return cursor;
+}
+
+/**
+ * The set of sequences already shown, for the polling caller's own dedupe.
+ * Matching the stream path's `(runId, seq)` delivery rule, an event re-seen
+ * because the cursor lagged behind does not become duplicate visible output.
+ */
+export function unseenPollEvents(
+  page: Pick<RunEventPollPageDto, 'events'>,
+  seen: ReadonlySet<number>,
+): RunEventDto[] {
+  return page.events.filter((event) => !seen.has(event.seq));
+}
+
+/**
+ * One JSON page from `GET /api/runs/:runId/events?after=<seq>&limit=<n>`.
+ *
+ * The caller owns the loop and its backoff — poll, apply `advancePollCursor`
+ * (and record the applied sequences for `unseenPollEvents`), wait, repeat —
+ * which keeps the retry and terminal states visible in one place, exactly
+ * like the `subscribeRun` error/end contract. Terminal events arrive as a
+ * final replayable page; stop when one is applied.
+ */
+export function pollRunEvents(
+  runId: string,
+  afterSeq: number,
+  limit?: number,
+): Promise<RunEventPollPageDto> {
+  const params = new URLSearchParams({ after: String(afterSeq) });
+
+  if (limit !== undefined) {
+    params.set('limit', String(limit));
+  }
+
+  return requestJson<RunEventPollPageDto>(
+    `/api/runs/${encodeURIComponent(runId)}/events?${params.toString()}`,
+    { method: 'GET', headers: { accept: 'application/json' } },
+  );
+}
+
+/**
  * One connection to `GET /api/runs/:runId/events`.
  *
  * `lastEventId` is the exact `id:` value of the last applied frame, so the
