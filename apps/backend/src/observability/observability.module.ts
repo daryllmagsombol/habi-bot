@@ -27,7 +27,7 @@
 import { Module } from '@nestjs/common';
 import type { DynamicModule } from '@nestjs/common';
 import { HttpExceptionFilter } from './http-exception.filter.js';
-import { RequestMetrics } from './metrics.js';
+import { RequestMetrics, RunMetrics } from './metrics.js';
 import { normalizeObservabilityConfig, OBSERVABILITY_CONFIG } from './observability-config.js';
 import type { ObservabilityModuleOptions } from './observability-config.js';
 import { RequestLoggingMiddleware } from './request-logging.middleware.js';
@@ -44,6 +44,7 @@ export class ObservabilityModule {
         { provide: OBSERVABILITY_CONFIG, useValue: config },
         StructuredLogger,
         RequestMetrics,
+        RunMetrics,
         RequestLoggingMiddleware,
         HttpExceptionFilter,
       ],
@@ -51,6 +52,7 @@ export class ObservabilityModule {
         OBSERVABILITY_CONFIG,
         StructuredLogger,
         RequestMetrics,
+        RunMetrics,
         RequestLoggingMiddleware,
         HttpExceptionFilter,
       ],

@@ -40,6 +40,21 @@ export const SENSITIVE_KEY_PATTERN =
   /authorization|cookie|password|passwd|secret|token|api[-_]?key|credential|private[-_]?key/i;
 
 /**
+ * Contact-identifier keys. Case-insensitive and substring-matched, so `email`,
+ * `Email`, `user_email`, and `emailAddress` all match. Values are replaced
+ * wholesale: an address is PII, never diagnostic.
+ */
+export const EMAIL_KEY_PATTERN = /email/i;
+
+/**
+ * Filename keys. Substring-matched, so `filename`, `fileName`, `file_name`,
+ * `filepath`, and `file_path` all match. A filename can carry user content
+ * (`my-divorce-papers.pdf`), so it is replaced wholesale. Bare `file`/`files`
+ * stay under CONTENT_KEY_PATTERN; bare `path` is too generic to claim.
+ */
+export const FILE_KEY_PATTERN = /file[_-]?name|filepath|file[_-]?path/i;
+
+/**
  * Whole-key content markers. Whole-key matching keeps `contentLength` or
  * `errorMessage` diagnostic while still dropping request/response payloads.
  */
@@ -109,6 +124,10 @@ export function sanitizeErrorMessage(message: string): string {
     .replaceAll(
       /\b(password|passwd|secret|token|api[-_]?key)=([^&\s]+)/gi,
       '$1=[redacted]',
+    )
+    .replaceAll(
+      /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g,
+      '[redacted]',
     );
 
   return truncate(scrubbed, MAX_MESSAGE_LENGTH);
@@ -394,6 +413,11 @@ function redactObject(
     }
 
     if (SENSITIVE_KEY_PATTERN.test(key) || CONTENT_KEY_PATTERN.test(key)) {
+      output[key] = REDACTED;
+      continue;
+    }
+
+    if (EMAIL_KEY_PATTERN.test(key) || FILE_KEY_PATTERN.test(key)) {
       output[key] = REDACTED;
       continue;
     }
