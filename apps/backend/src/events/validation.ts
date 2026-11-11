@@ -111,6 +111,27 @@ export function normalizeReplayLimit(
   return Math.min(limit, maximum);
 }
 
+/**
+ * HTTP polling page bound. The store default (200) would let one fallback
+ * request materialize a large transcript; the polling transport keeps pages
+ * small (default 50, ceiling 200) and the client follows `hasMore`.
+ */
+export const DEFAULT_POLL_LIMIT = 50;
+/** Hard ceiling for one polling page. */
+export const MAX_POLL_LIMIT = 200;
+
+export function normalizePollLimit(limit: unknown): number {
+  if (limit === undefined) {
+    return DEFAULT_POLL_LIMIT;
+  }
+
+  if (typeof limit !== 'number' || !Number.isSafeInteger(limit) || limit < 1) {
+    throw new PersistenceValidationError('invalid_input');
+  }
+
+  return Math.min(limit, MAX_POLL_LIMIT);
+}
+
 export interface DecodedRunEventCursor {
   runId: string;
   afterSeq: number;

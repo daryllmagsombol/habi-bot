@@ -18,15 +18,18 @@ export {
 } from './run-event-stream.js';
 export {
   DEFAULT_EVENT_REPLAY_LIMIT,
+  DEFAULT_POLL_LIMIT,
   MAX_EVENT_CURSOR_LENGTH,
   MAX_EVENT_PAYLOAD_BYTES,
   MAX_EVENT_REPLAY_LIMIT,
   MAX_EVENT_TYPE_LENGTH,
+  MAX_POLL_LIMIT,
   decodeRunEventCursor,
   encodeRunEventCursor,
   normalizeAfterSeq,
   normalizeEventId,
   normalizeEventType,
+  normalizePollLimit,
   normalizeReplayLimit,
   serializeEventPayload,
 } from './validation.js';

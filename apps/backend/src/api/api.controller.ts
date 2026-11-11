@@ -53,6 +53,12 @@ import {
   readResumeAfterSeq,
   writeChunk,
 } from './api-sse.js';
+import {
+  isRunEventPollRequest,
+  readRunEventPollQuery,
+  sendRunEventPollPage,
+  toRunEventPollPage,
+} from './api-events.js';
 import type { BotDetail } from './api-projection.js';
 import type { BotThreadPage, ListBotThreadsOptions } from './api-repository.js';
 import type { BotStatus } from '../bots/types.js';
@@ -224,9 +230,12 @@ export class ApiController {
   }
 
   /**
-   * SSE replay plus live delivery. Ownership is resolved before any header is
-   * written, so a foreign/unknown Run is a normal 404 envelope rather than a
-   * half-open event stream. From then on, failures end the response.
+   * SSE replay plus live delivery, or the JSON polling fallback. Ownership is
+   * resolved before any query is parsed, so a foreign/unknown Run is a normal
+   * 404 envelope and a bare `?after=` probe cannot distinguish malformed ids.
+   * When `Accept: application/json` (without the SSE type) or an `after`/`limit`
+   * query names polling, the same owned store page is answered as JSON instead
+   * of opening a stream; a bare request without either stays on SSE.
    */
   @Get('runs/:runId/events')
   async streamRunEvents(
@@ -237,6 +246,25 @@ export class ApiController {
     const { userId } = requireSession(request);
     const service = this.runtime.getService();
     const position = await service.events.loadPosition(userId, runId);
+
+    if (isRunEventPollRequest(request)) {
+      const poll = readRunEventPollQuery(request);
+
+      // A cursor beyond this Run's stream cannot have come from it.
+      if (poll.afterSeq > position.lastEventSeq) {
+        throw new PersistenceNotFoundError();
+      }
+
+      const page = await service.events.read(userId, runId, {
+        afterSeq: poll.afterSeq,
+        limit: poll.limit,
+      });
+
+      sendRunEventPollPage(response, toRunEventPollPage(page));
+
+      return;
+    }
+
     const afterSeq = readResumeAfterSeq(request, runId);
 
     // A cursor beyond this Run's stream cannot have come from it.
