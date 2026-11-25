@@ -2,6 +2,7 @@ import 'reflect-metadata';
 import { ShutdownSignal } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module.js';
+import { HttpExceptionFilter } from './observability/http-exception.filter.js';
 
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT = 3001;
@@ -35,6 +36,12 @@ async function bootstrap(): Promise<void> {
   const host = readHost(process.env.HOST);
   const port = readPort(process.env.PORT);
   const app = await NestFactory.create(AppModule, { logger: false });
+
+  // Catch-all fallback. Controller-scoped filters (ApiErrorFilter on the P1
+  // controllers) still win for the error families they declare; this one owns
+  // everything else, so an unexpected throw becomes a coded 5xx with a
+  // request id instead of a stack trace.
+  app.useGlobalFilters(app.get(HttpExceptionFilter));
 
   app.enableShutdownHooks([ShutdownSignal.SIGTERM, ShutdownSignal.SIGINT], {
     useProcessExit: true,

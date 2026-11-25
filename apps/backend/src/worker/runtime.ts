@@ -13,6 +13,11 @@
 import { HermesHttpAdapter } from '../adapters/hermes-http-adapter.js';
 import { RunEventStore } from '../events/index.js';
 import { UsageLimitService } from '../limits/index.js';
+import { RunMetrics } from '../observability/metrics.js';
+import {
+  normalizeObservabilityConfig,
+} from '../observability/observability-config.js';
+import { StructuredLogger } from '../observability/structured-logger.js';
 import { createPersistencePool } from '../persistence/database.js';
 import {
   readDatabaseUrl,
@@ -66,6 +71,19 @@ export async function createWorkerRuntime(): Promise<WorkerRuntimeHandle> {
   const events = new RunEventStore(pool);
   const limits = new UsageLimitService(pool);
   const workerRepository = new WorkerRunRepository(pool);
+
+  // H-013 run telemetry: the same interfaces the API resolves through Nest,
+  // constructed plainly here because the worker runtime is deliberately not a
+  // Nest context. `normalizeObservabilityConfig` is what makes HABI_LOG_LEVEL
+  // meaningful in a worker container instead of being ignored.
+  const observability = normalizeObservabilityConfig({
+    service: 'worker',
+  });
+  const telemetry = {
+    events: new StructuredLogger(observability),
+    metrics: new RunMetrics(observability),
+  };
+
   const dispatcher = new RunDispatcher({
     pool,
     adapter,
@@ -74,6 +92,7 @@ export async function createWorkerRuntime(): Promise<WorkerRuntimeHandle> {
     limits,
     logger,
     leaseMs: config.leaseMs,
+    telemetry,
   });
   const runner = new WorkerRunner({
     pool,
@@ -81,6 +100,7 @@ export async function createWorkerRuntime(): Promise<WorkerRuntimeHandle> {
     workerRepository,
     logger,
     config,
+    metrics: telemetry.metrics,
   });
 
   try {

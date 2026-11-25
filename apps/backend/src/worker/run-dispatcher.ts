@@ -55,6 +55,7 @@ import type {
   RunRow,
   RunFailureOutcome,
   RunSideEffectDeps,
+  RunTelemetryHooks,
 } from '../runs/index.js';
 import { normalizeUsage, unknownUsage } from '../runs/usage.js';
 import type { PersistedRunUsage } from '../runs/usage.js';
@@ -104,6 +105,13 @@ export interface RunDispatcherOptions {
   readonly limits: UsageLimitService;
   readonly logger: WorkerLogger;
   readonly leaseMs: number;
+  /**
+   * Optional run/provider telemetry (H-013). Forwarded untouched into the
+   * `RunService`; absent means the service stays silent and uncounted rather
+   * than inventing a sink. Logging and metrics only: no call here decides a
+   * transition.
+   */
+  readonly telemetry?: RunTelemetryHooks;
 }
 
 const HEARTBEAT_FLOOR_MS = 250;
@@ -177,6 +185,9 @@ export class RunDispatcher {
       events: options.events,
       limits: options.limits,
       logger: options.logger,
+      ...(options.telemetry === undefined
+        ? {}
+        : { telemetry: options.telemetry }),
     });
     this.effects = {
       repository: this.runs,

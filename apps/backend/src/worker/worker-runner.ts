@@ -18,6 +18,7 @@
  * possibly-paid call.
  */
 import type { Pool } from 'pg';
+import type { RunMetrics } from '../observability/metrics.js';
 import { RunRepository } from '../runs/run-repository.js';
 import type { RunRow } from '../runs/run-repository.js';
 import type { RunRecoverySummary } from '../runs/types.js';
@@ -34,6 +35,11 @@ export interface WorkerRunnerOptions {
   readonly workerRepository: WorkerRunRepository;
   readonly logger: WorkerLogger;
   readonly config: WorkerLoopConfig;
+  /**
+   * Optional in-process run metrics (H-013). When absent — tests that do not
+   * assert telemetry — the loop runs identically and counts nothing.
+   */
+  readonly metrics?: RunMetrics;
 }
 
 export class WorkerRunner {
@@ -123,6 +129,7 @@ export class WorkerRunner {
         if (claimed === 0) {
           await this.processCancels();
           await this.sweepIfDue();
+          await this.refreshQueueHealth();
 
           if (this.stopping) {
             break;
@@ -169,6 +176,8 @@ export class WorkerRunner {
 
       this.options.logger.log({ event: 'run.claimed', runId: run.id });
 
+      this.options.metrics?.beginDispatch();
+
       const task = this.options.dispatcher
         .dispatch(run, this.shutdownController.signal)
         .catch((error: unknown) => {
@@ -179,6 +188,7 @@ export class WorkerRunner {
           });
         })
         .finally(() => {
+          this.options.metrics?.endDispatch();
           this.tasks.delete(run.id);
           this.wakeLoop();
         });
@@ -257,6 +267,35 @@ export class WorkerRunner {
       });
     } finally {
       this.sweeping = false;
+    }
+  }
+
+  /**
+   * Publishes queue depth and oldest-wait gauges for the idle iteration.
+   *
+   * Observability only: a failed read is logged at the worker's own log sink
+   * and never propagates, so a telemetry problem cannot stall the claim loop
+   * or leave work unclaimed. Skipped entirely when no metrics sink was wired.
+   */
+  private async refreshQueueHealth(): Promise<void> {
+    const metrics = this.options.metrics;
+
+    if (metrics === undefined) {
+      return;
+    }
+
+    try {
+      const health = await this.options.workerRepository.readQueueHealth();
+
+      metrics.setQueueHealth({
+        depth: health.depth,
+        oldestAgeMs: health.oldestAgeMs,
+      });
+    } catch (error) {
+      this.options.logger.log({
+        event: 'worker.queue_health_failed',
+        message: error instanceof Error ? error.name : 'unknown_error',
+      });
     }
   }
 
