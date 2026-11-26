@@ -5,6 +5,32 @@ using the H-013 run observability slice. All telemetry here is logging and
 in-process counters only: there is no alert destination, no retention number,
 and no log stack in this slice.
 
+## What is wired now
+
+Wiring was previously missing: the module existed but `AppModule` imported no
+observability module, `main.ts` registered no global filter, and the worker
+built `RunService` with no telemetry, so every transition hook was a no-op in a
+running process. That gap is closed:
+
+| Surface | Wired where | What it does |
+| --- | --- | --- |
+| `ObservabilityModule.forRoot({ service: 'api' })` | `apps/backend/src/app.module.ts` | Resolves one logger, request metrics, run metrics, middleware, and filter per API process |
+| `RequestLoggingMiddleware` | `AppModule.configure()`, all routes | Assigns/propagates `x-request-id`, echoes it, emits one terminal line per request |
+| `HttpExceptionFilter` | `main.ts` as the global filter | Coded 5xx envelope with a request id, no stack or internal message |
+| `StructuredLogger` + `RunMetrics` (`service: 'worker'`) | `apps/backend/src/worker/runtime.ts` | Constructed plainly (the worker is not a Nest context) and passed as `RunService` telemetry |
+| `RunDispatcherOptions.telemetry` | `apps/backend/src/worker/run-dispatcher.ts` | Forwards the worker telemetry into `RunService` |
+| Queue gauges | `WorkerRunner.refreshQueueHealth()` on idle iterations | Depth and oldest wait from one bounded aggregate over the same predicate the claim uses |
+| Worker saturation | `RunMetrics.beginDispatch`/`endDispatch` around each dispatch task | `habi_worker_in_flight` |
+| `HABI_LOG_LEVEL` | `normalizeObservabilityConfig` in both processes | Now actually selects the log threshold instead of being ignored |
+
+Still open, deliberately: there is **no `/metrics` HTTP route and no scrape
+endpoint**. Exposing process counters is a decision with a security surface, so
+it stays an owner call rather than something this wiring added. Retention,
+alerting, and deployed-environment evidence also remain open on #13.
+
+`ObservabilityModule` is intentionally **not** feature-flagged. Gating it would
+mean an unobserved deployment, which is the gap this wiring closed.
+
 ## Correlation model
 
 Every run transition log carries up to three handles:

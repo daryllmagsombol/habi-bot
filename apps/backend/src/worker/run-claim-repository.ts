@@ -61,6 +61,33 @@ const CLAIM_BATCH = `SELECT id, owner_user_id
   LIMIT $1`;
 
 /**
+ * One bounded aggregate for the queue gauges. It reads the same predicate as
+ * `CLAIM_BATCH` (queued, never dispatched, no cancel intent), so the depth is
+ * the work this worker would claim next rather than every row in the table.
+ * A single-row aggregate over an indexed predicate is cheap enough to run on
+ * idle iterations; nothing here scans message or event history.
+ */
+const QUEUE_HEALTH = `SELECT COUNT(*)::int AS depth,
+       CASE
+         WHEN COUNT(*) = 0 THEN NULL
+         ELSE EXTRACT(EPOCH FROM (now() - MIN(created_at))) * 1000
+       END AS oldest_age_ms
+   FROM runs
+  WHERE status = 'queued'
+    AND dispatch_state = 'not_dispatched'
+    AND cancel_requested_at IS NULL`;
+
+export interface QueueHealth {
+  readonly depth: number;
+  readonly oldestAgeMs: number | null;
+}
+
+interface QueueHealthRow {
+  depth: number;
+  oldest_age_ms: number | null;
+}
+
+/**
  * Extends the lease and returns the cancellation intent in the same round trip.
  * The heartbeat is the owning worker's observation point for a user-requested
  * stop, so the intent is read exactly where liveness is already proven.
@@ -96,6 +123,34 @@ interface HeartbeatRow {
 
 export class WorkerRunRepository {
   constructor(private readonly pool: Pool) {}
+
+  /**
+   * Bounded queue-health read: how many Runs are waiting and how long the
+   * oldest has waited. Same predicate as `CLAIM_BATCH`, so the gauge describes
+   * exactly the work this worker would claim next. Age is computed by the
+   * database clock, never the worker's, so a skewed host cannot report a
+   * negative wait.
+   */
+  async readQueueHealth(): Promise<QueueHealth> {
+    const result = await this.pool.query<QueueHealthRow>(QUEUE_HEALTH);
+
+    const row = result.rows[0];
+
+    if (row === undefined) {
+      return { depth: 0, oldestAgeMs: null };
+    }
+
+    const depth = Number(row.depth);
+    const oldest = row.oldest_age_ms === null
+      ? null
+      : Math.max(0, Number(row.oldest_age_ms));
+
+    return {
+      depth: Number.isSafeInteger(depth) && depth >= 0 ? depth : 0,
+      oldestAgeMs:
+        oldest === null || !Number.isFinite(oldest) ? null : oldest,
+    };
+  }
 
   /**
    * Selects queued, never-dispatched Runs. The caller must still dispatch

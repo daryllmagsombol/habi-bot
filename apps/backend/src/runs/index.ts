@@ -26,7 +26,7 @@ export type {
   RunRow,
 } from './run-repository.js';
 export { RunService } from './run-service.js';
-export type { RunServiceOptions } from './run-service.js';
+export type { RunServiceOptions, RunTelemetryHooks } from './run-service.js';
 export { normalizeUsage, unknownUsage } from './usage.js';
 export type { PersistedRunUsage } from './usage.js';
 export {
