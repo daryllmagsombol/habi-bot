@@ -135,18 +135,20 @@ export class WorkerRunRepository {
     const result = await this.pool.query<QueueHealthRow>(QUEUE_HEALTH);
 
     const row = result.rows[0];
-    const depth = row === undefined ? 0 : Number(row.depth);
-    const oldestMillis =
-      row === undefined || row.oldest_age_ms === null
-        ? null
-        : Math.max(0, Number(row.oldest_age_ms));
+
+    if (row === undefined) {
+      return { depth: 0, oldestAgeMs: null };
+    }
+
+    const depth = Number(row.depth);
+    const oldest = row.oldest_age_ms === null
+      ? null
+      : Math.max(0, Number(row.oldest_age_ms));
 
     return {
       depth: Number.isSafeInteger(depth) && depth >= 0 ? depth : 0,
       oldestAgeMs:
-        oldestMillis === null || !Number.isFinite(oldestMillis)
-          ? null
-          : oldestMillis,
+        oldest === null || !Number.isFinite(oldest) ? null : oldest,
     };
   }
 
